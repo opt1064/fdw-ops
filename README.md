@@ -27,7 +27,8 @@ ROS 2 / DDS 등 미들웨어를 통해 전체 공정을 운영하는 구조를 �
 | Level | 목표 | 백엔드 | 구현 상태 |
 |-------|------|--------|----------|
 | **1. Discrete Event** | FDW-OPS 운영체계 검증 (라우팅/버퍼/병목) | Pure Python | ✅ PoC-1 완료 |
-| **2. Robot-in-the-loop** | 로봇/AMR/충돌/접근성 검증 | Isaac Sim 5.x | 🔧 골격 준비됨 |
+| **2. USD 시각화 (Level 2.0)** | 셀 / 로봇팔 / AMR / 부품 USD 표현 + transfer 애니메이션 | Isaac Sim 5.x | ✅ 구현 완료 |
+| **2.x Robot-in-the-loop** | 실 로봇 USD 모델 / IK / 충돌 / 접근성 | Isaac Sim 5.x | 🔧 다음 단계 |
 | **3. AI / Learning-in-the-loop** | RL 라우팅 / 합성데이터 / 자율복구 | Isaac Lab + SDG | 🔭 다음 단계 |
 
 ## 디렉토리 구조
@@ -54,8 +55,14 @@ fdw_sim/
 ├── assets/            # USD/URDF 자산 (Level 2 이상)
 └── logs/              # KPI/시뮬레이션 로그 출력
 
-scripts/run_poc1.py    # PoC-1 메인 실행 스크립트
-tests/test_poc1_smoke.py  # 회귀 테스트
+├── visualization/    # USD 시각화 (Level 2)
+│   ├── scene_builder.py        # USD prim 생성 (셀/AMR/부품)
+│   └── workshop_visualizer.py  # 셀 상태 → USD 매핑
+
+scripts/run_poc1.py            # PoC-1 메인 실행 스크립트 (discrete/isaac)
+scripts/run_poc1_level2.py     # PoC-1 Level 2 시각화 데모
+tests/test_poc1_smoke.py       # discrete 모드 회귀 테스트
+tests/test_visualization_smoke.py  # 시각화 모듈 회귀 테스트
 ```
 
 ## 빠른 시작
@@ -82,7 +89,7 @@ python scripts/run_poc1.py --mode discrete
   ...
 ```
 
-### 2. Isaac Sim 모드 (AGX Thor + isaac_sim conda 환경)
+### 2. Isaac Sim 모드 — 헤드리스 (AGX Thor + isaac_sim conda 환경)
 
 ```bash
 conda activate isaac_sim
@@ -91,10 +98,23 @@ ACCEPT_EULA=Y PRIVACY_CONSENT=Y python scripts/run_poc1.py --mode isaac --headle
 
 > 첫 실행 시 셰이더 컴파일 등으로 1~5분 소요될 수 있습니다.
 
-### 3. 회귀 테스트
+### 3. Isaac Sim Level 2 — USD 시각화 (셀·로봇팔·AMR·부품)
 
 ```bash
-python tests/test_poc1_smoke.py
+# 본체 모니터에서 GUI 모드
+ACCEPT_EULA=Y PRIVACY_CONSENT=Y python scripts/run_poc1_level2.py --gui --realtime
+
+# 원격 PC에서 WebRTC 스트리밍 (브라우저)
+ACCEPT_EULA=Y PRIVACY_CONSENT=Y python scripts/run_poc1_level2.py --livestream 2
+```
+
+자세한 시각화 가이드: [docs/LEVEL2_VISUALIZATION.md](docs/LEVEL2_VISUALIZATION.md)
+
+### 4. 회귀 테스트
+
+```bash
+python tests/test_poc1_smoke.py            # discrete 모드 회귀
+python tests/test_visualization_smoke.py   # 시각화 모듈 검증
 ```
 
 ## 표준 메시지 스키마

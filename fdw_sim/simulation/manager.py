@@ -55,6 +55,10 @@ class SimulationConfig:
     livestream: int = 0  # 0=off, 1=Native, 2=WebRTC
     isaac_app_kwargs: Dict[str, Any] = field(default_factory=dict)
 
+    # 시각화 (mode == "isaac" 일 때만 사용)
+    enable_visualization: bool = True
+    transfer_anim_duration_sec: float = 2.0
+
 
 # =============================================================================
 # Manager
@@ -100,6 +104,10 @@ class SimulationManager:
         # Isaac Sim 핸들 (mode == "isaac")
         self._isaac_app = None
         self._isaac_world = None
+        self._isaac_launcher = None
+
+        # 시각화 (mode == "isaac" + enable_visualization)
+        self.visualizer = None  # WorkshopVisualizer (lazy)
 
         # 상태
         self._sim_time: float = 0.0
@@ -109,6 +117,9 @@ class SimulationManager:
         # 사용자 정의 step hook
         self._step_hooks: List[Callable[[float, float], None]] = []
 
+        # 셀 위치 캐시 (시각화에서 사용)
+        self._cell_locations: Dict[str, tuple] = {}
+
     # =========================================================================
     # 셀 등록
     # =========================================================================
@@ -117,6 +128,8 @@ class SimulationManager:
         self.cells[cell.cell_id] = cell
         cell.cell_locations[cell.cell_id] = CellLocation(cell.cell_id, location)
         self.orchestrator.register_cell(cell)
+        # 시각화 좌표는 3D (z=0)
+        self._cell_locations[cell.cell_id] = (location[0], location[1], 0.0)
         logger.info("[SIM] material cell %s registered @ %s", cell.cell_id, location)
 
     def register_cell(self, cell: DistributedIntelligenceCell, location: tuple = (0.0, 0.0)) -> None:
@@ -126,6 +139,7 @@ class SimulationManager:
         if self.material_cell is not None:
             self.material_cell.register_cell(cell, CellLocation(cell.cell_id, location))
         self.orchestrator.register_cell(cell)
+        self._cell_locations[cell.cell_id] = (location[0], location[1], 0.0)
         logger.info("[SIM] cell %s registered @ %s", cell.cell_id, location)
 
     def add_step_hook(self, hook: Callable[[float, float], None]) -> None:
@@ -200,6 +214,72 @@ class SimulationManager:
         self._isaac_world.scene.add_default_ground_plane()
         self._isaac_world.reset()
 
+        # 3) 시각화 빌드 (옵션)
+        if self.config.enable_visualization:
+            self._build_visualization()
+
+    def _build_visualization(self) -> None:
+        """Isaac Sim 시작 후 USD 시각화 구성."""
+        try:
+            from fdw_sim.visualization.workshop_visualizer import (
+                WorkshopVisualizer, WorkshopVizConfig,
+            )
+        except Exception as e:
+            logger.warning("[SIM] visualization disabled (import failed: %s)", e)
+            return
+
+        viz_cfg = WorkshopVizConfig(
+            transfer_duration_sec=self.config.transfer_anim_duration_sec,
+        )
+        self.visualizer = WorkshopVisualizer(bus=self.bus, config=viz_cfg)
+
+        # 셀 등록 (이미 register_cell 단계에서 _cell_locations에 저장됨)
+        for cell_id, cell in self.cells.items():
+            ctype = cell.config.cell_type.value if hasattr(cell.config, "cell_type") else "default"
+            pos = self._cell_locations.get(cell_id, (0.0, 0.0, 0.0))
+            self.visualizer.register_cell(cell_id, cell_type=ctype, position=pos)
+
+        # AMR 등록 (MaterialCell의 AMR들)
+        if self.material_cell is not None:
+            for i, amr in enumerate(self.material_cell.amrs):
+                amr_id = getattr(amr, "amr_id", f"AMR_{i:02d}")
+                # AMR을 MaterialCell 옆에 배치
+                mat_pos = self._cell_locations.get(self.material_cell.cell_id, (0.0, 0.0, 0.0))
+                amr_pos = (mat_pos[0] - 1.5 + i * 0.7, mat_pos[1] - 1.5, 0.0)
+                self.visualizer.register_amr(amr_id, position=amr_pos)
+            self.visualizer.attach_material_cell(self.material_cell)
+
+        # USD 스테이지에 빌드
+        self.visualizer.build_scene()
+
+        # transfer 이벤트 구독 — 부품 이동 애니메이션 트리거
+        self._setup_transfer_visualization()
+
+    def _setup_transfer_visualization(self) -> None:
+        """MaterialCell의 transfer 완료 이벤트를 시각화에 연결."""
+        if self.visualizer is None:
+            return
+
+        from fdw_sim.messaging.bus import Topics
+
+        def on_transfer(msg) -> None:
+            """MATERIAL_TRANSFER 토픽 콜백."""
+            try:
+                # MaterialTransferCommand는 dataclass
+                part_id = getattr(msg, "part_id", None)
+                from_cell = getattr(msg, "from_cell", None)
+                to_cell = getattr(msg, "to_cell", None)
+                if part_id and to_cell:
+                    self.visualizer.transfer_part(
+                        part_id,
+                        from_cell or self.material_cell.cell_id,
+                        to_cell,
+                    )
+            except Exception:
+                logger.exception("transfer visualization hook failed")
+
+        self.bus.subscribe(Topics.MATERIAL_TRANSFER, on_transfer)
+
     def stop(self) -> None:
         if not self._running:
             return
@@ -228,7 +308,14 @@ class SimulationManager:
         # 3) 오케스트레이터 step
         self.orchestrator.step(dt, self._sim_time)
 
-        # 4) 사용자 hook
+        # 4) 시각화 업데이트 (Isaac mode + visualization enabled)
+        if self.visualizer is not None:
+            try:
+                self.visualizer.update(dt, self._sim_time)
+            except Exception:
+                logger.exception("visualizer update failed")
+
+        # 5) 사용자 hook
         for hook in self._step_hooks:
             try:
                 hook(dt, self._sim_time)
