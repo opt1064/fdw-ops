@@ -1,0 +1,76 @@
+# PoC-1 시뮬레이션 설정
+# Material Cell + Welding Cell + Inspection Cell
+
+simulation:
+  mode: discrete            # "discrete" | "isaac"
+  physics_hz: 60.0
+  max_sim_time_sec: 600.0
+  realtime: false
+  headless: true
+  log_dir: ./fdw_sim/logs
+  run_name: null            # null이면 자동 타임스탬프
+
+orchestrator:
+  decision_period_sec: 0.2
+  material_cell_id: MATERIAL_CELL_01
+  process_to_cell:
+    welding:    WELDING_CELL_01
+    inspection: INSPECTION_CELL_01
+
+cells:
+  material:
+    cell_id: MATERIAL_CELL_01
+    location: [0.0, 0.0]
+    num_amrs: 2
+    input_capacity: 8
+    output_capacity: 8
+
+  welding:
+    cell_id: WELDING_CELL_01
+    location: [5.0, 0.0]
+    default_cycle_time: 18.0
+    input_capacity: 1
+    output_capacity: 1
+
+  inspection:
+    cell_id: INSPECTION_CELL_01
+    location: [10.0, 0.0]
+    default_cycle_time: 6.0
+    input_capacity: 1
+    output_capacity: 1
+
+# 이 시나리오에서 시스템에 투입할 Job 목록
+jobs:
+  - job_id: JOB_00001
+    part_id: PART_A_001
+    part_type: tubular_frame_A
+    process_route: [welding, inspection]
+    priority: normal
+    recipe_overrides:
+      welding:
+        speed: 0.10
+        power: 1500.0
+        path_length_mm: 220.0
+
+  - job_id: JOB_00002
+    part_id: PART_A_002
+    part_type: tubular_frame_A
+    process_route: [welding, inspection]
+    priority: normal
+    recipe_overrides:
+      welding:
+        speed: 0.08
+        power: 1700.0
+        path_length_mm: 250.0
+
+  - job_id: JOB_00003
+    part_id: PART_B_001
+    part_type: tubular_frame_B
+    process_route: [welding, inspection]
+    priority: high
+    recipe_overrides:
+      welding:
+        # tool 미지정 → ToolSelectionAgent가 자동 결정
+        speed: 0.09
+        power: 220.0
+        path_length_mm: 180.0

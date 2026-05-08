@@ -1,0 +1,8 @@
+# FDW-OPS Virtual Workshop — Python dependencies
+#
+# Discrete-mode (Level 1) 실행에는 PyYAML만 있어도 충분합니다.
+# Isaac Sim 모드 (Level 2+)는 conda 환경(isaac_sim)에 이미 설치된
+# isaacsim* 패키지들을 사용하므로 여기엔 명시하지 않습니다.
+
+PyYAML>=6.0
+numpy>=1.24
