@@ -52,6 +52,7 @@ class SimulationConfig:
     # Isaac Sim 모드 전용
     headless: bool = True
     stage_units_in_meters: float = 1.0
+    livestream: int = 0  # 0=off, 1=Native, 2=WebRTC
     isaac_app_kwargs: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -162,12 +163,14 @@ class SimulationManager:
             from isaaclab.app import AppLauncher  # type: ignore
             launcher_args = {
                 "headless": self.config.headless,
+                "livestream": self.config.livestream,
                 **self.config.isaac_app_kwargs,
             }
             self._isaac_launcher = AppLauncher(launcher_args)
             self._isaac_app = self._isaac_launcher.app
-            logger.info("[SIM] Isaac Sim launched via Isaac Lab AppLauncher (headless=%s)",
-                        self.config.headless)
+            logger.info("[SIM] Isaac Sim launched via Isaac Lab AppLauncher "
+                        "(headless=%s, livestream=%d)",
+                        self.config.headless, self.config.livestream)
         except ImportError:
             # Fallback: isaacsim 메타 패키지 사용
             from isaacsim import SimulationApp  # type: ignore
@@ -175,9 +178,12 @@ class SimulationManager:
                 "headless": self.config.headless,
                 **self.config.isaac_app_kwargs,
             }
+            if self.config.livestream > 0:
+                app_kwargs["livestream"] = self.config.livestream
             self._isaac_app = SimulationApp(app_kwargs)
-            logger.info("[SIM] Isaac Sim launched via SimulationApp (headless=%s)",
-                        self.config.headless)
+            logger.info("[SIM] Isaac Sim launched via SimulationApp "
+                        "(headless=%s, livestream=%d)",
+                        self.config.headless, self.config.livestream)
 
         # 2) 그 다음에 World import / 생성
         try:

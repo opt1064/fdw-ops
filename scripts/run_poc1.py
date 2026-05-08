@@ -95,12 +95,15 @@ def _builtin_defaults() -> Dict[str, Any]:
 
 
 def build_simulation(cfg: Dict[str, Any], mode_override: str = None,
-                     headless_override: bool = None) -> SimulationManager:
+                     headless_override: bool = None,
+                     livestream_override: int = None) -> SimulationManager:
     sim_cfg_d = dict(cfg["simulation"])
     if mode_override:
         sim_cfg_d["mode"] = mode_override
     if headless_override is not None:
         sim_cfg_d["headless"] = headless_override
+    if livestream_override is not None:
+        sim_cfg_d["livestream"] = livestream_override
 
     sim_cfg = SimulationConfig(
         mode=sim_cfg_d["mode"],
@@ -108,6 +111,7 @@ def build_simulation(cfg: Dict[str, Any], mode_override: str = None,
         max_sim_time_sec=float(sim_cfg_d["max_sim_time_sec"]),
         realtime=bool(sim_cfg_d["realtime"]),
         headless=bool(sim_cfg_d["headless"]),
+        livestream=int(sim_cfg_d.get("livestream", 0)),
         log_dir=Path(sim_cfg_d["log_dir"]),
         run_name=sim_cfg_d.get("run_name"),
     )
@@ -228,6 +232,8 @@ def main() -> int:
                    help="Isaac Sim을 헤드리스로 실행 (mode=isaac일 때만 의미)")
     p.add_argument("--gui", action="store_true",
                    help="Isaac Sim GUI 모드 (mode=isaac일 때만 의미)")
+    p.add_argument("--livestream", type=int, default=None, choices=[0, 1, 2],
+                   help="원격 스트리밍 모드: 0=off, 1=Native, 2=WebRTC (브라우저)")
     p.add_argument("--log-level", default="INFO",
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = p.parse_args()
@@ -242,8 +248,14 @@ def main() -> int:
     elif args.gui:
         headless_override = False
 
+    # livestream이 켜지면 자동으로 headless=True 설정 (Isaac Sim 권장 사항)
+    livestream_override = args.livestream
+    if livestream_override and livestream_override > 0 and headless_override is None:
+        headless_override = True
+
     sim = build_simulation(cfg, mode_override=args.mode,
-                           headless_override=headless_override)
+                           headless_override=headless_override,
+                           livestream_override=livestream_override)
 
     sim.start()
     try:
