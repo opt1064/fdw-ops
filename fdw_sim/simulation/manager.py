@@ -150,18 +150,42 @@ class SimulationManager:
         self._running = True
 
     def _start_isaac(self) -> None:
-        """Isaac Sim 5.x 백엔드 초기화."""
+        """Isaac Sim 5.x / Isaac Lab 백엔드 초기화.
+
+        Isaac Sim 5.x에서는 두 가지 방법으로 SimulationApp을 시작할 수 있다.
+        1) isaacsim 메타 패키지가 설치된 경우: from isaacsim import SimulationApp
+        2) Isaac Lab만 설치된 경우: isaaclab.app.AppLauncher 사용 (권장)
+        """
         # 1) SimulationApp 가장 먼저 생성 (Carbonite 요구사항)
-        from isaacsim import SimulationApp  # type: ignore
-        app_kwargs = {
-            "headless": self.config.headless,
-            **self.config.isaac_app_kwargs,
-        }
-        self._isaac_app = SimulationApp(app_kwargs)
-        logger.info("[SIM] Isaac Sim launched (headless=%s)", self.config.headless)
+        try:
+            # 우선 Isaac Lab의 AppLauncher 시도 (확장 자동 로드)
+            from isaaclab.app import AppLauncher  # type: ignore
+            launcher_args = {
+                "headless": self.config.headless,
+                **self.config.isaac_app_kwargs,
+            }
+            self._isaac_launcher = AppLauncher(launcher_args)
+            self._isaac_app = self._isaac_launcher.app
+            logger.info("[SIM] Isaac Sim launched via Isaac Lab AppLauncher (headless=%s)",
+                        self.config.headless)
+        except ImportError:
+            # Fallback: isaacsim 메타 패키지 사용
+            from isaacsim import SimulationApp  # type: ignore
+            app_kwargs = {
+                "headless": self.config.headless,
+                **self.config.isaac_app_kwargs,
+            }
+            self._isaac_app = SimulationApp(app_kwargs)
+            logger.info("[SIM] Isaac Sim launched via SimulationApp (headless=%s)",
+                        self.config.headless)
 
         # 2) 그 다음에 World import / 생성
-        from isaacsim.core.api import World  # type: ignore
+        try:
+            from isaacsim.core.api import World  # type: ignore
+        except ImportError:
+            # Isaac Sim 4.x 호환 경로
+            from omni.isaac.core import World  # type: ignore
+
         self._isaac_world = World(
             stage_units_in_meters=self.config.stage_units_in_meters,
             physics_dt=self._dt,
