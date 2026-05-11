@@ -1,32 +1,59 @@
 """dump_usd_variants.py — USD 의 variant set / variant 이름을 실측 dump.
 
 inspect_usd_refs.py 는 USDC 바이너리에서 regex 로 토큰을 뽑기 때문에 variant
-이름 spelling 이 부분적으로만 보인다 (TOKENS 테이블의 압축/분할 영향).
-이 스크립트는 pxr.Usd 로 stage 를 열어 라이브 composition 결과의 variant
-이름을 한 번에 정확히 추출한다.
+이름 spelling 이 부분적으로만 보인다 (TOKENS 테이블의 압축/분할 영향). 이
+스크립트는 **Isaac Sim 의 정공 boot 경로(IsaacLab AppLauncher)** 를 거쳐
+pxr 가 완전히 로드된 상태에서 stage 를 열어 variant 이름을 한 번에 정확히
+추출한다.
 
-사용법:
+배경 (2026-05 Thor 진단 결과)::
 
-    # 가장 간단 — conda env 만 활성화하면 자동으로 isaacsim extscache 에서
-    # pxr 를 찾아 sys.path 에 주입한다 (SimulationApp 부팅 불필요).
+    Isaac Sim 5.1 의 wheel install (pip install isaacsim) 환경에서는 pxr
+    가 PEP 420 namespace package 로서 ``$CONDA_PREFIX/lib/python3.11/
+    site-packages/isaacsim/extscache/`` 아래 **여러 개의** 패키지
+    (omni.usd.libs-*, omni.usd.schema.physx-*, omni.anim.navigation.schema-*,
+    ...) 에 ``pxr/`` 가 분산되어 있다.
+
+    단순히 ``sys.path.insert`` + ``LD_LIBRARY_PATH`` 만으로는 .so 간 의존
+    경로가 해결되지 않아 import 가 실패한다. 따라서 Isaac Sim 의 정식 boot
+    sequence (SimulationApp / AppLauncher) 를 거치는 것이 유일하게 검증된
+    방법이다. 이 스크립트는 그 패턴을 따른다.
+
+사용법::
+
+    # IsaacLab 의 conda env 가 활성화된 상태에서 (Thor 환경)
     conda activate isaac_sim
     cd ~/isaac_workspace/projects/fdw-sim
+
+    # 기본 — AppLauncher headless 부팅 후 NovaCarter variant 덤프
     python scripts/dump_usd_variants.py \
         ~/isaac_assets/Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd
 
-    # 자동 발견이 실패하면 환경변수로 직접 지정 가능:
-    FDW_PXR_PATH=/path/to/pxr/parent_dir \
-        python scripts/dump_usd_variants.py ...
-
-    # JSON 으로 저장해서 asset_catalog 수정에 활용
+    # JSON 으로 저장
     python scripts/dump_usd_variants.py --json \
         ~/isaac_assets/Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd \
         > nova_carter_variants.json
 
-Isaac Sim 5.1 wheel 설치 (pip install isaacsim) 의 경우 pxr 는
-``<conda_env>/lib/pythonX.Y/site-packages/isaacsim/extscache/
-omni.usd.libs-*/pxr/`` 안에 있다. 일반 ``import pxr`` 로는 잡히지
-않으므로 이 스크립트가 해당 경로를 자동 탐색해 sys.path 에 추가한다.
+    # default prim 만이 아니라 stage 전체를 traverse
+    python scripts/dump_usd_variants.py --recurse \
+        ~/isaac_assets/Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd
+
+    # IsaacLab 미설치 환경에서는 isaacsim 메타 패키지로 fallback (양쪽 모두
+    # 없으면 마지막으로 plain ``from pxr import Usd`` 를 시도하지만, Isaac
+    # Sim 5.1 wheel install 에서는 거의 항상 실패한다)
+    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
+        python scripts/dump_usd_variants.py ...
+
+오버헤드::
+
+    AppLauncher 부팅은 첫 실행 시 ~15s (셰이더 캐시 미생성) ~ 30s 가 걸린다.
+    이후 부팅은 ~10s 정도로 안정화. 일회성 진단용이므로 감내한다.
+
+비-AppLauncher 사용 (legacy / 추출 전용)::
+
+    스크립트가 ``USD_DUMP_NO_APP=1`` 환경변수를 인지하면 SimulationApp 부팅을
+    건너뛰고 ``Usd.Stage.Open`` 만으로 시도한다 (sys.path 가 이미 pxr 를
+    가진 환경 — 예: Isaac Sim deb install — 에서만 의미가 있음).
 
 Importantly: 이 도구는 reference attach 를 하지 않고 ``Usd.Stage.Open()`` 으로
 직접 USD layer 만 연다. 따라서 sub-USD payload 가 누락된 상태에서도 variant
@@ -39,161 +66,114 @@ import argparse
 import json
 import os
 import sys
-import sysconfig
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
-def _candidate_extscache_roots() -> List[Path]:
-    """isaacsim 의 extscache 가 있을 만한 디렉토리 후보 나열.
+# =============================================================================
+# pxr loader — AppLauncher (정공) → SimulationApp fallback → plain import
+# =============================================================================
+def _boot_isaac_app(headless: bool = True
+                    ) -> Tuple[Optional[Any], Optional[Any]]:
+    """Isaac Sim 의 SimulationApp 을 부팅한다.
 
-    Isaac Sim 5.1 wheel 설치 시 pxr 는 다음 위치에 있다:
-        <site-packages>/isaacsim/extscache/omni.usd.libs-*/pxr/
+    Isaac Sim 5.1 wheel install 환경에서 pxr 를 import 가능 상태로 만들기
+    위한 **유일하게 검증된 절차**. 부팅 순서:
 
-    이 함수는 그 부모(`omni.usd.libs-*` 의 부모) 를 추출 가능한 모든
-    site-packages 에서 모은다.
+      1) ``from isaaclab.app import AppLauncher`` 가 성공하면 그 경로 사용
+         (run_poc1_level2_2.py 와 동일한 패턴)
+      2) ImportError 면 ``from isaacsim import SimulationApp`` 로 폴백
+      3) 둘 다 실패 → (None, None) 반환 후 호출자가 plain import 시도
+
+    Returns:
+        (simulation_app, launcher) — launcher 는 AppLauncher 인스턴스 또는
+        None (SimulationApp fallback path 인 경우)
     """
-    roots: List[Path] = []
+    # AppLauncher 부팅 전에 안전한 기본값 (EULA 동의)
+    os.environ.setdefault("ACCEPT_EULA", "Y")
+    os.environ.setdefault("PRIVACY_CONSENT", "Y")
+    # Isaac Sim Kit 가 root 권한으로 실행되어도 막지 않음 (sandbox/CI)
+    os.environ.setdefault("OMNI_KIT_ALLOW_ROOT", "1")
 
-    # 1) 현재 인터프리터의 site-packages
+    # 1) IsaacLab AppLauncher — 정공
     try:
-        purelib = Path(sysconfig.get_paths()["purelib"])
-        roots.append(purelib / "isaacsim" / "extscache")
-    except Exception:
-        pass
+        from isaaclab.app import AppLauncher  # type: ignore
 
-    # 2) sys.path 에 있는 site-packages 모두
-    for p in sys.path:
-        if not p:
-            continue
-        pp = Path(p)
-        if pp.name in ("site-packages", "dist-packages"):
-            roots.append(pp / "isaacsim" / "extscache")
+        launcher_args = {
+            "headless": headless,
+            # AppLauncher 는 livestream=0 이 기본. 진단용이므로 GUI 불필요.
+        }
+        print(f"[INFO] Booting Isaac Sim via IsaacLab AppLauncher "
+              f"(headless={headless})…", file=sys.stderr)
+        launcher = AppLauncher(launcher_args)
+        app = launcher.app
+        print("[INFO] AppLauncher boot complete — pxr should now be importable",
+              file=sys.stderr)
+        return app, launcher
+    except ImportError as e:
+        print(f"[INFO] isaaclab.app 가 없습니다 ({e}). "
+              "SimulationApp fallback 시도…", file=sys.stderr)
 
-    # 3) CONDA_PREFIX 가 있으면 그 안의 표준 위치
-    conda_prefix = os.environ.get("CONDA_PREFIX")
-    if conda_prefix:
-        for py in ("python3.11", "python3.10", "python3.12", "python3.9"):
-            cand = (Path(conda_prefix) / "lib" / py / "site-packages"
-                    / "isaacsim" / "extscache")
-            roots.append(cand)
+    # 2) isaacsim.SimulationApp fallback
+    try:
+        from isaacsim import SimulationApp  # type: ignore
 
-    # 4) 사용자 환경변수로 직접 지정 가능
-    env = os.environ.get("FDW_PXR_PATH")
-    if env:
-        # FDW_PXR_PATH 는 pxr 의 부모 dir (= sys.path 에 추가될 경로) 를 직접 지정
-        # 그러면 _find_pxr_dir 가 곧장 사용
-        return [Path(env)]
+        app_kwargs = {"headless": headless}
+        print(f"[INFO] Booting Isaac Sim via SimulationApp "
+              f"(headless={headless})…", file=sys.stderr)
+        app = SimulationApp(app_kwargs)
+        print("[INFO] SimulationApp boot complete — pxr should now be importable",
+              file=sys.stderr)
+        return app, None
+    except ImportError as e:
+        print(f"[INFO] isaacsim 도 없습니다 ({e}). "
+              "마지막 수단으로 plain ``import pxr`` 시도", file=sys.stderr)
 
-    # 5) IsaacLab _isaac_sim 경로
-    home = Path.home()
-    for p in (home / "IsaacLab" / "_isaac_sim",
-              home / "isaac-sim",
-              Path("/opt/isaac-sim"),
-              Path("/isaac-sim")):
-        roots.append(p / "extscache")
-
-    # 중복 제거 (순서 유지)
-    seen: set = set()
-    uniq: List[Path] = []
-    for r in roots:
-        s = str(r)
-        if s in seen:
-            continue
-        seen.add(s)
-        uniq.append(r)
-    return uniq
+    return None, None
 
 
-def _find_pxr_dir() -> Optional[Path]:
-    """pxr 패키지 부모 디렉토리(= sys.path 에 추가될 경로) 자동 탐색.
+def _import_pxr_after_boot() -> Any:
+    """SimulationApp 부팅 이후 pxr.Usd 를 import.
 
-    Isaac Sim 5.1 extscache 구조:
-        <extscache>/omni.usd.libs-<ver>/pxr/__init__.py
-    sys.path 에 추가해야 할 건 ``<extscache>/omni.usd.libs-<ver>/`` 부모.
-
-    FDW_PXR_PATH 환경변수가 있으면 그 값을 그대로 사용 (위 _candidate 가
-    이미 단일 후보로 반환했다면 그 안의 ``pxr`` 존재만 확인).
+    부팅 후에는 Isaac Sim 의 ext system 이 extscache 의 모든 pxr 분할 패키지
+    경로를 sys.path / LD_LIBRARY_PATH 에 추가해 둔 상태이므로 표준 import 로
+    충분하다.
     """
-    env = os.environ.get("FDW_PXR_PATH")
-    if env:
-        p = Path(env)
-        if (p / "pxr" / "__init__.py").is_file():
-            return p
-        # FDW_PXR_PATH 가 pxr 부모(=parent of parent) 인 경우도 허용
-        for child in p.glob("omni.usd.libs*"):
-            if (child / "pxr" / "__init__.py").is_file():
-                return child
-        return None
-
-    for root in _candidate_extscache_roots():
-        if not root.is_dir():
-            continue
-        # omni.usd.libs-<version>/pxr/__init__.py 패턴
-        for child in sorted(root.glob("omni.usd.libs*")):
-            init = child / "pxr" / "__init__.py"
-            if init.is_file():
-                return child
-    return None
-
-
-def _import_pxr():
-    """pxr.Usd 를 import 시도. 실패 시 extscache 자동 발견 후 재시도.
-
-    Isaac Sim 5.1 wheel 설치 환경에서는 pxr 가 sys.path 에 없으므로
-    isaacsim/extscache/omni.usd.libs-*/ 를 sys.path 에 추가한다.
-    """
-    # 1) 정공법 — 이미 sys.path 에 있으면 OK
     try:
         from pxr import Usd  # type: ignore
         return Usd
-    except ImportError:
-        pass
-
-    # 2) 자동 발견
-    pxr_parent = _find_pxr_dir()
-    if pxr_parent is not None:
-        sys.path.insert(0, str(pxr_parent))
-        # extscache 안의 omni.usd.libs 는 pxr 의 .so 들이 RPATH 로 같은 디렉토리
-        # 의 다른 .so 들을 참조하는 경우가 많다. LD_LIBRARY_PATH 도 보강.
-        ld = os.environ.get("LD_LIBRARY_PATH", "")
-        if str(pxr_parent) not in ld:
-            os.environ["LD_LIBRARY_PATH"] = (
-                f"{pxr_parent}:{ld}" if ld else str(pxr_parent))
-        try:
-            from pxr import Usd  # type: ignore
-            # 성공 — 사용자에게 어디서 찾았는지 알려준다
-            print(f"[INFO] pxr loaded from: {pxr_parent}", file=sys.stderr)
-            return Usd
-        except ImportError as e2:
-            print(f"[WARN] pxr 부모 디렉토리는 찾았지만 import 가 여전히 실패: {e2}",
-                  file=sys.stderr)
-            print(f"       경로: {pxr_parent}", file=sys.stderr)
-            print("       LD_LIBRARY_PATH 보강 후에도 의존 .so 가 없을 수 있음.",
-                  file=sys.stderr)
-
-    # 3) 최종 실패 — 사용자에게 친절한 진단 메시지
-    print("[FAIL] pxr.Usd 를 어떻게도 import 할 수 없습니다.", file=sys.stderr)
-    print("", file=sys.stderr)
-    print("탐색한 위치:", file=sys.stderr)
-    for cand in _candidate_extscache_roots()[:6]:
-        marker = "OK " if cand.is_dir() else "X  "
-        print(f"  [{marker}] {cand}", file=sys.stderr)
-    print("", file=sys.stderr)
-    print("다음 중 하나를 시도하세요:", file=sys.stderr)
-    print("  1) conda activate isaac_sim  (이미 했다면 다음 단계로)", file=sys.stderr)
-    print("  2) FDW_PXR_PATH 로 pxr 부모 디렉토리 직접 지정:", file=sys.stderr)
-    print("     find $CONDA_PREFIX -path '*/pxr/__init__.py' 2>/dev/null", file=sys.stderr)
-    print("     → 출력된 경로의 ``../`` (pxr 의 부모) 를 FDW_PXR_PATH 로 export",
-          file=sys.stderr)
-    print("       예: export FDW_PXR_PATH=$CONDA_PREFIX/lib/python3.11/"
-          "site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+...", file=sys.stderr)
-    print("  3) SimulationApp 부팅을 거치는 wrapper 로 실행:", file=sys.stderr)
-    print("     ~/IsaacLab/isaaclab.sh -p scripts/dump_usd_variants.py ...",
-          file=sys.stderr)
-    raise SystemExit(2)
+    except ImportError as e:
+        print(f"[FAIL] SimulationApp 부팅 이후에도 pxr import 실패: {e}",
+              file=sys.stderr)
+        print("       Isaac Sim 5.1 설치 / extscache 상태를 확인하세요.",
+              file=sys.stderr)
+        raise SystemExit(2)
 
 
+def _import_pxr_no_boot() -> Any:
+    """SimulationApp 부팅 없이 pxr.Usd 를 import.
+
+    Isaac Sim 의 deb install 같은 환경, 또는 호출자가 명시적으로
+    ``USD_DUMP_NO_APP=1`` 을 지정한 경우에만 시도한다. Isaac Sim 5.1 wheel
+    install 에서는 거의 항상 실패한다 (namespace package + .so inter-dep).
+    """
+    try:
+        from pxr import Usd  # type: ignore
+        print("[INFO] pxr loaded without SimulationApp boot "
+              "(sys.path already contains pxr).", file=sys.stderr)
+        return Usd
+    except ImportError as e:
+        print(f"[FAIL] plain ``import pxr`` 실패: {e}", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("USD_DUMP_NO_APP=1 을 지정하셨다면 해제 후 재시도하세요. "
+              "Isaac Sim 5.1 wheel install 환경에서는 AppLauncher / "
+              "SimulationApp boot 가 필수입니다.", file=sys.stderr)
+        raise SystemExit(2)
+
+
+# =============================================================================
+# variant 수집
+# =============================================================================
 def _collect_variants_on_prim(prim) -> Dict[str, Dict[str, object]]:
     """prim 에 정의된 variant set 들과 각 set 의 variant 이름 목록 수집."""
     out: Dict[str, Dict[str, object]] = {}
@@ -222,10 +202,12 @@ def _collect_variants_on_prim(prim) -> Dict[str, Dict[str, object]]:
     return out
 
 
-def dump_variants(usd_path: Path, recurse: bool = False) -> Dict[str, object]:
+def dump_variants(Usd, usd_path: Path, recurse: bool = False
+                  ) -> Dict[str, object]:
     """USD 의 variant 구조를 dict 로 반환.
 
     Args:
+        Usd:      이미 import 된 pxr.Usd 모듈
         usd_path: 분석할 USD 절대/상대 경로
         recurse:  default prim 만이 아니라 모든 prim 을 traverse 해서
                   variant set 이 있는 prim 을 모두 수집
@@ -240,8 +222,6 @@ def dump_variants(usd_path: Path, recurse: bool = False) -> Dict[str, object]:
           }
         }
     """
-    Usd = _import_pxr()
-
     if not usd_path.is_file():
         raise FileNotFoundError(f"USD not found: {usd_path}")
 
@@ -260,16 +240,16 @@ def dump_variants(usd_path: Path, recurse: bool = False) -> Dict[str, object]:
         result["default_prim"] = str(default.GetPath())
         v = _collect_variants_on_prim(default)
         if v:
-            result["prims"][str(default.GetPath())] = v
+            result["prims"][str(default.GetPath())] = v  # type: ignore[index]
 
     if recurse:
         for prim in stage.TraverseAll():
             path_str = str(prim.GetPath())
-            if path_str in result["prims"]:
+            if path_str in result["prims"]:  # type: ignore[operator]
                 continue
             v = _collect_variants_on_prim(prim)
             if v:
-                result["prims"][path_str] = v
+                result["prims"][path_str] = v  # type: ignore[index]
 
     return result
 
@@ -278,17 +258,23 @@ def _suggest_nova_carter_mapping(prims: Dict[str, Dict[str, object]]
                                   ) -> Optional[Dict[str, str]]:
     """NovaCarter 처럼 보이는 variant 구조면 권장 매핑 자동 생성.
 
-    선택 우선순위:
-      Configuration : Base > No_Internals > Skirt_only > Full_Merged > (first)
+    선택 우선순위 (CreateJoint body0/body1 누락 회피 + sub-USD payload
+    의존 최소화):
+
+      Configuration : No_Internals > Base > Skirt_only > Fully Merged > (first)
       Physics       : Physics_Base > (first)
-      Sensors       : All_Sensors > None > (first)
+      Sensors       : None > All_Sensors > (first)   # ← payload 의존 회피
     """
     PREF = {
-        "Configuration": ["Base", "No_Internals", "no_internals",
-                          "Skirt_only", "skirt_only",
-                          "Full_Merged", "Fully Merged", "full_merged"],
-        "Physics":       ["Physics_Base", "physics_base", "Base"],
-        "Sensors":       ["All_Sensors", "all_sensors", "None", "none"],
+        "Configuration": [
+            "No_Internals", "no_internals",
+            "Base",
+            "Skirt_only", "skirt_only",
+            "Fully Merged", "Full_Merged", "full_merged",
+        ],
+        "Physics": ["Physics_Base", "physics_base", "Base"],
+        # Sensors 는 "None" 우선 — Hawk/Owl/RPLidar/XT-32 sub-USD payload 회피
+        "Sensors": ["None", "none", "All_Sensors", "all_sensors"],
     }
 
     # 첫 번째 prim 의 variant set 만 본다 (보통 NovaCarter 의 root)
@@ -353,36 +339,79 @@ def _print_human(report: Dict[str, object]) -> None:
         print()
         print("→ fdw_sim/visualization/asset_catalog.py 의 해당 항목을 위 값으로")
         print("  교체하면 됩니다. sensor sub-USD 가 누락된 경우 Sensors = 'None'")
-        print("  으로 변경해서 payload 다운로드 부담을 피할 수도 있습니다.")
+        print("  으로 두면 payload 다운로드 부담을 피할 수 있습니다.")
+
+
+# =============================================================================
+# main
+# =============================================================================
+def _run(usd_path: Path, recurse: bool, want_json: bool,
+         no_app: bool, headless: bool) -> int:
+    """변환 가능한 pxr 모듈을 확보한 뒤 dump 를 실행한다.
+
+    no_app=True : SimulationApp 부팅 건너뜀 (USD_DUMP_NO_APP=1 과 동일)
+    """
+    app = None
+    launcher = None  # noqa: F841 (held for life-cycle reasons)
+
+    try:
+        if no_app:
+            Usd = _import_pxr_no_boot()
+        else:
+            app, launcher = _boot_isaac_app(headless=headless)
+            if app is None:
+                # 부팅 자체가 불가능 → plain import 마지막 시도
+                Usd = _import_pxr_no_boot()
+            else:
+                Usd = _import_pxr_after_boot()
+
+        try:
+            report = dump_variants(Usd, usd_path, recurse=recurse)
+        except FileNotFoundError as e:
+            print(f"[FAIL] {e}", file=sys.stderr)
+            return 2
+        except RuntimeError as e:
+            print(f"[FAIL] {e}", file=sys.stderr)
+            return 3
+
+        if want_json:
+            suggested = _suggest_nova_carter_mapping(report.get("prims", {}))  # type: ignore
+            report["suggested_mapping"] = suggested  # type: ignore[index]
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            _print_human(report)
+
+        return 0
+    finally:
+        # SimulationApp 은 명시적으로 close 해야 깔끔하게 종료
+        if app is not None:
+            try:
+                app.close()
+            except Exception:
+                pass
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(
-        description="USD variant set/variant 이름을 pxr.Usd 로 정확히 dump.")
+        description="USD variant set/variant 이름을 pxr.Usd 로 정확히 dump "
+                    "(IsaacLab AppLauncher 경로).")
     p.add_argument("usd", type=Path, help="분석할 USD 파일 경로")
     p.add_argument("--recurse", "-r", action="store_true",
                    help="default prim 외에 모든 prim 을 traverse")
     p.add_argument("--json", action="store_true",
                    help="결과를 JSON 으로 출력 (script-friendly)")
+    p.add_argument("--no-app", action="store_true",
+                   default=bool(os.environ.get("USD_DUMP_NO_APP")),
+                   help="SimulationApp 부팅을 건너뛰고 plain ``import pxr`` "
+                        "만 시도 (sys.path 에 pxr 가 이미 있는 환경 전용). "
+                        "USD_DUMP_NO_APP=1 환경변수로도 동일하게 활성화.")
+    p.add_argument("--no-headless", dest="headless", action="store_false",
+                   default=True,
+                   help="AppLauncher 를 GUI 모드로 부팅 (보통 불필요).")
     args = p.parse_args(argv)
 
-    try:
-        report = dump_variants(args.usd, recurse=args.recurse)
-    except FileNotFoundError as e:
-        print(f"[FAIL] {e}", file=sys.stderr)
-        return 2
-    except RuntimeError as e:
-        print(f"[FAIL] {e}", file=sys.stderr)
-        return 3
-
-    if args.json:
-        suggested = _suggest_nova_carter_mapping(report.get("prims", {}))  # type: ignore
-        report["suggested_mapping"] = suggested
-        print(json.dumps(report, indent=2, ensure_ascii=False))
-    else:
-        _print_human(report)
-
-    return 0
+    return _run(usd_path=args.usd, recurse=args.recurse, want_json=args.json,
+                no_app=args.no_app, headless=args.headless)
 
 
 if __name__ == "__main__":
