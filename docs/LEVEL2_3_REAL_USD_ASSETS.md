@@ -198,13 +198,28 @@ PhysicsUSD::CreateJoint - no bodies defined at body0 and body1, joint prim:
   /World/FDW/AMRs/AMR_02_USD/joint_swing_left
 ```
 
-### 원인
+### 원인 (두 가지 중첩)
 
-`nova_carter_physics.usd` 는 swing/caster joint 를 정의하지만, joint 가
-참조하는 body prim (chassis, wheel, caster 등) 은 별도의 sub-USD
-(`Props/nova_carter_{base,chassis,wheel,caster}.usd`) 에 있다. 그런데
-이 Props/* 경로들이 Isaac 5.1 S3 버킷에서 404 를 반환해 다운로드되지
-않아, joint 만 로드되고 body 가 없어 위 경고가 발생한다.
+**원인 A — variant-set 컨테이너인데 variant 선택이 없음**
+
+`nova_carter.usd` (4 KB) 는 wrapper 가 아니라 **variant-set 컨테이너**이다.
+Configuration / Physics / Sensors variant set 을 각각 명시적으로 선택하지
+않으면 USD 가 자체 default 를 사용하는데, 이 조합이 일관되지 않아 joint
+가 참조하는 body prim 이 stage 에 compose 되지 않는다.
+
+→ 해결: `asset_catalog.UsdAssetSpec.variant_selection` dict 로 매핑 지정.
+  단, **variant 이름 spelling 이 USD 와 정확히 일치해야** AddReference 가
+  성공한다. spelling 이 어긋나면 USD verification 실패
+  (`arcNum < srcInfo.size()`) 로 reference 자체가 drop 된다.
+
+**원인 B — sub-USD payload 누락**
+
+variant 가 정확히 골라져도, variant payload (예:
+`Variants/Sensors/nova_carter_sensors.usd`) 가 다시 sensor sub-USD
+(`Sensors/LeopardImaging/Hawk/hawk_v1.1_nominal.usd` 등) 를 payload 로
+참조한다. 이 sub-USD 들이 디스크에 없으면 `Could not open asset` 경고
+14개가 발생하고, 결과적으로 chassis_link 하위 sensor prim 이 빈 상태가
+된다.
 
 ### 해결책 (우선순위 순)
 
@@ -223,7 +238,58 @@ python scripts/run_poc1_level2_2.py --gui --real-robot --amr-asset iw_hub_static
 python scripts/run_poc1_level2_2.py --gui --real-robot --no-real-amr
 ```
 
-**2) 실제 의존성 추출 (NovaCarter Props 경로 정정)**
+**2) variant 이름을 정확히 dump — `scripts/dump_usd_variants.py` (권장)**
+
+`inspect_usd_refs.py --dump-strings` 는 USDC TOKENS 테이블에서 regex 로
+토큰을 뽑기 때문에 variant 이름이 부분적으로만 보일 수 있다. 정확한
+variant 이름이 필요할 때는 pxr.Usd 로 stage 를 열어 라이브 composition
+의 variant 메타데이터를 직접 dump 하는 다음 도구를 사용한다.
+
+```bash
+# Isaac Sim conda env 또는 isaac-sim 의 python.sh 로 실행
+conda activate isaac_sim
+python scripts/dump_usd_variants.py \
+    ~/isaac_assets/Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd
+```
+
+출력 예 (실측 후 채워질 부분):
+
+```
+=== /home/.../nova_carter.usd
+Default prim: /nova_carter
+
+Variant sets on /nova_carter (3):
+
+  Configuration (default = '...')
+    - <name1>
+    - <name2>
+    ...
+
+  Physics (default = '...')
+    - <name1>
+    - <name2>
+
+  Sensors (default = '...')
+    - <name1>
+    - <name2>
+
+Suggested asset_catalog mapping:
+    variant_selection={
+        "Configuration": "...",
+        "Physics":       "...",
+        "Sensors":       "...",
+    },
+```
+
+dump 결과의 정확한 spelling 으로
+`fdw_sim/visualization/asset_catalog.py` 의 NovaCarter 엔트리 mapping
+을 교체하면 AddReference 가 USD verification 단계에서 실패하지 않는다.
+
+옵션:
+- `--recurse` / `-r` : default prim 외 모든 prim 까지 traverse
+- `--json` : script-friendly JSON 출력 (CI/스크립트 chaining 용)
+
+**3) 실제 의존성 추출 (NovaCarter Props 경로 정정)**
 
 NVIDIA S3 의 실제 sub-USD 경로를 찾기 위해 `scripts/inspect_usd_refs.py`
 사용:
