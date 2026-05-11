@@ -95,6 +95,65 @@ class SceneBuilder:
         dome.CreateIntensityAttr(500.0)
 
     # ========================================================================
+    # 카메라 framing — viewport를 셀 전체가 보이는 위치로 자동 이동
+    # ========================================================================
+    def frame_viewport_to_scene(self,
+                                  center: Tuple[float, float, float] = (5.0, 0.0, 1.0),
+                                  distance: float = 12.0,
+                                  height: float = 6.0) -> None:
+        """Isaac Sim viewport의 perspective 카메라를 셀 전체가 보이도록 이동.
+
+        viewport에서 직접 perspective 카메라를 조작하기 어려우므로,
+        새 카메라 prim을 만들어 viewport active camera로 설정한다.
+        """
+        try:
+            cam_path = f"{self.config.root_prim_path}/SceneCamera"
+            UsdGeom = self._UsdGeom
+            Gf = self._Gf
+
+            cam = UsdGeom.Camera.Define(self._stage, cam_path)
+            cam.CreateFocalLengthAttr(24.0)
+            cam.CreateClippingRangeAttr(Gf.Vec2f(0.1, 10000.0))
+
+            cx, cy, cz = center
+            # 대각선 위에서 셀을 내려다보는 시점
+            cam_pos = (cx - distance * 0.6, cy - distance * 0.7, cz + height)
+            target = (cx, cy, cz)
+
+            # look-at 행렬 계산 (단순 버전)
+            import math
+            dx = target[0] - cam_pos[0]
+            dy = target[1] - cam_pos[1]
+            dz = target[2] - cam_pos[2]
+            yaw_deg = math.degrees(math.atan2(dx, -dy))
+            horiz = math.sqrt(dx * dx + dy * dy)
+            pitch_deg = -math.degrees(math.atan2(dz, horiz))
+
+            xformable = UsdGeom.Xformable(cam.GetPrim())
+            xformable.ClearXformOpOrder()
+            t_op = xformable.AddTranslateOp()
+            t_op.Set(Gf.Vec3d(*cam_pos))
+            rz_op = xformable.AddRotateZOp()
+            rz_op.Set(yaw_deg)
+            rx_op = xformable.AddRotateXOp()
+            rx_op.Set(90.0 + pitch_deg)  # Z-up → Y-forward 보정
+
+            # viewport의 active camera로 설정
+            try:
+                import omni.kit.viewport.utility as vp_util  # type: ignore
+                vp = vp_util.get_active_viewport()
+                if vp is not None:
+                    vp.set_active_camera(cam_path)
+                    logger.info("[VIS] viewport camera set to %s", cam_path)
+            except Exception as e:
+                logger.debug("[VIS] could not set viewport camera: %s", e)
+
+            logger.info("[VIS] scene camera created @ %s looking at %s",
+                        cam_pos, target)
+        except Exception:
+            logger.exception("[VIS] frame_viewport_to_scene failed")
+
+    # ========================================================================
     # 셀 (work bench)
     # ========================================================================
     def add_cell_workbench(self, cell_id: str,
@@ -219,7 +278,9 @@ class SceneBuilder:
             raise ValueError(f"cell {cell_id} not registered")
 
         # 셀의 월드 좌표 + offset
-        from fdw_sim.visualization.robot_loader import RobotLoader
+        from fdw_sim.visualization.robot_loader import (
+            RobotLoader, ROBOT_CATALOG, resolve_robot_usd_path,
+        )
 
         cell_prim = self._stage.GetPrimAtPath(cell_root)
         xf_cache = self._UsdGeom.XformCache()
@@ -232,6 +293,18 @@ class SceneBuilder:
             cell_pos[2] + offset[2],
         )
 
+        # 진단 로그 — USD 경로/위치를 명확히 출력
+        spec = ROBOT_CATALOG.get(robot_name)
+        if spec is not None:
+            usd_path = resolve_robot_usd_path(spec)
+            logger.info("[VIS] >>> attempting to load real robot %s for cell %s",
+                        robot_name, cell_id)
+            logger.info("[VIS]     USD path: %s", usd_path)
+            logger.info("[VIS]     base position (world): %s", world_pos)
+        else:
+            logger.error("[VIS] unknown robot_name: %s", robot_name)
+            return None
+
         loader = RobotLoader()
         prim_path = f"{cell_root}/RobotArm"
         articulation = loader.load_robot(
@@ -239,6 +312,23 @@ class SceneBuilder:
             prim_path=prim_path,
             position=world_pos,
         )
+
+        # 로드 결과 진단 — prim이 실제로 생성됐고 자식 prim이 있는지 확인
+        prim = self._stage.GetPrimAtPath(prim_path)
+        child_count = 0
+        if prim and prim.IsValid():
+            child_count = len(list(prim.GetChildren()))
+        if child_count == 0:
+            logger.warning("[VIS] *** robot prim %s has 0 children — "
+                           "USD likely failed to resolve (check Nucleus connection / "
+                           "ISAAC_NUCLEUS_DIR / path: %s)",
+                           prim_path, usd_path)
+        else:
+            logger.info("[VIS] <<< robot %s loaded successfully "
+                        "(prim=%s, children=%d, articulation=%s)",
+                        robot_name, prim_path, child_count,
+                        articulation is not None)
+
         return articulation
 
     def add_robot_arm_placeholder(self, cell_id: str,

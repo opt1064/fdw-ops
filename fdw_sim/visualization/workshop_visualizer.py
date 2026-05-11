@@ -257,6 +257,34 @@ class WorkshopVisualizer:
         logger.info("[VIS] workshop scene built: %d cells, %d AMRs",
                     len(self._pending_cells), len(self._pending_amrs))
 
+        # 카메라 자동 framing — 모든 셀이 한눈에 보이도록 viewport 이동
+        self._auto_frame_camera()
+
+    def _auto_frame_camera(self) -> None:
+        """등록된 셀들의 bounding box를 기반으로 viewport 카메라 자동 배치."""
+        if not self.cell_positions:
+            return
+        xs = [p[0] for p in self.cell_positions.values()]
+        ys = [p[1] for p in self.cell_positions.values()]
+        zs = [p[2] for p in self.cell_positions.values()]
+        cx = (min(xs) + max(xs)) / 2.0
+        cy = (min(ys) + max(ys)) / 2.0
+        cz = (min(zs) + max(zs)) / 2.0 + self.config.cell_size[2] / 2.0
+
+        # 셀 간격을 기반으로 카메라 거리 결정
+        spread = max(max(xs) - min(xs), max(ys) - min(ys), 4.0)
+        distance = max(spread * 1.8, 8.0)
+        height = max(spread * 0.7, 4.0)
+
+        try:
+            self.scene.frame_viewport_to_scene(
+                center=(cx, cy, cz),
+                distance=distance,
+                height=height,
+            )
+        except Exception:
+            logger.exception("[VIS] auto frame camera failed")
+
     # ========================================================================
     # 좌표 헬퍼
     # ========================================================================
