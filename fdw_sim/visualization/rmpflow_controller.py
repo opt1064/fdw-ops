@@ -591,8 +591,176 @@ class RMPflowController:
         return self._last_phase
 
     def get_tcp_position(self) -> Optional[Tuple[float, float, float]]:
-        """현재 추적 중인 TCP(엔드이펙터) 월드 위치 — spark emitter용."""
+        """현재 추적 중인 TCP(엔드이펙터) 월드 위치 — spark emitter용.
+
+        가능하면 articulation의 실제 FK 결과(`_read_actual_tcp_from_articulation`)를
+        반영한 위치이며, FK를 읽을 수 없는 환경(테스트, USD 로드 실패)에서는
+        커맨드된 target 위치로 fallback 한다.
+        """
         return self._last_tcp
+
+    def _read_actual_tcp_from_articulation(self) -> Optional[Tuple[float, float, float]]:
+        """articulation의 end-effector 링크에서 실제 월드 좌표를 FK로 읽어 반환.
+
+        반환 우선순위:
+            1) SingleArticulation에 end-effector 링크 접근자가 있으면 그쪽 사용
+               (`get_link_world_pose` / `get_world_pose` on `end_effector` 핸들)
+            2) USD stage에서 `<robot_prim>/<end_effector_frame>` 의 xform을
+               XformCache로 읽기
+            3) 위 두 가지가 모두 실패하면 None (호출자가 target_pos로 fallback)
+
+        주의:
+            - 동작은 모두 best-effort. 예외가 나도 절대 위로 던지지 않는다.
+            - heuristic 백엔드는 실제 IK가 아니므로, 이 함수가 None을 반환하면
+              spark emitter는 "이상적인 target" 좌표에 붙게 된다 (기존 동작).
+        """
+        art = getattr(self, "articulation", None)
+        if art is None:
+            return None
+        ee_frame = getattr(self.spec, "end_effector_frame", None) if self.spec else None
+        if not ee_frame:
+            return None
+
+        # --- 시도 1: Isaac Sim core API ----------------------------------
+        # 일부 SingleArticulation 구현은 link 단위 FK helper를 제공한다.
+        # API 가용 여부가 버전마다 다르므로 모두 best-effort.
+        try:
+            # 1a) get_link_world_pose / get_world_pose(link_name=...) 패턴
+            for method_name in ("get_link_world_pose",
+                                "get_world_pose_of_body",
+                                "get_body_world_pose"):
+                fn = getattr(art, method_name, None)
+                if callable(fn):
+                    try:
+                        result = fn(ee_frame)
+                    except TypeError:
+                        # 인자 시그니처가 다른 경우 — 다음 후보로
+                        continue
+                    pos = self._extract_position_from_pose(result)
+                    if pos is not None:
+                        return pos
+        except Exception as e:
+            logger.debug("[RMP] articulation link FK helper failed: %s", e)
+
+        # --- 시도 2: USD XformCache 로 ee 링크 prim의 world transform 직접 읽기
+        try:
+            prim_path = self._resolve_end_effector_prim_path(art, ee_frame)
+            if prim_path:
+                pos = self._read_world_translation_from_prim_path(prim_path)
+                if pos is not None:
+                    return pos
+        except Exception as e:
+            logger.debug("[RMP] USD xform FK read failed: %s", e)
+
+        return None
+
+    def _extract_position_from_pose(self, pose_result) -> Optional[Tuple[float, float, float]]:
+        """Isaac Sim FK helper 반환값에서 (x,y,z)만 안전하게 뽑아낸다.
+
+        반환 형태가 (pos, orient), [pos, orient], np.ndarray 등 다양해서
+        모두 처리한다.
+        """
+        if pose_result is None:
+            return None
+        try:
+            # 보통 (pos, orient) tuple
+            candidate = pose_result
+            if isinstance(pose_result, (tuple, list)) and len(pose_result) >= 1:
+                candidate = pose_result[0]
+            # numpy array / list / Gf.Vec3*
+            x = float(candidate[0])
+            y = float(candidate[1])
+            z = float(candidate[2])
+            return (x, y, z)
+        except Exception:
+            return None
+
+    def _resolve_end_effector_prim_path(self, art, ee_frame: str) -> Optional[str]:
+        """articulation의 root prim_path + ee_frame 으로 ee prim path 추정.
+
+        USD 계층 구조상 ee_frame은 robot root 아래 어딘가에 존재한다.
+        가장 흔한 패턴: `<robot_root>/<ee_frame>`.
+        실제 계층이 다른 경우(`<root>/panda_link7/panda_hand`)는
+        stage 탐색으로 보강한다.
+        """
+        # 1) articulation에서 root prim_path 추출
+        root = None
+        for attr in ("prim_path", "_prim_path"):
+            v = getattr(art, attr, None)
+            if isinstance(v, str) and v:
+                root = v
+                break
+        if root is None:
+            return None
+
+        # 2) 가장 단순한 후보 — root/<ee_frame>
+        simple = f"{root.rstrip('/')}/{ee_frame}"
+
+        # 3) stage가 있으면 simple 후보가 valid 한지 확인, 아니면 트리 탐색
+        stage = self._get_usd_stage(art)
+        if stage is None:
+            # stage 접근 불가 — 단순 후보를 그대로 반환 (XformCache가 None 처리)
+            return simple
+
+        try:
+            from pxr import Sdf  # type: ignore
+            if stage.GetPrimAtPath(Sdf.Path(simple)).IsValid():
+                return simple
+        except Exception:
+            pass
+
+        # 4) DFS 로 ee_frame 이름과 일치하는 prim 찾기
+        try:
+            root_prim = stage.GetPrimAtPath(root)
+            if not root_prim.IsValid():
+                return simple
+            stack = [root_prim]
+            while stack:
+                p = stack.pop()
+                if p.GetName() == ee_frame:
+                    return str(p.GetPath())
+                stack.extend(p.GetChildren())
+        except Exception:
+            pass
+        return simple
+
+    def _get_usd_stage(self, art):
+        """articulation으로부터 USD stage 핸들 best-effort 추출."""
+        # SingleArticulation에 stage 멤버가 있을 수 있음
+        for attr in ("_stage", "stage"):
+            s = getattr(art, attr, None)
+            if s is not None:
+                return s
+        # omni.usd가 있으면 컨텍스트에서 가져오기
+        try:
+            import omni.usd  # type: ignore
+            ctx = omni.usd.get_context()
+            if ctx is not None:
+                return ctx.get_stage()
+        except Exception:
+            return None
+        return None
+
+    def _read_world_translation_from_prim_path(self, prim_path: str) -> Optional[Tuple[float, float, float]]:
+        """USD prim의 world translation을 XformCache로 읽음."""
+        try:
+            from pxr import UsdGeom  # type: ignore
+        except Exception:
+            return None
+        stage = self._get_usd_stage(self.articulation)
+        if stage is None:
+            return None
+        try:
+            prim = stage.GetPrimAtPath(prim_path)
+            if not prim or not prim.IsValid():
+                return None
+            xf_cache = UsdGeom.XformCache()
+            world = xf_cache.GetLocalToWorldTransform(prim)
+            t = world.ExtractTranslation()
+            return (float(t[0]), float(t[1]), float(t[2]))
+        except Exception as e:
+            logger.debug("[RMP] XformCache read failed for %s: %s", prim_path, e)
+            return None
 
     # ------------------------------------------------------------------
     # 매 step 호출
@@ -604,12 +772,19 @@ class RMPflowController:
 
         if self._active_path is not None:
             target_pos = self._active_path.update(dt)
+            # 우선 commanded target으로 fallback 값을 채워둔다 — FK가 실패해도
+            # spark emitter가 None TCP로 끊기지 않도록.
             self._last_tcp = target_pos
             if not self._active_path.is_active():
                 self._active_path = None
                 self.go_home()
             else:
                 self._track_target(target_pos)
+                # joint를 갱신한 뒤(=실제 articulation pose가 업데이트된 뒤)
+                # end-effector의 실제 월드 좌표를 FK로 읽어 _last_tcp를 덮어쓴다.
+                actual = self._read_actual_tcp_from_articulation()
+                if actual is not None:
+                    self._last_tcp = actual
 
         # joint 보간 진행
         if self._blend_remaining > 0.0 and self._target_q is not None:
