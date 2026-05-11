@@ -28,7 +28,8 @@ ROS 2 / DDS 등 미들웨어를 통해 전체 공정을 운영하는 구조를 �
 |-------|------|--------|----------|
 | **1. Discrete Event** | FDW-OPS 운영체계 검증 (라우팅/버퍼/병목) | Pure Python | ✅ PoC-1 완료 |
 | **2. USD 시각화 (Level 2.0)** | 셀 / 로봇팔 / AMR / 부품 USD 표현 + transfer 애니메이션 | Isaac Sim 5.x | ✅ 구현 완료 |
-| **2.x Robot-in-the-loop** | 실 로봇 USD 모델 / IK / 충돌 / 접근성 | Isaac Sim 5.x | 🔧 다음 단계 |
+| **2.1. 실 로봇팔 + IK** | Franka Panda / UR10 USD 모델 + IK로 토치가 부품 추적 | Isaac Sim 5.x | ✅ 구현 완료 |
+| **2.x Robot-in-the-loop** | RMPflow 충돌회피 / 스파크 파티클 / 비전 시뮬레이션 | Isaac Sim 5.x | 🔧 다음 단계 |
 | **3. AI / Learning-in-the-loop** | RL 라우팅 / 합성데이터 / 자율복구 | Isaac Lab + SDG | 🔭 다음 단계 |
 
 ## 디렉토리 구조
@@ -61,8 +62,10 @@ fdw_sim/
 
 scripts/run_poc1.py            # PoC-1 메인 실행 스크립트 (discrete/isaac)
 scripts/run_poc1_level2.py     # PoC-1 Level 2 시각화 데모
+scripts/run_poc1_level2_1.py   # PoC-1 Level 2.1 실 로봇팔 + IK 데모
 tests/test_poc1_smoke.py       # discrete 모드 회귀 테스트
 tests/test_visualization_smoke.py  # 시각화 모듈 회귀 테스트
+tests/test_robot_loader_smoke.py   # Level 2.1 로봇 로더/IK smoke test
 ```
 
 ## 빠른 시작
@@ -110,11 +113,26 @@ ACCEPT_EULA=Y PRIVACY_CONSENT=Y python scripts/run_poc1_level2.py --livestream 2
 
 자세한 시각화 가이드: [docs/LEVEL2_VISUALIZATION.md](docs/LEVEL2_VISUALIZATION.md)
 
-### 4. 회귀 테스트
+### 4. Isaac Sim Level 2.1 — 실 로봇팔(Franka / UR10) + IK
+
+```bash
+# Franka Panda + IK (기본)
+ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
+    python scripts/run_poc1_level2_1.py --gui --real-robot --robot franka_panda
+
+# UR10 + WebRTC 스트리밍
+ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
+    python scripts/run_poc1_level2_1.py --livestream 2 --real-robot --robot ur10
+```
+
+자세한 가이드: [docs/LEVEL2_1_REAL_ROBOT.md](docs/LEVEL2_1_REAL_ROBOT.md)
+
+### 5. 회귀 테스트
 
 ```bash
 python tests/test_poc1_smoke.py            # discrete 모드 회귀
 python tests/test_visualization_smoke.py   # 시각화 모듈 검증
+python tests/test_robot_loader_smoke.py    # Level 2.1 로봇 로더 + IK smoke
 ```
 
 ## 표준 메시지 스키마

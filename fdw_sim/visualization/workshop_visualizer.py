@@ -18,6 +18,7 @@ from fdw_sim.cells.base.cell_base import DistributedIntelligenceCell
 from fdw_sim.cells.material.material_cell import MaterialCell
 from fdw_sim.messaging.bus import MessageBus, Topics
 from fdw_sim.visualization.scene_builder import SceneBuilder, SceneConfig
+# IK 컨트롤러는 lazy import (Isaac Sim 없을 때 부담 줄이기 위함)
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,13 @@ class WorkshopVizConfig:
     show_robot_arm: bool = True
     show_camera: bool = True
 
+    # Level 2.1: 실 로봇팔 사용 옵션
+    use_real_robot: bool = False             # True면 Franka Panda USD 로드
+    robot_name: str = "franka_panda"         # "franka_panda" | "ur10"
+    enable_ik: bool = True                   # 용접 시 IK로 토치가 부품 추적
+    weld_path_offset_y: float = 0.25         # 용접 경로의 y 방향 범위 (±)
+    weld_path_height: float = 0.05           # 용접 경로의 부품 표면 위 높이
+
 
 class WorkshopVisualizer:
     """추상 셀을 USD 스테이지에 매핑하고 step마다 부품 위치를 갱신.
@@ -117,6 +125,12 @@ class WorkshopVisualizer:
         self._material_cell: Optional[MaterialCell] = None
         self._known_rack_parts: set = set()
 
+        # Level 2.1: 실 로봇팔 + IK 컨트롤러
+        # cell_id -> {"articulation": ..., "ik": IKController, "spec": RobotSpec}
+        self._robots: Dict[str, Dict] = {}
+        # 현재 가공 중인 셀의 부품 위치 (용접 경로 계산)
+        self._cell_processing_part: Dict[str, str] = {}   # cell_id -> part_id
+
         # bus 구독 (셀 상태 변화 감지)
         self.bus.subscribe(Topics.CELL_STATUS, self._on_cell_status)
 
@@ -146,6 +160,65 @@ class WorkshopVisualizer:
         self._material_cell = cell
 
     # ========================================================================
+    # 로봇팔 spawn (placeholder vs 실 모델)
+    # ========================================================================
+    def _spawn_robot_arm(self, cell_id: str,
+                          color: Tuple[float, float, float] = (1.0, 0.45, 0.1)) -> None:
+        """use_real_robot 설정에 따라 placeholder 또는 실 USD 로봇팔을 생성.
+
+        실 로봇팔이 성공적으로 로드되면 IKController를 함께 등록한다.
+        로드 실패(자산 누락 등) 시 placeholder로 자동 fallback.
+        """
+        if not self.config.use_real_robot:
+            self.scene.add_robot_arm_placeholder(cell_id, color=color)
+            return
+
+        try:
+            articulation = self.scene.add_real_robot_arm(
+                cell_id,
+                robot_name=self.config.robot_name,
+                offset=(0.0, -0.3, self.config.cell_size[2] + 0.05),
+            )
+        except Exception as e:
+            logger.warning("[VIS] real robot load failed for %s: %s "
+                           "— falling back to placeholder", cell_id, e)
+            self.scene.add_robot_arm_placeholder(cell_id, color=color)
+            return
+
+        # IK 컨트롤러 준비
+        if self.config.enable_ik and articulation is not None:
+            try:
+                from fdw_sim.visualization.ik_controller import (
+                    IKConfig, IKController,
+                )
+                from fdw_sim.visualization.robot_loader import ROBOT_CATALOG
+                spec = ROBOT_CATALOG.get(self.config.robot_name)
+                if spec is not None:
+                    ctrl = IKController(articulation, spec, config=IKConfig())
+                    ctrl.go_home()
+                    self._robots[cell_id] = {
+                        "articulation": articulation,
+                        "ik": ctrl,
+                        "spec": spec,
+                    }
+                    logger.info("[VIS] real robot + IK controller attached to %s "
+                                "(robot=%s)", cell_id, self.config.robot_name)
+            except Exception as e:
+                logger.warning("[VIS] IK controller setup failed for %s: %s",
+                               cell_id, e)
+                self._robots[cell_id] = {
+                    "articulation": articulation,
+                    "ik": None,
+                    "spec": None,
+                }
+        else:
+            self._robots[cell_id] = {
+                "articulation": articulation,
+                "ik": None,
+                "spec": None,
+            }
+
+    # ========================================================================
     # 빌드
     # ========================================================================
     def build_scene(self) -> None:
@@ -171,7 +244,7 @@ class WorkshopVisualizer:
             if ctype == "material" and self.config.show_smart_rack:
                 self.scene.add_smart_rack(cid, capacity=8)
             elif ctype == "welding" and self.config.show_robot_arm:
-                self.scene.add_robot_arm_placeholder(cid, color=(1.0, 0.45, 0.1))
+                self._spawn_robot_arm(cid, color=(1.0, 0.45, 0.1))
             elif ctype == "inspection" and self.config.show_camera:
                 self.scene.add_camera_placeholder(cid)
             elif ctype == "forming" and self.config.show_robot_arm:
@@ -274,13 +347,63 @@ class WorkshopVisualizer:
                     self.spawn_part(pid, ptype, self._material_cell.cell_id)
                     self._known_rack_parts.add(pid)
 
+        # 3) IK 컨트롤러 업데이트 (용접 셀 로봇팔 → 부품 추적)
+        for cell_id, rob in self._robots.items():
+            ik = rob.get("ik")
+            if ik is None:
+                continue
+            ik.update(dt)
+
     # ========================================================================
     # 이벤트 핸들러
     # ========================================================================
     def _on_cell_status(self, msg) -> None:
-        """셀 상태 변경 이벤트 (현재는 로그용; 향후 시각 효과 추가)."""
-        # 추후: 로봇팔 회전/조명 색 변화 등 추가 가능
-        pass
+        """셀 상태 변경 이벤트 — 용접 셀이 PROCESSING이면 IK 경로 시작."""
+        try:
+            cell_id = getattr(msg, "cell_id", None)
+            state = getattr(msg, "state", None)
+            state_str = state.value if hasattr(state, "value") else str(state)
+        except Exception:
+            return
+
+        if cell_id is None or cell_id not in self._robots:
+            return
+
+        ik = self._robots[cell_id].get("ik")
+        if ik is None:
+            return
+
+        # PROCESSING 상태로 전환되면 용접 경로 시작
+        if state_str.upper() == "PROCESSING" and ik.is_idle():
+            self._start_welding_motion(cell_id)
+        elif state_str.upper() in ("IDLE", "READY") and not ik.is_idle():
+            # 가공 종료 → home으로
+            ik.go_home()
+
+    def _start_welding_motion(self, cell_id: str) -> None:
+        """용접 셀의 입력 버퍼 부품 위로 토치를 이동시키는 경로 시작."""
+        if cell_id not in self.cell_positions:
+            return
+        try:
+            from fdw_sim.visualization.ik_controller import WeldingPath
+        except Exception:
+            return
+
+        # 부품의 위치 (입력 버퍼 상단)
+        bx, by, bz = self._input_buffer_pos(cell_id)
+        oy = self.config.weld_path_offset_y
+        h = self.config.weld_path_height
+
+        path = WeldingPath(
+            start=(bx, by - oy, bz + h),
+            end=(bx, by + oy, bz + h),
+            travel_time_sec=8.0,
+            approach_height=0.1,
+        )
+        ik = self._robots[cell_id]["ik"]
+        ik.start_path(path)
+        logger.info("[VIS] welding motion started @ %s (path=%s -> %s)",
+                    cell_id, path.start, path.end)
 
     # ========================================================================
     # 디버깅

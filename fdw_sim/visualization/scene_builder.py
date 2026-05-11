@@ -200,6 +200,47 @@ class SceneBuilder:
         logger.info("[VIS] AMR %s placed @ %s", amr_id, position)
         return amr_path
 
+    def add_real_robot_arm(self, cell_id: str,
+                            robot_name: str = "franka_panda",
+                            offset: Tuple[float, float, float] = (0.0, -0.3, 0.85),
+                            ) -> Optional[object]:
+        """Isaac Sim 기본 제공 USD 로봇팔(Franka Panda 등)을 셀 위에 로드.
+
+        Args:
+            cell_id: 이미 add_cell_workbench로 등록된 셀
+            robot_name: ROBOT_CATALOG의 키 (franka_panda, ur10 등)
+            offset: 셀 작업대 기준 로봇 베이스 위치
+
+        Returns:
+            Articulation 핸들 (SingleArticulation) 또는 None
+        """
+        cell_root = self._cell_prims.get(cell_id)
+        if cell_root is None:
+            raise ValueError(f"cell {cell_id} not registered")
+
+        # 셀의 월드 좌표 + offset
+        from fdw_sim.visualization.robot_loader import RobotLoader
+
+        cell_prim = self._stage.GetPrimAtPath(cell_root)
+        xf_cache = self._UsdGeom.XformCache()
+        world_xform = xf_cache.GetLocalToWorldTransform(cell_prim)
+        cell_pos = world_xform.ExtractTranslation()
+
+        world_pos = (
+            cell_pos[0] + offset[0],
+            cell_pos[1] + offset[1],
+            cell_pos[2] + offset[2],
+        )
+
+        loader = RobotLoader()
+        prim_path = f"{cell_root}/RobotArm"
+        articulation = loader.load_robot(
+            robot_name=robot_name,
+            prim_path=prim_path,
+            position=world_pos,
+        )
+        return articulation
+
     def add_robot_arm_placeholder(self, cell_id: str,
                                    color: Tuple[float, float, float] = (1.0, 0.5, 0.0)) -> str:
         """간이 로봇팔 — 3 segment articulated 박스 (USD 모델 미존재 시 placeholder)."""

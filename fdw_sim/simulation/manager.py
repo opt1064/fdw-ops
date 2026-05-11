@@ -59,6 +59,13 @@ class SimulationConfig:
     enable_visualization: bool = True
     transfer_anim_duration_sec: float = 2.0
 
+    # Level 2.1: 실 로봇팔 옵션
+    use_real_robot: bool = False        # True면 Franka/UR10 USD 로드, False면 placeholder 박스
+    robot_name: str = "franka_panda"    # "franka_panda" | "ur10" | "franka_alt"
+    enable_ik: bool = True              # IK 컨트롤러 활성화 (Lula 우선, 실패 시 휴리스틱 fallback)
+    weld_path_offset_y: float = 0.25    # 용접 경로 길이 (m), 입력 버퍼 중심 ±offset
+    weld_path_height: float = 0.05      # 부품 위 용접 높이 (m)
+
 
 # =============================================================================
 # Manager
@@ -230,6 +237,11 @@ class SimulationManager:
 
         viz_cfg = WorkshopVizConfig(
             transfer_duration_sec=self.config.transfer_anim_duration_sec,
+            use_real_robot=self.config.use_real_robot,
+            robot_name=self.config.robot_name,
+            enable_ik=self.config.enable_ik,
+            weld_path_offset_y=self.config.weld_path_offset_y,
+            weld_path_height=self.config.weld_path_height,
         )
         self.visualizer = WorkshopVisualizer(bus=self.bus, config=viz_cfg)
 
