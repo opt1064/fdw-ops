@@ -202,6 +202,65 @@ def _collect_variants_on_prim(prim) -> Dict[str, Dict[str, object]]:
     return out
 
 
+def _open_stage_tolerant(Usd, usd_path: Path):
+    """Composition error 가 발생해도 stage 객체를 돌려받기 위한 헬퍼.
+
+    Thor 실측에서 NovaCarter 의 ``nova_carter.usd`` 는 variant 선택을
+    명시하지 않은 상태로 ``Usd.Stage.Open`` 하면 sublayer 누락 →
+    ``Error in 'operator()' at line 2549 ... 'arcNum < srcInfo.size()'``
+    composition assertion 이 RuntimeError 로 Python 까지 전파되어
+    stage 를 다루지도 못한 채 죽어버린다.
+
+    하지만 variant set / variant 이름 메타데이터는 ``nova_carter.usd``
+    의 root layer 에 직접 박혀 있으므로, **sublayer/payload 가 일부
+    실패해도** root layer 만 열리면 variant 덤프는 가능하다. ``Tf.ErrorMark``
+    + ``LoadNone`` 으로 root 만 열고 composition 으로 인한 예외를
+    경고로 강등한다.
+    """
+    from pxr import Sdf, Tf  # type: ignore
+
+    # 1) 가장 보수적: SessionLayer 없이 root layer 만 열고 payload load=None
+    try:
+        mark = Tf.ErrorMark()
+        layer = Sdf.Layer.FindOrOpen(str(usd_path))
+        if layer is None:
+            raise RuntimeError(f"Sdf.Layer.FindOrOpen returned None for {usd_path}")
+        stage = Usd.Stage.Open(layer, load=Usd.Stage.LoadNone)
+        # ErrorMark 안의 모든 USD error 는 stderr 로 한 줄씩만 흘리고 흡수
+        if not mark.IsClean():
+            errors = list(mark.GetErrors())
+            for e in errors[:6]:
+                print(f"    [usd-warn] {e.commentary.splitlines()[0]}",
+                      file=sys.stderr)
+            if len(errors) > 6:
+                print(f"    [usd-warn] ({len(errors) - 6} more errors hidden)",
+                      file=sys.stderr)
+            mark.Clear()
+        if stage is not None:
+            return stage
+    except Exception as e1:
+        print(f"    [warn] tolerant open (LoadNone) failed: {e1}", file=sys.stderr)
+
+    # 2) Fallback — payload 까지 따라가는 일반 open. 일부 케이스에서는 더 많은
+    #    variant 가 보이지만, composition assertion 으로 죽을 수 있다.
+    try:
+        return Usd.Stage.Open(str(usd_path))
+    except Exception as e2:
+        # 마지막 시도 — layer 단독 open 후 anonymous root 에 sublayer 로 끼움
+        try:
+            from pxr import Sdf  # type: ignore
+            layer = Sdf.Layer.FindOrOpen(str(usd_path))
+            if layer is not None:
+                anon = Sdf.Layer.CreateAnonymous("dump_variants_root")
+                anon.subLayerPaths.append(layer.identifier)
+                return Usd.Stage.Open(anon, load=Usd.Stage.LoadNone)
+        except Exception as e3:
+            print(f"    [warn] anonymous-sublayer open failed: {e3}",
+                  file=sys.stderr)
+        raise RuntimeError(
+            f"All Usd.Stage.Open attempts failed for {usd_path}: {e2}")
+
+
 def dump_variants(Usd, usd_path: Path, recurse: bool = False
                   ) -> Dict[str, object]:
     """USD 의 variant 구조를 dict 로 반환.
@@ -221,13 +280,18 @@ def dump_variants(Usd, usd_path: Path, recurse: bool = False
               ...
           }
         }
+
+    Note:
+        Composition error 가 발생해도 root layer 만 열어 variant 메타데이터
+        는 정상 추출한다 (``_open_stage_tolerant``). sublayer / payload 가
+        없어도 variant 이름은 root layer 에 박혀 있으므로 OK.
     """
     if not usd_path.is_file():
         raise FileNotFoundError(f"USD not found: {usd_path}")
 
-    stage = Usd.Stage.Open(str(usd_path))
+    stage = _open_stage_tolerant(Usd, usd_path)
     if stage is None:
-        raise RuntimeError(f"Usd.Stage.Open returned None for {usd_path}")
+        raise RuntimeError(f"Failed to open stage for {usd_path}")
 
     result: Dict[str, object] = {
         "path": str(usd_path.resolve()),
@@ -235,21 +299,49 @@ def dump_variants(Usd, usd_path: Path, recurse: bool = False
         "prims": {},
     }
 
-    default = stage.GetDefaultPrim()
-    if default and default.IsValid():
-        result["default_prim"] = str(default.GetPath())
-        v = _collect_variants_on_prim(default)
-        if v:
-            result["prims"][str(default.GetPath())] = v  # type: ignore[index]
+    # default prim — composition 실패 시 None 일 수 있으므로 root layer 의
+    # default prim spec 으로 fallback.
+    default_prim_path: Optional[str] = None
+    try:
+        default = stage.GetDefaultPrim()
+        if default and default.IsValid():
+            default_prim_path = str(default.GetPath())
+            v = _collect_variants_on_prim(default)
+            if v:
+                result["prims"][default_prim_path] = v  # type: ignore[index]
+    except Exception as e:
+        print(f"    [warn] GetDefaultPrim failed: {e}", file=sys.stderr)
+
+    # composition 이 실패해 GetDefaultPrim 이 비어 있어도, root layer 의
+    # defaultPrim 토큰으로 직접 prim 을 잡아본다.
+    if default_prim_path is None:
+        try:
+            root_layer = stage.GetRootLayer()
+            dp = root_layer.defaultPrim  # type: ignore[attr-defined]
+            if dp:
+                default_prim_path = f"/{dp}"
+                prim = stage.GetPrimAtPath(default_prim_path)
+                if prim and prim.IsValid():
+                    v = _collect_variants_on_prim(prim)
+                    if v:
+                        result["prims"][default_prim_path] = v  # type: ignore[index]
+        except Exception as e:
+            print(f"    [warn] root-layer defaultPrim fallback failed: {e}",
+                  file=sys.stderr)
+
+    result["default_prim"] = default_prim_path or ""
 
     if recurse:
-        for prim in stage.TraverseAll():
-            path_str = str(prim.GetPath())
-            if path_str in result["prims"]:  # type: ignore[operator]
-                continue
-            v = _collect_variants_on_prim(prim)
-            if v:
-                result["prims"][path_str] = v  # type: ignore[index]
+        try:
+            for prim in stage.TraverseAll():
+                path_str = str(prim.GetPath())
+                if path_str in result["prims"]:  # type: ignore[operator]
+                    continue
+                v = _collect_variants_on_prim(prim)
+                if v:
+                    result["prims"][path_str] = v  # type: ignore[index]
+        except Exception as e:
+            print(f"    [warn] TraverseAll failed: {e}", file=sys.stderr)
 
     return result
 

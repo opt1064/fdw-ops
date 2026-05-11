@@ -264,6 +264,10 @@ download_amr() {
     download_subpath "Isaac/Robots/NVIDIA/NovaCarter/Variants/Sensors/nova_carter_no_sensors.usd" || true
     download_subpath "Isaac/Robots/NVIDIA/NovaCarter/Variants/Configuration/nova_carter_merged_no_internals.usd" || true
     download_subpath "Isaac/Robots/NVIDIA/NovaCarter/Variants/Configuration/nova_carter_merged_with_internals.usd" || true
+    # 2026-05 Thor 실측 추가 — merged_no_internals 가 sublayer 로 요구하는 파일.
+    # 누락 시 _ReportErrors 에서 "Could not load sublayer ...
+    # nova_carter_sim_optimized.usd" 가 발생하고 reference 전체가 expire 된다.
+    download_subpath "Isaac/Robots/NVIDIA/NovaCarter/Variants/nova_carter_sim_optimized.usd" || true
     # Nova Carter Props / Materials — 메쉬와 텍스처
     local nc_props=(
         "Isaac/Robots/NVIDIA/NovaCarter/Props/nova_carter_base.usd"
@@ -274,6 +278,21 @@ download_amr() {
     )
     for p in "${nc_props[@]}"; do
         download_subpath "$p" || true
+    done
+
+    # Nova Carter sensor sub-USD payloads (Sensors variant != None 일 때 필요).
+    # Thor 실측에서 14 개 "Could not open asset" payload missing warning 의
+    # 원인. asset_catalog 가 Sensors="None" 이름으로 설정한 경우에도, variant
+    # 이름이 USD 와 일치하지 않으면 default Sensors variant 가 적용되어
+    # 이 payload 들을 여전히 요구한다. 따라서 best-effort 로 받아둔다.
+    local nc_sensors=(
+        "Isaac/Sensors/LeopardImaging/Hawk/hawk_v1.1_nominal.usd"
+        "Isaac/Sensors/LeopardImaging/Owl/owl.usd"
+        "Isaac/Sensors/Slamtec/RPLidar_S2e.usd"
+        "Isaac/Sensors/HESAI/XT-32.usd"
+    )
+    for s in "${nc_sensors[@]}"; do
+        download_subpath "$s" || true
     done
 
     # NVIDIA Jetbot — 컴팩트 2륜 AMR (대부분 self-contained)
