@@ -5,45 +5,28 @@ inspect_usd_refs.py 는 USDC 바이너리에서 regex 로 토큰을 뽑기 때�
 이 스크립트는 pxr.Usd 로 stage 를 열어 라이브 composition 결과의 variant
 이름을 한 번에 정확히 추출한다.
 
-사용법 (반드시 Isaac Sim 환경 또는 pxr 가 설치된 conda env 에서 실행):
+사용법:
 
+    # 가장 간단 — conda env 만 활성화하면 자동으로 isaacsim extscache 에서
+    # pxr 를 찾아 sys.path 에 주입한다 (SimulationApp 부팅 불필요).
+    conda activate isaac_sim
     cd ~/isaac_workspace/projects/fdw-sim
-    conda activate isaac_sim   # 또는 source ~/isaac_workspace/.../setup.sh
     python scripts/dump_usd_variants.py \
         ~/isaac_assets/Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd
+
+    # 자동 발견이 실패하면 환경변수로 직접 지정 가능:
+    FDW_PXR_PATH=/path/to/pxr/parent_dir \
+        python scripts/dump_usd_variants.py ...
 
     # JSON 으로 저장해서 asset_catalog 수정에 활용
     python scripts/dump_usd_variants.py --json \
         ~/isaac_assets/Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd \
         > nova_carter_variants.json
 
-출력 예 (NovaCarter — 가설):
-
-    === /home/.../nova_carter.usd
-    Root prim: /nova_carter  (default)
-
-    Variant sets on /nova_carter (3):
-
-      Configuration (default = 'Base')
-        - Base
-        - Fully Merged
-        - No_Internals
-        - Skirt_only
-
-      Physics (default = 'Physics_Base')
-        - No_Physics
-        - Physics_Base
-
-      Sensors (default = 'None')
-        - None
-        - All_Sensors
-
-    Suggested asset_catalog mapping:
-        variant_selection={
-            "Configuration": "Base",
-            "Physics":       "Physics_Base",
-            "Sensors":       "All_Sensors",
-        }
+Isaac Sim 5.1 wheel 설치 (pip install isaacsim) 의 경우 pxr 는
+``<conda_env>/lib/pythonX.Y/site-packages/isaacsim/extscache/
+omni.usd.libs-*/pxr/`` 안에 있다. 일반 ``import pxr`` 로는 잡히지
+않으므로 이 스크립트가 해당 경로를 자동 탐색해 sys.path 에 추가한다.
 
 Importantly: 이 도구는 reference attach 를 하지 않고 ``Usd.Stage.Open()`` 으로
 직접 USD layer 만 연다. 따라서 sub-USD payload 가 누락된 상태에서도 variant
@@ -54,27 +37,161 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import sysconfig
 from pathlib import Path
 from typing import Dict, List, Optional
 
 
+def _candidate_extscache_roots() -> List[Path]:
+    """isaacsim 의 extscache 가 있을 만한 디렉토리 후보 나열.
+
+    Isaac Sim 5.1 wheel 설치 시 pxr 는 다음 위치에 있다:
+        <site-packages>/isaacsim/extscache/omni.usd.libs-*/pxr/
+
+    이 함수는 그 부모(`omni.usd.libs-*` 의 부모) 를 추출 가능한 모든
+    site-packages 에서 모은다.
+    """
+    roots: List[Path] = []
+
+    # 1) 현재 인터프리터의 site-packages
+    try:
+        purelib = Path(sysconfig.get_paths()["purelib"])
+        roots.append(purelib / "isaacsim" / "extscache")
+    except Exception:
+        pass
+
+    # 2) sys.path 에 있는 site-packages 모두
+    for p in sys.path:
+        if not p:
+            continue
+        pp = Path(p)
+        if pp.name in ("site-packages", "dist-packages"):
+            roots.append(pp / "isaacsim" / "extscache")
+
+    # 3) CONDA_PREFIX 가 있으면 그 안의 표준 위치
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        for py in ("python3.11", "python3.10", "python3.12", "python3.9"):
+            cand = (Path(conda_prefix) / "lib" / py / "site-packages"
+                    / "isaacsim" / "extscache")
+            roots.append(cand)
+
+    # 4) 사용자 환경변수로 직접 지정 가능
+    env = os.environ.get("FDW_PXR_PATH")
+    if env:
+        # FDW_PXR_PATH 는 pxr 의 부모 dir (= sys.path 에 추가될 경로) 를 직접 지정
+        # 그러면 _find_pxr_dir 가 곧장 사용
+        return [Path(env)]
+
+    # 5) IsaacLab _isaac_sim 경로
+    home = Path.home()
+    for p in (home / "IsaacLab" / "_isaac_sim",
+              home / "isaac-sim",
+              Path("/opt/isaac-sim"),
+              Path("/isaac-sim")):
+        roots.append(p / "extscache")
+
+    # 중복 제거 (순서 유지)
+    seen: set = set()
+    uniq: List[Path] = []
+    for r in roots:
+        s = str(r)
+        if s in seen:
+            continue
+        seen.add(s)
+        uniq.append(r)
+    return uniq
+
+
+def _find_pxr_dir() -> Optional[Path]:
+    """pxr 패키지 부모 디렉토리(= sys.path 에 추가될 경로) 자동 탐색.
+
+    Isaac Sim 5.1 extscache 구조:
+        <extscache>/omni.usd.libs-<ver>/pxr/__init__.py
+    sys.path 에 추가해야 할 건 ``<extscache>/omni.usd.libs-<ver>/`` 부모.
+
+    FDW_PXR_PATH 환경변수가 있으면 그 값을 그대로 사용 (위 _candidate 가
+    이미 단일 후보로 반환했다면 그 안의 ``pxr`` 존재만 확인).
+    """
+    env = os.environ.get("FDW_PXR_PATH")
+    if env:
+        p = Path(env)
+        if (p / "pxr" / "__init__.py").is_file():
+            return p
+        # FDW_PXR_PATH 가 pxr 부모(=parent of parent) 인 경우도 허용
+        for child in p.glob("omni.usd.libs*"):
+            if (child / "pxr" / "__init__.py").is_file():
+                return child
+        return None
+
+    for root in _candidate_extscache_roots():
+        if not root.is_dir():
+            continue
+        # omni.usd.libs-<version>/pxr/__init__.py 패턴
+        for child in sorted(root.glob("omni.usd.libs*")):
+            init = child / "pxr" / "__init__.py"
+            if init.is_file():
+                return child
+    return None
+
+
 def _import_pxr():
-    """pxr.Usd 를 lazy import — Isaac Sim 환경이 아닐 때 친절한 에러."""
+    """pxr.Usd 를 import 시도. 실패 시 extscache 자동 발견 후 재시도.
+
+    Isaac Sim 5.1 wheel 설치 환경에서는 pxr 가 sys.path 에 없으므로
+    isaacsim/extscache/omni.usd.libs-*/ 를 sys.path 에 추가한다.
+    """
+    # 1) 정공법 — 이미 sys.path 에 있으면 OK
     try:
         from pxr import Usd  # type: ignore
         return Usd
-    except ImportError as e:
-        print("[FAIL] pxr.Usd import failed:", e, file=sys.stderr)
-        print("", file=sys.stderr)
-        print("이 스크립트는 USD 라이브러리(pxr) 가 필요합니다.", file=sys.stderr)
-        print("다음 중 하나로 실행하세요:", file=sys.stderr)
-        print("  1) conda activate isaac_sim", file=sys.stderr)
-        print("  2) source ~/isaac_workspace/.../setup_python_env.sh", file=sys.stderr)
-        print("  3) Isaac Sim 의 python.sh 로 직접 실행:", file=sys.stderr)
-        print("       ~/isaac-sim/python.sh scripts/dump_usd_variants.py ...",
-              file=sys.stderr)
-        raise SystemExit(2)
+    except ImportError:
+        pass
+
+    # 2) 자동 발견
+    pxr_parent = _find_pxr_dir()
+    if pxr_parent is not None:
+        sys.path.insert(0, str(pxr_parent))
+        # extscache 안의 omni.usd.libs 는 pxr 의 .so 들이 RPATH 로 같은 디렉토리
+        # 의 다른 .so 들을 참조하는 경우가 많다. LD_LIBRARY_PATH 도 보강.
+        ld = os.environ.get("LD_LIBRARY_PATH", "")
+        if str(pxr_parent) not in ld:
+            os.environ["LD_LIBRARY_PATH"] = (
+                f"{pxr_parent}:{ld}" if ld else str(pxr_parent))
+        try:
+            from pxr import Usd  # type: ignore
+            # 성공 — 사용자에게 어디서 찾았는지 알려준다
+            print(f"[INFO] pxr loaded from: {pxr_parent}", file=sys.stderr)
+            return Usd
+        except ImportError as e2:
+            print(f"[WARN] pxr 부모 디렉토리는 찾았지만 import 가 여전히 실패: {e2}",
+                  file=sys.stderr)
+            print(f"       경로: {pxr_parent}", file=sys.stderr)
+            print("       LD_LIBRARY_PATH 보강 후에도 의존 .so 가 없을 수 있음.",
+                  file=sys.stderr)
+
+    # 3) 최종 실패 — 사용자에게 친절한 진단 메시지
+    print("[FAIL] pxr.Usd 를 어떻게도 import 할 수 없습니다.", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("탐색한 위치:", file=sys.stderr)
+    for cand in _candidate_extscache_roots()[:6]:
+        marker = "OK " if cand.is_dir() else "X  "
+        print(f"  [{marker}] {cand}", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("다음 중 하나를 시도하세요:", file=sys.stderr)
+    print("  1) conda activate isaac_sim  (이미 했다면 다음 단계로)", file=sys.stderr)
+    print("  2) FDW_PXR_PATH 로 pxr 부모 디렉토리 직접 지정:", file=sys.stderr)
+    print("     find $CONDA_PREFIX -path '*/pxr/__init__.py' 2>/dev/null", file=sys.stderr)
+    print("     → 출력된 경로의 ``../`` (pxr 의 부모) 를 FDW_PXR_PATH 로 export",
+          file=sys.stderr)
+    print("       예: export FDW_PXR_PATH=$CONDA_PREFIX/lib/python3.11/"
+          "site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+...", file=sys.stderr)
+    print("  3) SimulationApp 부팅을 거치는 wrapper 로 실행:", file=sys.stderr)
+    print("     ~/IsaacLab/isaaclab.sh -p scripts/dump_usd_variants.py ...",
+          file=sys.stderr)
+    raise SystemExit(2)
 
 
 def _collect_variants_on_prim(prim) -> Dict[str, Dict[str, object]]:
