@@ -82,26 +82,26 @@ ASSET_CATALOG: Dict[str, UsdAssetSpec] = {
         #   Physics      : No_Physics / Physics_Base
         #   Sensors      : None / All_Sensors
         #
-        # 2026-05 Thor 실측 분기: 첫 시도("Configuration"="Base")는 USD
-        # composition 단계에서 ``arcNum < srcInfo.size()`` assertion 으로
-        # 실패했고, 누락된 sublayer 경로가 ``Variants/
-        # nova_carter_merged_no_internals.usd`` 로 보고됐다. 즉 실제 USD 에는
-        # "Base" 라는 variant 가 없으며 옳은 이름은 "No_Internals" 계열이다.
-        # 또한 Sensors="All_Sensors" 는 Hawk / Owl / RPLidar / XT-32 등 5 개
-        # sub-USD payload 를 모두 요구해 download_isaac_assets.sh 가 별도로
-        # 끌어오지 않으면 USD payload missing 경고로 이어진다. 따라서:
+        # 2026-05-11 Thor 실측 (scripts/dump_usd_variants.py 라이브 덤프 결과):
+        #   Configuration : Base / Full_Merged / No_Internals / Skirt_only
+        #                   (default = No_Internals)
+        #   Physics       : None / Physics_Base
+        #                   (default = Physics_Base)
+        #   Sensors       : All_Sensors / None
+        #                   (default = All_Sensors)
+        #
+        # 따라서 카탈로그가 선택해야 하는 값은:
         #   * Configuration = "No_Internals" → CreateJoint body0/body1 누락
-        #     경고를 제거하기 위해 internal joint 가 사라진 merged 변형 선택
-        #   * Sensors       = "None"         → sub-USD payload 의존 제거
-        #     (sensor 가 필요해지면 download_isaac_assets.sh 에 5 개 경로 추가
-        #      후 Sensors = "All_Sensors" 로 다시 바꾼다)
+        #     경고 회피용 internal-joint 제거 merged 변형 (USD default 와 동일)
+        #   * Sensors       = "None"         → Hawk / Owl / RPLidar / XT-32
+        #     payload 의존 제거 (별도 sub-USD 가 아니라 root layer 내 빈 variant)
         #   * Physics       = "Physics_Base" → joint/articulation 유지
         #
-        # variant 이름 spelling이 실제 USD와 다를 경우 (예: "Fully Merged" vs
-        # "Full_Merged"), scene_builder._apply_variant_selection 가
+        # 위 세 값은 USD 가 실제로 노출하는 정확한 spelling 이다. variant 이름
+        # 이 USD 와 어긋날 경우 scene_builder._apply_variant_selection 가
         # SetVariantSelection 실패를 감지하고 사용 가능한 variant 목록을 WARN
-        # 로그로 출력한다. 더 정확한 이름이 필요하면 scripts/dump_usd_variants.py
-        # (AppLauncher 기반) 로 라이브 덤프 가능.
+        # 로그로 출력한다. 새로운 USD 빌드에서 spelling 이 바뀌면
+        # scripts/dump_usd_variants.py (AppLauncher 기반) 로 재확인 가능.
         variant_selection={
             "Configuration": "No_Internals",
             "Physics": "Physics_Base",

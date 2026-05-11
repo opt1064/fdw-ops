@@ -202,6 +202,49 @@ def _collect_variants_on_prim(prim) -> Dict[str, Dict[str, object]]:
     return out
 
 
+def _get_tf_error_mark_cls():
+    """Isaac Sim 5.1 의 pxr.Tf 에서 ``ErrorMark`` 를 안전하게 가져온다.
+
+    Thor 실측: 일부 Isaac Sim 5.1 wheel 빌드의 ``pxr.Tf`` 는 ``ErrorMark``
+    심볼을 노출하지 않는다 (``module 'pxr.Tf' has no attribute 'ErrorMark'``).
+    이런 환경에서도 동작하도록, fallback 으로 누구나 받아들이는 더미
+    context manager 를 돌려준다.
+
+    Returns:
+        Tf.ErrorMark 호환 클래스 — IsClean()/GetErrors()/Clear() 시그니처를
+        모두 충족. 진짜가 없는 경우엔 항상 IsClean()=True 를 반환하는 더미.
+    """
+    try:
+        from pxr import Tf  # type: ignore
+        em = getattr(Tf, "ErrorMark", None)
+        if em is not None:
+            return em
+    except Exception:
+        pass
+
+    class _DummyErrorMark:
+        """ErrorMark 가 없는 환경용 no-op shim.
+
+        실제로는 USD composition error 가 발생해도 detect 할 수 없지만,
+        ``Usd.Stage.Open`` 자체가 ``RuntimeError`` 를 던지지 않는다면
+        그대로 stage 를 돌려주는 것으로 충분하다. 던지면 except 절이 잡는다.
+        """
+        def __init__(self):  # noqa: D401
+            self._cleared = True
+        def IsClean(self) -> bool:
+            return True
+        def GetErrors(self):
+            return []
+        def Clear(self) -> None:
+            self._cleared = True
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    return _DummyErrorMark
+
+
 def _open_stage_tolerant(Usd, usd_path: Path):
     """Composition error 가 발생해도 stage 객체를 돌려받기 위한 헬퍼.
 
@@ -213,29 +256,50 @@ def _open_stage_tolerant(Usd, usd_path: Path):
 
     하지만 variant set / variant 이름 메타데이터는 ``nova_carter.usd``
     의 root layer 에 직접 박혀 있으므로, **sublayer/payload 가 일부
-    실패해도** root layer 만 열리면 variant 덤프는 가능하다. ``Tf.ErrorMark``
-    + ``LoadNone`` 으로 root 만 열고 composition 으로 인한 예외를
-    경고로 강등한다.
+    실패해도** root layer 만 열리면 variant 덤프는 가능하다.
+
+    전략 (Thor 5.1 호환성 보강 후):
+      1) ``Sdf.Layer.FindOrOpen`` + ``Stage.Open(layer, LoadNone)``
+         — payload 따라가지 않음. Tf.ErrorMark 가 있으면 흡수, 없으면
+         그대로 통과 (USD 가 RuntimeError 를 던지지 않는 한 OK).
+      2) plain ``Stage.Open(str(path))`` — payload 까지 따라가지만
+         variant metadata 가 더 풍부할 수 있음.
+      3) Anonymous sublayer 트릭 — root layer 를 anon root 의 sublayer 로
+         박아 composition 격리.
+
+    2026-05-11 Thor 실측: 1) 단계가 ``Tf.ErrorMark`` AttributeError 로
+    빠지면 2) 가 성공적으로 root layer 를 열어 variant 덤프 가능 (실측).
+    이 경로를 빠르게 만들기 위해 1) 의 ``Tf.ErrorMark`` 가 없을 때엔
+    no-op shim 으로 대체한다.
     """
-    from pxr import Sdf, Tf  # type: ignore
+    from pxr import Sdf  # type: ignore
+    ErrorMarkCls = _get_tf_error_mark_cls()
 
     # 1) 가장 보수적: SessionLayer 없이 root layer 만 열고 payload load=None
     try:
-        mark = Tf.ErrorMark()
+        mark = ErrorMarkCls()
         layer = Sdf.Layer.FindOrOpen(str(usd_path))
         if layer is None:
             raise RuntimeError(f"Sdf.Layer.FindOrOpen returned None for {usd_path}")
         stage = Usd.Stage.Open(layer, load=Usd.Stage.LoadNone)
-        # ErrorMark 안의 모든 USD error 는 stderr 로 한 줄씩만 흘리고 흡수
-        if not mark.IsClean():
-            errors = list(mark.GetErrors())
-            for e in errors[:6]:
-                print(f"    [usd-warn] {e.commentary.splitlines()[0]}",
-                      file=sys.stderr)
-            if len(errors) > 6:
-                print(f"    [usd-warn] ({len(errors) - 6} more errors hidden)",
-                      file=sys.stderr)
-            mark.Clear()
+        # ErrorMark 안의 모든 USD error 는 stderr 로 한 줄씩만 흘리고 흡수.
+        # 더미 shim 은 항상 IsClean()=True 라 이 블록은 그냥 통과한다.
+        try:
+            if not mark.IsClean():
+                errors = list(mark.GetErrors())
+                for e in errors[:6]:
+                    try:
+                        msg = e.commentary.splitlines()[0]
+                    except Exception:
+                        msg = str(e)
+                    print(f"    [usd-warn] {msg}", file=sys.stderr)
+                if len(errors) > 6:
+                    print(f"    [usd-warn] ({len(errors) - 6} more errors hidden)",
+                          file=sys.stderr)
+                mark.Clear()
+        except Exception:
+            # ErrorMark 인터페이스가 예상 외로 다른 경우 — 무시
+            pass
         if stage is not None:
             return stage
     except Exception as e1:
@@ -244,11 +308,12 @@ def _open_stage_tolerant(Usd, usd_path: Path):
     # 2) Fallback — payload 까지 따라가는 일반 open. 일부 케이스에서는 더 많은
     #    variant 가 보이지만, composition assertion 으로 죽을 수 있다.
     try:
-        return Usd.Stage.Open(str(usd_path))
+        stage = Usd.Stage.Open(str(usd_path))
+        if stage is not None:
+            return stage
     except Exception as e2:
         # 마지막 시도 — layer 단독 open 후 anonymous root 에 sublayer 로 끼움
         try:
-            from pxr import Sdf  # type: ignore
             layer = Sdf.Layer.FindOrOpen(str(usd_path))
             if layer is not None:
                 anon = Sdf.Layer.CreateAnonymous("dump_variants_root")
@@ -259,6 +324,19 @@ def _open_stage_tolerant(Usd, usd_path: Path):
                   file=sys.stderr)
         raise RuntimeError(
             f"All Usd.Stage.Open attempts failed for {usd_path}: {e2}")
+
+    # 2) 가 None 을 돌려준 경우 — 마지막 anonymous-sublayer 트릭
+    try:
+        layer = Sdf.Layer.FindOrOpen(str(usd_path))
+        if layer is not None:
+            anon = Sdf.Layer.CreateAnonymous("dump_variants_root")
+            anon.subLayerPaths.append(layer.identifier)
+            return Usd.Stage.Open(anon, load=Usd.Stage.LoadNone)
+    except Exception as e3:
+        print(f"    [warn] anonymous-sublayer open failed: {e3}",
+              file=sys.stderr)
+    raise RuntimeError(
+        f"All Usd.Stage.Open attempts returned None for {usd_path}")
 
 
 def dump_variants(Usd, usd_path: Path, recurse: bool = False

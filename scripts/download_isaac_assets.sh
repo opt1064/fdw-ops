@@ -261,7 +261,8 @@ download_amr() {
     # Nova Carter 의 payload/reference sub-USD (사용자 보고 케이스 — 누락 시 children=0)
     download_subpath "Isaac/Robots/NVIDIA/NovaCarter/Variants/Physics/nova_carter_physics.usd" || true
     download_subpath "Isaac/Robots/NVIDIA/NovaCarter/Variants/Sensors/nova_carter_sensors.usd" || true
-    download_subpath "Isaac/Robots/NVIDIA/NovaCarter/Variants/Sensors/nova_carter_no_sensors.usd" || true
+    # Sensors="None" 은 별도 sub-USD 가 아니라 root layer 안의 빈 variant 이다
+    # (2026-05-11 Thor dump_usd_variants 실측 확인). 더 이상 받지 않는다.
     download_subpath "Isaac/Robots/NVIDIA/NovaCarter/Variants/Configuration/nova_carter_merged_no_internals.usd" || true
     download_subpath "Isaac/Robots/NVIDIA/NovaCarter/Variants/Configuration/nova_carter_merged_with_internals.usd" || true
     # 2026-05 Thor 실측 추가 — merged_no_internals 가 sublayer 로 요구하는 파일.
@@ -269,27 +270,47 @@ download_amr() {
     # nova_carter_sim_optimized.usd" 가 발생하고 reference 전체가 expire 된다.
     download_subpath "Isaac/Robots/NVIDIA/NovaCarter/Variants/nova_carter_sim_optimized.usd" || true
     # Nova Carter Props / Materials — 메쉬와 텍스처
+    # 2026-05-11 Thor dump_usd_variants 실측에서 nova_carter_sim_optimized.usd
+    # 가 carter_v2_wheel_left.usd 를 휠 양쪽 모두에 reference 함이 드러났다.
+    # 누락 시 stage compose 단계에서 "Could not open asset" warning → 결국
+    # PCP 에서 arcNum < srcInfo.size() assertion 으로 reference 전체 expire.
     local nc_props=(
         "Isaac/Robots/NVIDIA/NovaCarter/Props/nova_carter_base.usd"
         "Isaac/Robots/NVIDIA/NovaCarter/Props/nova_carter_chassis.usd"
         "Isaac/Robots/NVIDIA/NovaCarter/Props/nova_carter_wheel.usd"
         "Isaac/Robots/NVIDIA/NovaCarter/Props/nova_carter_caster.usd"
         "Isaac/Robots/NVIDIA/NovaCarter/Materials/Materials.usd"
+        # sim_optimized 가 양쪽 휠 visual 로 reference 하는 부품. NVIDIA 가
+        # left 본을 양쪽에 공유하는 형태로 박았음 (Thor 실측).
+        "Isaac/Robots/NVIDIA/NovaCarter/Parts/carter_v2_wheel_left.usd"
+        # 안전망 — 일부 빌드는 _right 도 존재
+        "Isaac/Robots/NVIDIA/NovaCarter/Parts/carter_v2_wheel_right.usd"
     )
     for p in "${nc_props[@]}"; do
         download_subpath "$p" || true
     done
 
     # Nova Carter sensor sub-USD payloads (Sensors variant != None 일 때 필요).
-    # Thor 실측에서 14 개 "Could not open asset" payload missing warning 의
-    # 원인. asset_catalog 가 Sensors="None" 이름으로 설정한 경우에도, variant
-    # 이름이 USD 와 일치하지 않으면 default Sensors variant 가 적용되어
-    # 이 payload 들을 여전히 요구한다. 따라서 best-effort 로 받아둔다.
+    # Thor 실측 (2026-05-11 dump_usd_variants):
+    #   Sensors variants = ["All_Sensors", "None"]  (default = "All_Sensors")
+    # → asset_catalog 가 Sensors="None" 으로 정확히 설정하면 이 payload 들은
+    # composition 에서 빠진다. 다만 reference attach 가 실패해 variant
+    # 선택이 적용되기 전에 default ("All_Sensors") 가 한 번이라도 시도되면
+    # 누락 warning 이 발생하므로 best-effort 로 받아두는 것이 안전망이다.
+    #
+    # 추가로 dump 실측에서 XT-32.usd 가 Hesai_XT32_SD10.usda + materials.usd
+    # 를 payload 로, Owl/owl.usd 가 owl/materials/materials.usd 를 payload 로,
+    # Slamtec/RPLidar_S2e.usd 가 Slamtec_RPLIDAR_S2E.usd 를 reference 로
+    # 사용함이 드러났다. 모두 best-effort 로 추가.
     local nc_sensors=(
         "Isaac/Sensors/LeopardImaging/Hawk/hawk_v1.1_nominal.usd"
         "Isaac/Sensors/LeopardImaging/Owl/owl.usd"
+        "Isaac/Sensors/LeopardImaging/Owl/materials/materials.usd"
         "Isaac/Sensors/Slamtec/RPLidar_S2e.usd"
+        "Isaac/Sensors/Slamtec/RPLIDAR_S2E/Slamtec_RPLIDAR_S2E.usd"
         "Isaac/Sensors/HESAI/XT-32.usd"
+        "Isaac/Sensors/HESAI/Hesai_XT32_SD10.usda"
+        "Isaac/Sensors/HESAI/materials/materials.usd"
     )
     for s in "${nc_sensors[@]}"; do
         download_subpath "$s" || true
