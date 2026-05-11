@@ -66,6 +66,14 @@ class SimulationConfig:
     weld_path_offset_y: float = 0.25    # 용접 경로 길이 (m), 입력 버퍼 중심 ±offset
     weld_path_height: float = 0.05      # 부품 위 용접 높이 (m)
 
+    # Level 2.2: RMPflow + 용접 스파크
+    motion_mode: str = "auto"           # "auto" | "rmpflow" | "ik" | "heuristic"
+                                          # auto: RMPflow → IK → heuristic 자동 fallback
+    enable_sparks: bool = True          # 용접 스파크 파티클 활성화
+    spark_rate: float = 30.0            # 스파크 방출 비율 (sparks/sec)
+    spark_lifetime_sec: float = 0.4     # 개별 스파크 수명 (±20% jitter)
+    rmpflow_register_obstacles: bool = True  # 작업대/부품을 RMPflow 장애물로 등록
+
     # Level 2.1: 렌더링 / RTX 안정성 옵션 (AGX Thor Blackwell GPU 호환)
     render_mode: str = "RaytracedLighting"   # "RaytracedLighting" | "PathTracing"
                                               # PathTracing은 NRD denoiser 필요 → Blackwell에서 셰이더 실패
@@ -545,6 +553,12 @@ class SimulationManager:
             weld_path_offset_y=self.config.weld_path_offset_y,
             weld_path_height=self.config.weld_path_height,
             skip_auto_camera=self.config.skip_auto_camera,
+            # Level 2.2
+            motion_mode=self.config.motion_mode,
+            enable_sparks=self.config.enable_sparks,
+            spark_rate=self.config.spark_rate,
+            spark_lifetime_sec=self.config.spark_lifetime_sec,
+            rmpflow_register_obstacles=self.config.rmpflow_register_obstacles,
         )
         self.visualizer = WorkshopVisualizer(bus=self.bus, config=viz_cfg)
 

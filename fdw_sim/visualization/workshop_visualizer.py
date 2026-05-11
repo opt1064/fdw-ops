@@ -87,6 +87,22 @@ class WorkshopVizConfig:
     skip_auto_camera: bool = False           # True면 _auto_frame_camera 건너뜀
                                               # (AGX Thor에서 SceneCamera 생성이 GPU crash trigger인 경우)
 
+    # ---------------------------------------------------------------- Level 2.2
+    # 모션 모드: "auto" | "rmpflow" | "ik" | "heuristic"
+    # - auto : RMPflow → IK → heuristic 순으로 자동 fallback
+    # - ik   : 기존 Level 2.1 IK 컨트롤러 (RMPflow 비활성)
+    # - rmpflow : RMPflow 강제 (실패 시 RMPflowController 내부에서 fallback)
+    # - heuristic : 의존성 없는 휴리스틱 모션
+    motion_mode: str = "auto"
+
+    # 용접 스파크 파티클
+    enable_sparks: bool = True
+    spark_rate: float = 30.0                 # sparks / sec
+    spark_lifetime_sec: float = 0.4
+
+    # RMPflow 장애물 등록
+    rmpflow_register_obstacles: bool = True  # 부품/작업대를 Sphere 장애물로 등록
+
 
 class WorkshopVisualizer:
     """추상 셀을 USD 스테이지에 매핑하고 step마다 부품 위치를 갱신.
@@ -129,11 +145,23 @@ class WorkshopVisualizer:
         self._material_cell: Optional[MaterialCell] = None
         self._known_rack_parts: set = set()
 
-        # Level 2.1: 실 로봇팔 + IK 컨트롤러
-        # cell_id -> {"articulation": ..., "ik": IKController, "spec": RobotSpec}
+        # Level 2.1/2.2: 실 로봇팔 + (RMPflow 또는 IK) 컨트롤러
+        # cell_id -> {
+        #     "articulation": ..., "spec": RobotSpec,
+        #     "ik":   IKController | None,         (motion_mode=="ik"인 경우)
+        #     "rmp":  RMPflowController | None,    (motion_mode in {"auto","rmpflow","heuristic"}인 경우)
+        #     "sparks": WeldingSparkEmitter | None, (enable_sparks=True인 경우)
+        # }
         self._robots: Dict[str, Dict] = {}
         # 현재 가공 중인 셀의 부품 위치 (용접 경로 계산)
         self._cell_processing_part: Dict[str, str] = {}   # cell_id -> part_id
+
+        # Level 2.2: 모션 모드 정규화
+        self._motion_mode = (self.config.motion_mode or "auto").lower()
+        if self._motion_mode not in ("auto", "rmpflow", "ik", "heuristic"):
+            logger.warning("[VIS] unknown motion_mode=%s, falling back to 'auto'",
+                           self._motion_mode)
+            self._motion_mode = "auto"
 
         # bus 구독 (셀 상태 변화 감지)
         self.bus.subscribe(Topics.CELL_STATUS, self._on_cell_status)
@@ -189,38 +217,94 @@ class WorkshopVisualizer:
             self.scene.add_robot_arm_placeholder(cell_id, color=color)
             return
 
-        # IK 컨트롤러 준비
+        # 모션 컨트롤러 준비 — Level 2.2: RMPflow vs IK 선택
+        ik_ctrl = None
+        rmp_ctrl = None
+        spec = None
+
         if self.config.enable_ik and articulation is not None:
             try:
-                from fdw_sim.visualization.ik_controller import (
-                    IKConfig, IKController,
-                )
                 from fdw_sim.visualization.robot_loader import ROBOT_CATALOG
                 spec = ROBOT_CATALOG.get(self.config.robot_name)
-                if spec is not None:
-                    ctrl = IKController(articulation, spec, config=IKConfig())
-                    ctrl.go_home()
-                    self._robots[cell_id] = {
-                        "articulation": articulation,
-                        "ik": ctrl,
-                        "spec": spec,
-                    }
-                    logger.info("[VIS] real robot + IK controller attached to %s "
-                                "(robot=%s)", cell_id, self.config.robot_name)
             except Exception as e:
-                logger.warning("[VIS] IK controller setup failed for %s: %s",
+                logger.warning("[VIS] robot spec lookup failed: %s", e)
+                spec = None
+
+            if spec is not None:
+                if self._motion_mode == "ik":
+                    # 명시적 IK 모드
+                    try:
+                        from fdw_sim.visualization.ik_controller import (
+                            IKConfig, IKController,
+                        )
+                        ik_ctrl = IKController(articulation, spec, config=IKConfig())
+                        ik_ctrl.go_home()
+                        logger.info("[VIS] IK controller attached to %s (robot=%s)",
+                                    cell_id, self.config.robot_name)
+                    except Exception as e:
+                        logger.warning("[VIS] IK controller setup failed for %s: %s",
+                                       cell_id, e)
+                else:
+                    # auto / rmpflow / heuristic → RMPflowController로 통합
+                    try:
+                        from fdw_sim.visualization.rmpflow_controller import (
+                            RMPflowConfig, RMPflowController,
+                        )
+                        backend = ("auto" if self._motion_mode == "auto"
+                                   else self._motion_mode)
+                        rmp_ctrl = RMPflowController(
+                            articulation,
+                            spec,
+                            config=RMPflowConfig(preferred_backend=backend),
+                        )
+                        rmp_ctrl.go_home()
+                        logger.info("[VIS] RMPflow controller attached to %s "
+                                    "(robot=%s, mode=%s)",
+                                    cell_id, self.config.robot_name,
+                                    self._motion_mode)
+                    except Exception as e:
+                        logger.warning("[VIS] RMPflow controller setup failed for %s: %s "
+                                       "— falling back to IK", cell_id, e)
+                        try:
+                            from fdw_sim.visualization.ik_controller import (
+                                IKConfig, IKController,
+                            )
+                            ik_ctrl = IKController(articulation, spec, config=IKConfig())
+                            ik_ctrl.go_home()
+                        except Exception as e2:
+                            logger.warning("[VIS] IK fallback also failed for %s: %s",
+                                           cell_id, e2)
+
+        # 스파크 emitter — RMPflow와 IK 양쪽 모드에서 동작 가능
+        sparks = None
+        if self.config.enable_sparks and articulation is not None:
+            try:
+                from fdw_sim.visualization.spark_emitter import (
+                    SparkEmitterConfig, WeldingSparkEmitter,
+                )
+                cell_root = self.scene.get_cell_path(cell_id)
+                if cell_root is not None:
+                    sparks = WeldingSparkEmitter(
+                        self.scene._stage,
+                        cell_root,
+                        SparkEmitterConfig(
+                            spark_rate=self.config.spark_rate,
+                            lifetime_sec=self.config.spark_lifetime_sec,
+                        ),
+                    )
+                    logger.info("[VIS] spark emitter attached to %s", cell_id)
+            except Exception as e:
+                logger.warning("[VIS] spark emitter setup failed for %s: %s",
                                cell_id, e)
-                self._robots[cell_id] = {
-                    "articulation": articulation,
-                    "ik": None,
-                    "spec": None,
-                }
-        else:
-            self._robots[cell_id] = {
-                "articulation": articulation,
-                "ik": None,
-                "spec": None,
-            }
+                sparks = None
+
+        self._robots[cell_id] = {
+            "articulation": articulation,
+            "ik": ik_ctrl,
+            "rmp": rmp_ctrl,
+            "spec": spec,
+            "sparks": sparks,
+        }
 
     # ========================================================================
     # 빌드
@@ -415,18 +499,56 @@ class WorkshopVisualizer:
             except Exception:
                 logger.exception("smart_rack sync failed")
 
-        # 3) IK 컨트롤러 업데이트 (용접 셀 로봇팔 → 부품 추적)
+        # 3) 모션 컨트롤러 + 스파크 emitter 업데이트
+        #    (용접 셀 로봇팔 → 부품 추적 + TCP 위치 기반 스파크 방출)
         for cell_id, rob in self._robots.items():
             ik = rob.get("ik")
-            if ik is None:
-                continue
-            ik.update(dt)
+            rmp = rob.get("rmp")
+            sparks = rob.get("sparks")
+            ctrl = rmp if rmp is not None else ik
+
+            if ctrl is not None:
+                try:
+                    ctrl.update(dt)
+                except Exception:
+                    logger.exception("[VIS] controller update failed for %s", cell_id)
+
+            # 스파크: TCP 위치 갱신 + weld 단계일 때만 활성화
+            if sparks is not None:
+                tcp = None
+                if rmp is not None and hasattr(rmp, "get_tcp_position"):
+                    try:
+                        tcp = rmp.get_tcp_position()
+                    except Exception:
+                        tcp = None
+                if tcp is None and ik is not None and hasattr(ik, "get_tcp_position"):
+                    try:
+                        tcp = ik.get_tcp_position()
+                    except Exception:
+                        tcp = None
+                if tcp is not None:
+                    sparks.set_tcp_position(tcp)
+
+                # 활성 조건: 현재 컨트롤러 phase == "weld"
+                active = False
+                if ctrl is not None and hasattr(ctrl, "get_phase"):
+                    try:
+                        active = (str(ctrl.get_phase()).lower() == "weld")
+                    except Exception:
+                        active = False
+                sparks.set_active(active)
+
+                try:
+                    sparks.update(dt)
+                except Exception:
+                    logger.exception("[VIS] spark emitter update failed for %s",
+                                     cell_id)
 
     # ========================================================================
     # 이벤트 핸들러
     # ========================================================================
     def _on_cell_status(self, msg) -> None:
-        """셀 상태 변경 이벤트 — 용접 셀이 PROCESSING이면 IK 경로 시작."""
+        """셀 상태 변경 이벤트 — 용접 셀이 PROCESSING이면 모션 경로 시작."""
         try:
             cell_id = getattr(msg, "cell_id", None)
             state = getattr(msg, "state", None)
@@ -437,41 +559,118 @@ class WorkshopVisualizer:
         if cell_id is None or cell_id not in self._robots:
             return
 
-        ik = self._robots[cell_id].get("ik")
-        if ik is None:
+        rob = self._robots[cell_id]
+        ctrl = rob.get("rmp") or rob.get("ik")
+        if ctrl is None:
             return
 
         # PROCESSING 상태로 전환되면 용접 경로 시작
-        if state_str.upper() == "PROCESSING" and ik.is_idle():
+        if state_str.upper() == "PROCESSING" and ctrl.is_idle():
             self._start_welding_motion(cell_id)
-        elif state_str.upper() in ("IDLE", "READY") and not ik.is_idle():
+        elif state_str.upper() in ("IDLE", "READY") and not ctrl.is_idle():
             # 가공 종료 → home으로
-            ik.go_home()
+            try:
+                ctrl.go_home()
+            except Exception:
+                logger.exception("[VIS] go_home failed for %s", cell_id)
 
     def _start_welding_motion(self, cell_id: str) -> None:
-        """용접 셀의 입력 버퍼 부품 위로 토치를 이동시키는 경로 시작."""
+        """용접 셀의 입력 버퍼 부품 위로 토치를 이동시키는 경로 시작.
+
+        RMPflow 컨트롤러가 있으면 RMPflow API (start_path(start, end, ...)) 사용,
+        없으면 IK 컨트롤러 (start_path(WeldingPath))로 fallback.
+        장애물(작업대, 부품)을 가능하면 RMPflow에 등록.
+        """
         if cell_id not in self.cell_positions:
             return
-        try:
-            from fdw_sim.visualization.ik_controller import WeldingPath
-        except Exception:
+        rob = self._robots.get(cell_id)
+        if rob is None:
             return
 
         # 부품의 위치 (입력 버퍼 상단)
         bx, by, bz = self._input_buffer_pos(cell_id)
         oy = self.config.weld_path_offset_y
         h = self.config.weld_path_height
+        start = (bx, by - oy, bz + h)
+        end = (bx, by + oy, bz + h)
+        travel_time_sec = 8.0
+        approach_height = 0.1
 
-        path = WeldingPath(
-            start=(bx, by - oy, bz + h),
-            end=(bx, by + oy, bz + h),
-            travel_time_sec=8.0,
-            approach_height=0.1,
-        )
-        ik = self._robots[cell_id]["ik"]
-        ik.start_path(path)
-        logger.info("[VIS] welding motion started @ %s (path=%s -> %s)",
-                    cell_id, path.start, path.end)
+        rmp = rob.get("rmp")
+        if rmp is not None:
+            # 장애물 등록: 작업대 상판 + 부품 (Sphere 근사)
+            if self.config.rmpflow_register_obstacles:
+                try:
+                    self._register_cell_obstacles(cell_id, rmp)
+                except Exception:
+                    logger.exception("[VIS] obstacle registration failed for %s",
+                                     cell_id)
+            try:
+                rmp.start_path(
+                    start=start,
+                    end=end,
+                    travel_time_sec=travel_time_sec,
+                    approach_height=approach_height,
+                )
+                logger.info("[VIS] RMPflow welding motion started @ %s "
+                            "(%s -> %s)", cell_id, start, end)
+            except Exception:
+                logger.exception("[VIS] RMPflow start_path failed for %s", cell_id)
+            return
+
+        ik = rob.get("ik")
+        if ik is not None:
+            try:
+                from fdw_sim.visualization.ik_controller import WeldingPath
+            except Exception:
+                return
+            path = WeldingPath(
+                start=start,
+                end=end,
+                travel_time_sec=travel_time_sec,
+                approach_height=approach_height,
+            )
+            try:
+                ik.start_path(path)
+                logger.info("[VIS] IK welding motion started @ %s (path=%s -> %s)",
+                            cell_id, path.start, path.end)
+            except Exception:
+                logger.exception("[VIS] IK start_path failed for %s", cell_id)
+
+    def _register_cell_obstacles(self, cell_id: str, rmp) -> None:
+        """용접 셀의 작업대/부품을 RMPflow CollisionSphere로 등록."""
+        try:
+            from fdw_sim.visualization.rmpflow_controller import CollisionSphere
+        except Exception:
+            return
+
+        if not hasattr(rmp, "clear_obstacles") or not hasattr(rmp, "add_obstacle"):
+            return
+
+        rmp.clear_obstacles()
+
+        # 작업대 상판 — 셀 중앙, sx*sy 영역을 큰 Sphere 1개로 근사
+        cx, cy, cz = self.cell_positions[cell_id]
+        sx, sy, sz = self.config.cell_size
+        bench_top_z = cz + sz
+        # 가로/세로 중 큰 변의 절반을 반지름으로
+        bench_radius = max(sx, sy) * 0.6
+        rmp.add_obstacle(CollisionSphere(
+            name=f"{cell_id}_bench",
+            center=(cx, cy, bench_top_z - bench_radius * 0.5),
+            radius=bench_radius,
+            static=True,
+        ))
+
+        # 입력 버퍼 위 부품 (있다면) — 작은 Sphere
+        bx, by, bz = self._input_buffer_pos(cell_id)
+        rmp.add_obstacle(CollisionSphere(
+            name=f"{cell_id}_part",
+            center=(bx, by, bz),
+            radius=0.08,
+            static=True,
+        ))
+        logger.info("[VIS] registered %d obstacles for RMPflow @ %s", 2, cell_id)
 
     # ========================================================================
     # 디버깅
