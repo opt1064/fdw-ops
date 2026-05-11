@@ -45,10 +45,25 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Set, Tuple
 
 
-# `@<path>@` 또는 `@<path>@</prim>` 패턴에서 path 추출
-# - omniverse://, http(s)://, file:// 같은 절대 URI 는 별도 표시
-# - .usd / .usda / .usdc 만 의미 있음
-REF_PATTERN = re.compile(rb"@([^@\x00\n\r]+\.(?:usd|usda|usdc))(?:@|<)")
+# =============================================================================
+# 추출 패턴 — Isaac USDC 포맷은 다음 인코딩들을 혼용함:
+#   1) `@<path>@`              — 표준 reference/payload 표기 (.usda 평문)
+#   2) `@<path>@</Prim>`       — reference + target prim
+#   3) `@./<path>@`            — 상대 경로 reference
+#   4) USDC 바이너리: 경로 문자열이 길이-prefix 또는 null-terminated 로 박혀 있음
+#      → `@` 래퍼 없이 그냥 `.usd`/`.usda`/`.usdc` 로 끝나는 ASCII 문자열만 추출
+# =============================================================================
+
+# Pattern 1: `@<path>@` 또는 `@<path>@</prim>` — 평문 USDA
+REF_PATTERN_AT = re.compile(rb"@([^@\x00\n\r]{1,512}\.(?:usd|usda|usdc))(?:@|<)")
+
+# Pattern 2: USDC 바이너리 — `.usd[a|c]` 로 끝나는 ASCII path
+# 경로 문자: 알파벳/숫자/`. _ - / : #` 정도. 양 끝은 non-printable 로 끊어짐.
+# `@` 는 제외 — Pattern AT 가 잡은 `@...@` 와 중복 매치 방지.
+# 너무 짧은 매치(< 5 chars) 제외, omniverse:// 류 URI 도 포함.
+REF_PATTERN_PATH = re.compile(
+    rb"([./A-Za-z0-9_\-:#+]{5,512}\.(?:usd|usda|usdc))(?=[^A-Za-z0-9_\-./]|$)"
+)
 
 # Physics joint 가 참조하는 body relationship target — 보통 prim path 형태
 # 예: physics:body0 = </NovaCarter/chassis>
@@ -79,20 +94,68 @@ def extract_strings(usd_path: Path) -> bytes:
     return usd_path.read_bytes()
 
 
-def extract_refs(usd_path: Path) -> List[str]:
-    """단일 USD 파일에서 sub-USD 참조 경로 목록 추출 (중복 제거, 순서 유지)."""
+def _is_usdc(usd_path: Path) -> bool:
+    """USDC 바이너리 여부 (매직 헤더 'PXR-USDC' 검사)."""
+    try:
+        with open(usd_path, "rb") as f:
+            return f.read(8) == b"PXR-USDC"
+    except Exception:
+        return False
+
+
+def extract_refs(usd_path: Path,
+                 include_path_pattern: bool = True) -> List[str]:
+    """단일 USD 파일에서 sub-USD 참조 경로 목록 추출 (중복 제거, 순서 유지).
+
+    두 패턴을 병행:
+        - REF_PATTERN_AT  : `@<path>@` (USDA 표준)
+        - REF_PATTERN_PATH: `.usd` 로 끝나는 ASCII path (USDC 바이너리)
+
+    include_path_pattern=False 면 strict 모드 (`@...@` 만).
+    """
     blob = extract_strings(usd_path)
+    # raw bytes 도 함께 스캔 (strings 가 USDC 의 중첩 문자열을 놓치는 경우 대비)
+    raw = usd_path.read_bytes()
+
     seen: Set[str] = set()
     refs: List[str] = []
-    for m in REF_PATTERN.finditer(blob):
-        try:
-            path = m.group(1).decode("utf-8", errors="ignore").strip()
-        except Exception:
-            continue
+
+    def _add(path: str) -> None:
+        path = path.strip().strip("\x00")
         if not path or path in seen:
-            continue
+            return
+        # 너무 일반적인 매치 필터링
+        if path in (".usd", ".usda", ".usdc"):
+            return
         seen.add(path)
         refs.append(path)
+
+    # Pattern 1: `@<path>@`
+    for source in (blob, raw):
+        for m in REF_PATTERN_AT.finditer(source):
+            try:
+                _add(m.group(1).decode("utf-8", errors="ignore"))
+            except Exception:
+                continue
+
+    # Pattern 2: USDC 바이너리에서 `.usd` 로 끝나는 ASCII path
+    if include_path_pattern:
+        for source in (blob, raw):
+            for m in REF_PATTERN_PATH.finditer(source):
+                try:
+                    cand = m.group(1).decode("utf-8", errors="ignore")
+                except Exception:
+                    continue
+                # 자기 자신 제외
+                if cand == usd_path.name:
+                    continue
+                # `.usd` 만 들어있는 것 (확장자 토큰) 제외
+                if cand.startswith("."):
+                    # `./foo.usd` 는 유효, `.usd` 는 무효
+                    if cand in (".usd", ".usda", ".usdc"):
+                        continue
+                _add(cand)
+
     return refs
 
 
@@ -149,11 +212,13 @@ def to_isaac_subpath(abs_path: Path,
 def walk_refs(root_usd: Path,
               max_depth: int = 4,
               follow: bool = True
-              ) -> List[Tuple[Path, str, str, bool]]:
+              ) -> Tuple[List[Tuple[Path, str, str, bool]], Set[Path]]:
     """root_usd 부터 시작해서 sub-USD 를 재귀적으로 따라가며 모든 참조 수집.
 
     Returns:
-        [(parent_usd, ref_raw, kind, exists)] 튜플 리스트.
+        (results, visited)
+        - results : [(parent_usd, ref_raw, kind, exists)] 튜플 리스트
+        - visited : 실제로 방문(extract_refs 호출)한 USD 파일 set
         kind ∈ {url, absolute, relative}.
         exists 는 로컬 디스크 존재 여부.
     """
@@ -165,12 +230,14 @@ def walk_refs(root_usd: Path,
         usd, depth = queue.pop(0)
         if usd in visited:
             continue
-        visited.add(usd)
 
         if not usd.is_file():
             continue
 
-        refs = extract_refs(usd)
+        # 파일이 존재하고 처음 보는 경우만 visited 에 기록 (정확한 카운트)
+        visited.add(usd)
+
+        refs = extract_refs(usd, include_path_pattern=True)
         for ref in refs:
             kind = classify(ref)
             resolved = normalize_relative(ref, usd) if kind == "relative" else None
@@ -180,7 +247,7 @@ def walk_refs(root_usd: Path,
             if follow and depth < max_depth and resolved and resolved.is_file():
                 queue.append((resolved, depth + 1))
 
-    return results
+    return results, visited
 
 
 # =============================================================================
@@ -201,6 +268,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--print-subpaths", action="store_true",
                    help="Isaac/... subpath 형태로 출력 "
                         "(download_isaac_assets.sh download_subpath 인자용)")
+    p.add_argument("--dump-strings", action="store_true",
+                   help="파일 내부 모든 printable ASCII 문자열을 그대로 출력 "
+                        "(USDC 인코딩 진단용 — 참조 추출 실패 시 사용)")
+    p.add_argument("--dump-min-len", type=int, default=8,
+                   help="--dump-strings 가 출력할 최소 문자열 길이 (기본 8)")
+    p.add_argument("--strict", action="store_true",
+                   help="REF_PATTERN_AT (`@...@`) 만 사용 — false positive 회피")
+    p.add_argument("--usdcat", action="store_true",
+                   help="usdcat(1) 으로 USDC→USDA 변환 후 분석 (Isaac Sim "
+                        "환경 필요). 비표준 인코딩 시 가장 정확.")
 
     args = p.parse_args(argv)
 
@@ -210,9 +287,64 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print(f"=== Inspecting: {args.usd}")
     print(f"    size: {args.usd.stat().st_size:,} bytes")
+    print(f"    USDC : {_is_usdc(args.usd)}")
+
+    # --dump-strings : 파일 내부 모든 printable 문자열 그대로 출력
+    if args.dump_strings:
+        blob = extract_strings(args.usd)
+        print(f"\n--- All printable strings (min-len={args.dump_min_len}) ---")
+        # blob 은 strings(1) 출력이라 이미 줄바꿈 단위.
+        # fallback (raw bytes) 인 경우 직접 분리.
+        if b"\n" in blob:
+            lines = blob.split(b"\n")
+        else:
+            # raw bytes 에서 길이 N+ 의 ASCII run 추출
+            ascii_run = re.compile(
+                rb"[\x20-\x7e]{%d,}" % max(1, args.dump_min_len))
+            lines = [m.group(0) for m in ascii_run.finditer(blob)]
+        for line in lines:
+            try:
+                s = line.decode("utf-8", errors="ignore").strip()
+            except Exception:
+                continue
+            if len(s) >= args.dump_min_len:
+                print(f"    {s}")
+        return 0
+
+    # --usdcat : Isaac Sim 환경의 usdcat 사용
+    if args.usdcat:
+        try:
+            out = subprocess.run(
+                ["usdcat", str(args.usd)],
+                capture_output=True, check=False, timeout=60,
+            )
+            if out.returncode == 0 and out.stdout:
+                text = out.stdout.decode("utf-8", errors="ignore")
+                print("\n--- usdcat output (USDA equivalent) ---")
+                # references / payload 줄만 강조 출력
+                ref_lines = [ln for ln in text.splitlines()
+                             if ("references" in ln or "payload" in ln
+                                 or "@" in ln and ".usd" in ln)]
+                for ln in ref_lines:
+                    print(f"    {ln.rstrip()}")
+                if not ref_lines:
+                    print("    (no reference / payload lines found)")
+                return 0
+            print(f"[FAIL] usdcat failed: rc={out.returncode}", file=sys.stderr)
+            if out.stderr:
+                print(out.stderr.decode("utf-8", errors="ignore"),
+                      file=sys.stderr)
+            return 3
+        except FileNotFoundError:
+            print("[FAIL] usdcat not found in PATH. Isaac Sim 환경에서 실행하세요.",
+                  file=sys.stderr)
+            return 3
+        except subprocess.TimeoutExpired:
+            print("[FAIL] usdcat timed out (60s)", file=sys.stderr)
+            return 3
 
     if not args.recursive:
-        refs = extract_refs(args.usd)
+        refs = extract_refs(args.usd, include_path_pattern=not args.strict)
         print(f"\n--- Direct sub-USD references ({len(refs)}) ---")
         for ref in refs:
             kind = classify(ref)
@@ -234,7 +366,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print(f"    [{marker}] {ref}  ({kind})")
     else:
         # Recursive walk
-        results = walk_refs(args.usd, max_depth=args.max_depth, follow=True)
+        results, visited = walk_refs(args.usd, max_depth=args.max_depth, follow=True)
         # group by parent for readability
         from collections import defaultdict
         by_parent = defaultdict(list)
@@ -250,9 +382,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                 missing_subs.add(ref)
 
         print(f"\n--- Recursive walk (depth ≤ {args.max_depth}) ---")
-        print(f"    Total parents scanned : {len(by_parent)}")
+        # visited 는 실제로 열어본 USD 파일 수 (참조가 0 개여도 카운트)
+        print(f"    Total parents scanned : {len(visited)}")
         print(f"    Unique references     : {len(unique_subs)}")
         print(f"    Missing (relative)    : {len(missing_subs)}")
+
+        # 참조 0 개일 때 진단 힌트
+        if len(unique_subs) == 0:
+            print()
+            print("    [HINT] 0 references found. 가능한 원인:")
+            print("      - 이 파일이 단순 wrapper(USDC 헤더만, 본문 0) 일 수 있음.")
+            print("      - 참조 경로가 비표준 인코딩(USDC 압축 토큰)으로 저장됨.")
+            print("    → '--dump-strings' 로 파일 내부 모든 ASCII 문자열을 확인하세요:")
+            print(f"        python {sys.argv[0]} --dump-strings {args.usd}")
+            print("    → 또는 'usdcat' 가 있으면:")
+            print(f"        usdcat {args.usd} | head -200")
 
         for parent in sorted(by_parent.keys(), key=lambda p: str(p)):
             entries = by_parent[parent]
