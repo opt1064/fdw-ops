@@ -121,36 +121,58 @@ def _find_usdcat() -> Optional[str]:
     if direct and Path(direct).is_file():
         return direct
 
-    # 3) Isaac Sim 표준 설치 경로 (5.x)
+    # 3) Isaac Sim 표준 설치 경로 (5.x) + 사용자 워크스페이스
     home = Path.home()
     isaac_roots = [
         home / "isaac-sim",
         home / "isaacsim",
+        home / "isaac_workspace",                 # 사용자 prompt 에서 확인됨
+        home / "isaac_workspace" / "isaac-sim",
+        home / "isaac_workspace" / "isaacsim",
+        home / "Omniverse",
         home / ".local" / "share" / "ov" / "pkg",
         Path("/opt/isaac-sim"),
         Path("/opt/nvidia/isaac-sim"),
+        Path("/isaac-sim"),
     ]
     isaac_env = os.environ.get("ISAACSIM_PATH")
     if isaac_env:
         isaac_roots.insert(0, Path(isaac_env))
+    # CONDA_PREFIX 도 시도 (isaac_sim conda env)
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        isaac_roots.insert(0, Path(conda_prefix))
+
+    sub_candidates = [
+        "kit/usdcat",
+        "kit/python/bin/usdcat",
+        "bin/usdcat",
+        "extscache/usd.schema.usdShade/bin/usdcat",
+        "exts/usd.schema.usdShade/bin/usdcat",
+        "python.sh",   # 직접 binary 없으면 python.sh 로 usdcat 모듈 실행 가능
+    ]
 
     candidates = []
     for root in isaac_roots:
         if not root.is_dir():
             continue
-        # usdcat 는 kit 또는 exts/.../usd/bin/ 에 위치
-        for sub in ["kit/usdcat", "kit/python/bin/usdcat",
-                    "exts/usd.schema.usdShade/bin/usdcat"]:
+        for sub in sub_candidates:
             cand = root / sub
             if cand.is_file():
-                candidates.append(str(cand))
-        # find 같은 fallback (얕은 탐색만)
+                # python.sh 는 사용자가 직접 -m usdcat 호출해야 함 → 표시만
+                if cand.name != "python.sh":
+                    candidates.append(str(cand))
+        # 깊이-3 까지만 glob (재귀 무한 회피)
         try:
-            for p in root.glob("**/usdcat"):
-                if p.is_file():
-                    candidates.append(str(p))
-                    if len(candidates) >= 3:
-                        break
+            for depth_pattern in ("usdcat", "*/usdcat", "*/*/usdcat",
+                                  "*/*/*/usdcat"):
+                for p in root.glob(depth_pattern):
+                    if p.is_file() and p.name == "usdcat":
+                        candidates.append(str(p))
+                        if len(candidates) >= 3:
+                            break
+                if len(candidates) >= 3:
+                    break
         except Exception:
             pass
         if candidates:
@@ -195,6 +217,37 @@ def extract_refs(usd_path: Path,
                 continue
 
     # Pattern 2: USDC 바이너리에서 `.usd` 로 끝나는 ASCII path
+    # 자기 자신을 가리키는 ref 제외 — USDC 헤더에 박힌 asset path 메타데이터를
+    # ref 로 오인하는 false positive 방지. 비교 대상:
+    #   - 파일 이름 (nova_carter.usd)
+    #   - 절대 경로 (/home/.../nova_carter.usd)
+    #   - Isaac/... subpath (Isaac/Robots/.../nova_carter.usd)
+    #   - 끝부분 일치 (cand 가 절대경로의 suffix)
+    abs_str = str(usd_path.resolve())
+    self_names: Set[str] = {usd_path.name, abs_str}
+    isaac_self = to_isaac_subpath(usd_path.resolve())
+    if isaac_self:
+        self_names.add(isaac_self)
+
+    def _is_self_ref(cand: str) -> bool:
+        if cand in self_names:
+            return True
+        # cand 가 절대 경로의 suffix 인 경우 (예: cand="Isaac/.../foo.usd",
+        # abs_str="/home/.../Isaac/.../foo.usd")
+        if abs_str.endswith("/" + cand) or abs_str.endswith(cand):
+            return True
+        # cand 가 파일 이름으로 끝나는데 같은 dir 구조면 self
+        if cand.endswith("/" + usd_path.name) or cand == usd_path.name:
+            # 단, ./foo.usd 같은 정상 상대 참조는 그대로 통과
+            if not cand.startswith("./") and not cand.startswith("../"):
+                # subpath 일치 검사: cand 의 마지막 N 컴포넌트가 abs_str 끝과 같으면 self
+                cand_parts = tuple(cand.split("/"))
+                abs_parts = Path(abs_str).parts
+                if (len(cand_parts) <= len(abs_parts)
+                        and abs_parts[-len(cand_parts):] == cand_parts):
+                    return True
+        return False
+
     if include_path_pattern:
         for source in (blob, raw):
             for m in REF_PATTERN_PATH.finditer(source):
@@ -202,14 +255,12 @@ def extract_refs(usd_path: Path,
                     cand = m.group(1).decode("utf-8", errors="ignore")
                 except Exception:
                     continue
-                # 자기 자신 제외
-                if cand == usd_path.name:
-                    continue
                 # `.usd` 만 들어있는 것 (확장자 토큰) 제외
-                if cand.startswith("."):
-                    # `./foo.usd` 는 유효, `.usd` 는 무효
-                    if cand in (".usd", ".usda", ".usdc"):
-                        continue
+                if cand in (".usd", ".usda", ".usdc"):
+                    continue
+                # 자기 자신 제외 (강화된 검사)
+                if _is_self_ref(cand):
+                    continue
                 _add(cand)
 
     return refs
