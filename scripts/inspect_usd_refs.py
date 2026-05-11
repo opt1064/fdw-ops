@@ -103,6 +103,62 @@ def _is_usdc(usd_path: Path) -> bool:
         return False
 
 
+def _find_usdcat() -> Optional[str]:
+    """Isaac Sim / Omniverse 의 usdcat 바이너리 자동 탐색.
+
+    PATH → 환경변수 FDW_USDCAT → Isaac Sim 표준 설치 경로 순으로 검색.
+    """
+    import os
+    import shutil
+
+    # 1) PATH
+    found = shutil.which("usdcat")
+    if found:
+        return found
+
+    # 2) 환경변수 직접 지정
+    direct = os.environ.get("FDW_USDCAT")
+    if direct and Path(direct).is_file():
+        return direct
+
+    # 3) Isaac Sim 표준 설치 경로 (5.x)
+    home = Path.home()
+    isaac_roots = [
+        home / "isaac-sim",
+        home / "isaacsim",
+        home / ".local" / "share" / "ov" / "pkg",
+        Path("/opt/isaac-sim"),
+        Path("/opt/nvidia/isaac-sim"),
+    ]
+    isaac_env = os.environ.get("ISAACSIM_PATH")
+    if isaac_env:
+        isaac_roots.insert(0, Path(isaac_env))
+
+    candidates = []
+    for root in isaac_roots:
+        if not root.is_dir():
+            continue
+        # usdcat 는 kit 또는 exts/.../usd/bin/ 에 위치
+        for sub in ["kit/usdcat", "kit/python/bin/usdcat",
+                    "exts/usd.schema.usdShade/bin/usdcat"]:
+            cand = root / sub
+            if cand.is_file():
+                candidates.append(str(cand))
+        # find 같은 fallback (얕은 탐색만)
+        try:
+            for p in root.glob("**/usdcat"):
+                if p.is_file():
+                    candidates.append(str(p))
+                    if len(candidates) >= 3:
+                        break
+        except Exception:
+            pass
+        if candidates:
+            break
+
+    return candidates[0] if candidates else None
+
+
 def extract_refs(usd_path: Path,
                  include_path_pattern: bool = True) -> List[str]:
     """단일 USD 파일에서 sub-USD 참조 경로 목록 추출 (중복 제거, 순서 유지).
@@ -313,9 +369,23 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # --usdcat : Isaac Sim 환경의 usdcat 사용
     if args.usdcat:
+        usdcat_bin = _find_usdcat()
+        if usdcat_bin is None:
+            print("[FAIL] usdcat not found.", file=sys.stderr)
+            print("    Isaac Sim 의 usdcat 은 PATH 에 노출되지 않을 수 있습니다.",
+                  file=sys.stderr)
+            print("    다음 중 하나를 시도하세요:", file=sys.stderr)
+            print("      1) find ~/isaac-sim -name 'usdcat' 2>/dev/null",
+                  file=sys.stderr)
+            print("      2) export PATH=\"$PATH:$(find ~/isaac-sim -name "
+                  "usdcat -printf '%h\\n' | head -1)\"", file=sys.stderr)
+            print("      3) FDW_USDCAT=/path/to/usdcat 환경변수로 직접 지정",
+                  file=sys.stderr)
+            return 3
+        print(f"    usdcat : {usdcat_bin}")
         try:
             out = subprocess.run(
-                ["usdcat", str(args.usd)],
+                [usdcat_bin, str(args.usd)],
                 capture_output=True, check=False, timeout=60,
             )
             if out.returncode == 0 and out.stdout:
@@ -324,20 +394,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # references / payload 줄만 강조 출력
                 ref_lines = [ln for ln in text.splitlines()
                              if ("references" in ln or "payload" in ln
-                                 or "@" in ln and ".usd" in ln)]
+                                 or ("@" in ln and ".usd" in ln))]
                 for ln in ref_lines:
                     print(f"    {ln.rstrip()}")
                 if not ref_lines:
                     print("    (no reference / payload lines found)")
+                    print("\n--- First 60 lines of full output ---")
+                    for ln in text.splitlines()[:60]:
+                        print(f"    {ln.rstrip()}")
                 return 0
             print(f"[FAIL] usdcat failed: rc={out.returncode}", file=sys.stderr)
             if out.stderr:
                 print(out.stderr.decode("utf-8", errors="ignore"),
                       file=sys.stderr)
-            return 3
-        except FileNotFoundError:
-            print("[FAIL] usdcat not found in PATH. Isaac Sim 환경에서 실행하세요.",
-                  file=sys.stderr)
             return 3
         except subprocess.TimeoutExpired:
             print("[FAIL] usdcat timed out (60s)", file=sys.stderr)
@@ -387,21 +456,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"    Unique references     : {len(unique_subs)}")
         print(f"    Missing (relative)    : {len(missing_subs)}")
 
-        # 참조 0 개일 때 진단 힌트
-        if len(unique_subs) == 0:
+        # ref 가 너무 적으면 (0~2 개) 의심 — --only-missing 무시하고
+        # 모든 ref 의 정체를 강제 출력해 사용자가 path/url 종류를 즉시 파악
+        suspicious = len(unique_subs) <= 2
+        if suspicious and args.only_missing:
             print()
-            print("    [HINT] 0 references found. 가능한 원인:")
-            print("      - 이 파일이 단순 wrapper(USDC 헤더만, 본문 0) 일 수 있음.")
-            print("      - 참조 경로가 비표준 인코딩(USDC 압축 토큰)으로 저장됨.")
-            print("    → '--dump-strings' 로 파일 내부 모든 ASCII 문자열을 확인하세요:")
-            print(f"        python {sys.argv[0]} --dump-strings {args.usd}")
-            print("    → 또는 'usdcat' 가 있으면:")
-            print(f"        usdcat {args.usd} | head -200")
+            print(f"    [HINT] Only {len(unique_subs)} reference(s) found — "
+                  f"--only-missing 을 무시하고 모두 출력합니다.")
 
         for parent in sorted(by_parent.keys(), key=lambda p: str(p)):
             entries = by_parent[parent]
-            shown = [(r, k, e) for r, k, e in entries
-                     if not (args.only_missing and e)]
+            # suspicious 인 경우 --only-missing 무시
+            if suspicious:
+                shown = list(entries)
+            else:
+                shown = [(r, k, e) for r, k, e in entries
+                         if not (args.only_missing and e)]
             if not shown:
                 continue
             print(f"\n  [parent] {parent}")
@@ -433,6 +503,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                         unique_subpaths.add(sub)
             for sub in sorted(unique_subpaths):
                 print(f"    {sub}")
+
+        # 추가 진단: ref 가 0~2 개로 의심스러우면 wrapper 가능성 안내
+        if suspicious:
+            print()
+            print("    [DIAG] 의심: 참조가 극소수 — wrapper 또는 비표준 인코딩 가능성.")
+            if len(unique_subs) == 0:
+                print("      → 0 refs : USDC 헤더만 있는 빈 wrapper 가능성 큼.")
+            else:
+                print(f"      → {len(unique_subs)} refs : 위 목록의 kind 확인.")
+                print("        - kind=url     : Nucleus/HTTP 원격 — 로컬 캐시 필요")
+                print("        - kind=absolute: 절대 경로 — 다른 머신의 경로일 수 있음")
+                print("        - kind=relative + OK : 정상 (이미 존재)")
+            print("    다음 진단 명령을 실행하세요:")
+            print(f"      python {sys.argv[0]} --dump-strings {args.usd}")
+            print(f"      python {sys.argv[0]} --usdcat {args.usd}")
+            print("      ls -la $(dirname \"%s\")/.." % args.usd)
 
     if args.joints:
         bodies = extract_joint_bodies(args.usd)
