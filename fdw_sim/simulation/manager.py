@@ -280,6 +280,14 @@ class SimulationManager:
                 "rtx.denoising",
                 "PackForNRD",
                 "rtx/nrd/",
+                # USD xform op order 경고 (이미 _enforce_xform_order로 예방하지만 안전망)
+                "Incompatible xformOpOrder",
+                # carb 키 타입 경고 (예전 코드에서 string으로 잘못 설정한 경우)
+                "getStringRawInternal",
+                # NGX/Optix 초기화 실패 경고 (Blackwell에서 정상)
+                "NGX isn't enabled",
+                "Failed to create NGX context",
+                "Failed to create an Optix",
             ])
 
     def _install_stderr_filter(self, drop_substrings: List[str]) -> None:

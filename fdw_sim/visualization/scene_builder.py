@@ -369,6 +369,46 @@ class SceneBuilder:
     # ========================================================================
     # 내부 helper
     # ========================================================================
+    def _enforce_xform_order(self, xformable) -> None:
+        """USD 표준 xform op 순서로 재정렬: translate → rotate → scale.
+
+        USD/Omniverse가 권장하는 op 순서는 [translate, rotate, scale]
+        (수학적으로 scale이 먼저 적용됨 — point' = T·R·S·point).
+        op order가 어긋나면 [omni.usd._impl.utils] Incompatible
+        xformOpOrder, rotation or translation applied before scale.
+        경고가 매 프레임 출력된다.
+        """
+        UsdGeom = self._UsdGeom
+        ops = xformable.GetOrderedXformOps()
+        if not ops:
+            return
+
+        # 우선순위: translate(0) < rotate*(1) < orient(2) < scale(3)
+        def _rank(op) -> int:
+            t = op.GetOpType()
+            if t == UsdGeom.XformOp.TypeTranslate:
+                return 0
+            if t in (UsdGeom.XformOp.TypeRotateX,
+                     UsdGeom.XformOp.TypeRotateY,
+                     UsdGeom.XformOp.TypeRotateZ,
+                     UsdGeom.XformOp.TypeRotateXYZ,
+                     UsdGeom.XformOp.TypeRotateXZY,
+                     UsdGeom.XformOp.TypeRotateYXZ,
+                     UsdGeom.XformOp.TypeRotateYZX,
+                     UsdGeom.XformOp.TypeRotateZXY,
+                     UsdGeom.XformOp.TypeRotateZYX):
+                return 1
+            if t == UsdGeom.XformOp.TypeOrient:
+                return 2
+            if t == UsdGeom.XformOp.TypeScale:
+                return 3
+            return 4
+
+        sorted_ops = sorted(ops, key=_rank)
+        # 변경이 없으면 set 호출도 생략 (불필요한 USD 알림 방지)
+        if [op.GetOpName() for op in sorted_ops] != [op.GetOpName() for op in ops]:
+            xformable.SetXformOpOrder(sorted_ops)
+
     def _set_translate(self, prim_path: str,
                        translation: Tuple[float, float, float]) -> None:
         prim = self._stage.GetPrimAtPath(prim_path)
@@ -383,6 +423,8 @@ class SceneBuilder:
                 break
         if translate_op is None:
             translate_op = xformable.AddTranslateOp()
+            # 새로 추가한 경우 표준 순서 강제
+            self._enforce_xform_order(xformable)
         translate_op.Set(self._Gf.Vec3d(*translation))
 
     def _set_scale(self, prim_path: str,
@@ -399,6 +441,8 @@ class SceneBuilder:
                 break
         if scale_op is None:
             scale_op = xformable.AddScaleOp()
+            # 새로 추가한 경우 표준 순서 강제
+            self._enforce_xform_order(xformable)
         scale_op.Set(self._Gf.Vec3f(*scale))
 
     def _set_color(self, prim_path: str,
