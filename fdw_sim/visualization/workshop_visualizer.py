@@ -335,17 +335,32 @@ class WorkshopVisualizer:
             del self._part_tweens[pid]
 
         # 2) MaterialCell 랙 자동 sync (새 부품 입고 감지)
+        # smart_rack 구조: Dict[part_id, {"part_type": ..., ...}]
         if self._material_cell is not None:
-            current = set()
-            for slot in self._material_cell.smart_rack.slots:
-                if slot.part_id is not None:
-                    current.add((slot.part_id, slot.part_type))
-            new_parts = current - {(pid, self._part_types.get(pid, ""))
-                                    for pid in self._known_rack_parts}
-            for pid, ptype in new_parts:
-                if pid not in self._part_types:
-                    self.spawn_part(pid, ptype, self._material_cell.cell_id)
-                    self._known_rack_parts.add(pid)
+            try:
+                rack = self._material_cell.smart_rack
+                # dict 형태 (Dict[str, dict]) — 정식 스키마
+                if isinstance(rack, dict):
+                    for pid, meta in rack.items():
+                        if pid in self._known_rack_parts:
+                            continue
+                        ptype = (meta or {}).get("part_type", "default") \
+                            if isinstance(meta, dict) else "default"
+                        if pid not in self._part_types:
+                            self.spawn_part(pid, ptype, self._material_cell.cell_id)
+                        self._known_rack_parts.add(pid)
+                # 객체 형태 fallback (.slots 인터페이스가 있을 경우)
+                elif hasattr(rack, "slots"):
+                    for slot in rack.slots:
+                        pid = getattr(slot, "part_id", None)
+                        if pid is None or pid in self._known_rack_parts:
+                            continue
+                        ptype = getattr(slot, "part_type", "default")
+                        if pid not in self._part_types:
+                            self.spawn_part(pid, ptype, self._material_cell.cell_id)
+                        self._known_rack_parts.add(pid)
+            except Exception:
+                logger.exception("smart_rack sync failed")
 
         # 3) IK 컨트롤러 업데이트 (용접 셀 로봇팔 → 부품 추적)
         for cell_id, rob in self._robots.items():
