@@ -283,45 +283,76 @@ class SimulationManager:
             ])
 
     def _install_stderr_filter(self, drop_substrings: List[str]) -> None:
-        """stderr/stdout에 필터 wrapper 설치 — 지정 substring 포함 라인 drop.
+        """OS fd=2(stderr) 레벨에서 라인 필터 설치 — C++ carb logger도 차단.
 
-        carb logger는 C++ 레이어에서 직접 stderr fd로 write 하므로,
-        Python sys.stderr 교체만으로는 부족할 수 있다. 그러나 대부분의
-        Kit 로그 채널은 Python stderr를 통과하므로 효과가 있다.
+        carb logger는 C++ 레이어에서 fd=2에 직접 write 하므로 Python
+        sys.stderr 교체로는 막을 수 없다. 따라서 다음과 같이 처리한다:
+
+          1) os.pipe()로 새 파이프 생성
+          2) os.dup2(pipe_write, 2) — 원래 stderr fd=2를 파이프 쓰기단으로 교체
+          3) 백그라운드 스레드에서 파이프를 라인 단위로 읽어 필터링 후
+             원본 stderr (백업해둔 fd)로 다시 write
+
+        이렇게 하면 Python 코드든, C++ 라이브러리든, 모든 fd=2 write가
+        필터를 거치게 된다.
         """
+        import os
         import sys
+        import threading
 
         if getattr(self, "_stderr_filter_installed", False):
             return
 
-        class _FilteredStream:
-            def __init__(self, base, drops):
-                self._base = base
-                self._drops = drops
-                self._buf = ""
+        # 1) 원본 stderr fd 백업 + 새 파이프 생성
+        try:
+            original_stderr_fd = os.dup(2)   # fd=2 백업
+            pipe_read, pipe_write = os.pipe()
+            os.dup2(pipe_write, 2)            # fd=2 → 파이프 쓰기단
+            os.close(pipe_write)
+        except OSError as e:
+            logger.warning("[SIM] fd-level stderr filter failed: %s", e)
+            return
 
-            def write(self, s):
-                # 라인 단위 처리
-                self._buf += s
-                while "\n" in self._buf:
-                    line, self._buf = self._buf.split("\n", 1)
-                    if not any(d in line for d in self._drops):
-                        self._base.write(line + "\n")
-                return len(s)
+        # 원본 fd → Python file object (line buffered)
+        original_stderr = os.fdopen(original_stderr_fd, "w", buffering=1,
+                                     encoding="utf-8", errors="replace")
+        pipe_reader = os.fdopen(pipe_read, "r", buffering=1,
+                                 encoding="utf-8", errors="replace")
 
-            def flush(self):
-                if self._buf and not any(d in self._buf for d in self._drops):
-                    self._base.write(self._buf)
-                    self._buf = ""
-                self._base.flush()
+        drops = list(drop_substrings)
+        dropped_counter = {"n": 0}
 
-            def __getattr__(self, name):
-                return getattr(self._base, name)
+        def _filter_loop() -> None:
+            try:
+                for line in pipe_reader:
+                    if any(d in line for d in drops):
+                        dropped_counter["n"] += 1
+                        continue
+                    original_stderr.write(line)
+                    original_stderr.flush()
+            except Exception:
+                pass
 
-        sys.stderr = _FilteredStream(sys.stderr, drop_substrings)
-        sys.stdout = _FilteredStream(sys.stdout, drop_substrings)
+        t = threading.Thread(target=_filter_loop, name="stderr-filter",
+                              daemon=True)
+        t.start()
+
+        # Python sys.stderr도 동일 fd를 사용하도록 갱신
+        try:
+            sys.stderr.flush()
+        except Exception:
+            pass
+
         self._stderr_filter_installed = True
-        logger.info("[SIM] stderr filter installed (drop: %s)", drop_substrings)
+        self._stderr_filter_state = {
+            "original_fd": original_stderr_fd,
+            "thread": t,
+            "drops": drops,
+            "dropped_counter": dropped_counter,
+        }
+        # 이 메시지는 필터 설치 이후 fd=2로 직접 가는 게 아니라
+        # python logger를 통해 가므로 그대로 보임
+        logger.info("[SIM] fd-level stderr filter installed (drop: %s)", drops)
 
     def _build_app_launch_args(self) -> Dict[str, Any]:
         """SimulationApp / AppLauncher에 전달할 추가 인자.
@@ -357,45 +388,60 @@ class SimulationManager:
             logger.debug("[SIM] carb settings unavailable: %s", e)
             return
 
+        # carb settings 헬퍼 — 키 타입 오류를 individually try/except
+        def _try_set(key: str, value):
+            try:
+                settings.set(key, value)
+                return True
+            except Exception as e:
+                logger.debug("[SIM] settings.set(%s, %r) failed: %s", key, value, e)
+                return False
+
         # 1) 렌더 모드 (RaytracedLighting은 NRD를 사용하지 않음)
-        try:
-            settings.set("/rtx/rendermode", self.config.render_mode)
-            # 추가 호환성: 일부 빌드에서 키 경로가 다름
-            settings.set("/rtx/pathtracing/enabled", False
-                         if self.config.render_mode == "RaytracedLighting" else True)
-            logger.info("[SIM] RTX render mode = %s", self.config.render_mode)
-        except Exception as e:
-            logger.debug("[SIM] failed to set render mode: %s", e)
+        _try_set("/rtx/rendermode", self.config.render_mode)
+        _try_set("/rtx/pathtracing/enabled",
+                 self.config.render_mode != "RaytracedLighting")
+        logger.info("[SIM] RTX render mode = %s", self.config.render_mode)
 
         # 2) NRD denoiser 비활성 (Blackwell 셰이더 호환성 회피)
         if self.config.disable_nrd_denoiser:
-            try:
-                # NRD 관련 모든 키를 false로
-                settings.set("/rtx/post/dlss/execMode", 0)
-                settings.set("/rtx-transient/dldenoiser/enabled", False)
-                settings.set("/rtx/newDenoiser/enabled", False)
-                settings.set("/rtx/directLighting/sampledLighting/enabled", False)
-                # NRD 플러그인 자체
-                settings.set("/rtx/denoising/enabled", False)
-                settings.set("/rtx/denoising/nrd/enabled", False)
-                # PathTracing denoiser (만약 PathTracing 모드여도 OFF)
-                settings.set("/rtx/pathtracing/denoiser/enabled", False)
-                settings.set("/rtx/pathtracing/optixDenoiser/enabled", False)
-                logger.info("[SIM] NRD/path-tracing denoiser disabled "
-                            "(Blackwell GPU compatibility)")
-            except Exception as e:
-                logger.debug("[SIM] failed to disable denoiser: %s", e)
+            for key, val in [
+                ("/rtx/post/dlss/execMode", 0),
+                ("/rtx-transient/dldenoiser/enabled", False),
+                ("/rtx-transient/denoiser/enabled", False),
+                ("/rtx/newDenoiser/enabled", False),
+                ("/rtx/directLighting/sampledLighting/enabled", False),
+                ("/rtx/denoising/enabled", False),
+                ("/rtx/denoising/nrd/enabled", False),
+                ("/rtx/pathtracing/denoiser/enabled", False),
+                ("/rtx/pathtracing/optixDenoiser/enabled", False),
+                # 추가: NGX/Optix 자체 disable (셰이더 컴파일 자체를 건너뜀)
+                ("/rtx-transient/ngx/enabled", False),
+                ("/rtx/raytracing/lightcache/spatialCache/enabled", False),
+            ]:
+                _try_set(key, val)
+            logger.info("[SIM] NRD/path-tracing denoiser disabled "
+                        "(Blackwell GPU compatibility)")
 
-        # 3) 로그 스팸 억제 — rtx.denoising 채널의 [Error] 출력 차단
+        # 3) 로그 스팸 억제 — carb 로그 레벨 (int)로 설정
+        # [Error] [carb.dictionary.plugin] getStringRawInternal: item ... is not a string
+        # → /log/channels/.../level 키는 string이 아니라 int (carb.logging.LEVEL_*)
         if self.config.suppress_rtx_log_spam:
-            try:
-                # carb 로그 채널 별 레벨 제어
-                settings.set("/log/channels/rtx.denoising/level", "fatal")
-                settings.set("/log/channels/rtx.denoising.plugin/level", "fatal")
-                settings.set("/log/channels/rtx-transient.denoiser/level", "fatal")
-                logger.info("[SIM] rtx.denoising log channels muted")
-            except Exception as e:
-                logger.debug("[SIM] failed to set log filter: %s", e)
+            # carb log level 상수: VERBOSE=-2, INFO=-1, WARN=0, ERROR=1, FATAL=2
+            LEVEL_FATAL = 2
+            for chan in [
+                "rtx.denoising",
+                "rtx.denoising.plugin",
+                "rtx-transient.denoiser",
+                "rtx.optixdenoising",
+                "rtx.optixdenoising.plugin",
+                "gpu.foundation.plugin",
+                "carb.graphics-vulkan.plugin",
+            ]:
+                # 채널 자체를 disable + level 모두 시도
+                _try_set(f"/log/channels/{chan}/enabled", False)
+                _try_set(f"/log/channels/{chan}/level", LEVEL_FATAL)
+            logger.info("[SIM] rtx.denoising log channels muted")
 
     def _build_visualization(self) -> None:
         """Isaac Sim 시작 후 USD 시각화 구성."""
