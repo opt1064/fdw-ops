@@ -353,8 +353,43 @@ ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
 ```
 [VIS]     USD path: /home/isweon/isaac_assets/Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd
 [VIS]     source   : LOCAL disk
-[VIS] <<< robot franka_panda loaded successfully (children=N>0, articulation=True)
+[VIS] <<< robot franka_panda loaded successfully (children=12, articulation=True)
+[VIS] real robot + IK controller attached to WELDING_CELL_01 (robot=franka_panda)
 ```
+
+### 11.2.1 ⚠️ franka.usd 가 참조하는 sub-USD 자산 (필수)
+
+`franka.usd` 자체는 약 30 KB 의 얇은 USDC wrapper 일 뿐입니다. **실제
+3D 메쉬는 모두 sub-USD 파일에 들어있고, 이를 빠뜨리면 articulation 트리는
+12개로 보이지만 GUI 에서 로봇이 투명/비어 있게 보입니다.**
+
+`download_franka_usd.sh` 가 함께 받아주는 12개 sub-USD (총 ≈10 MB,
+2026-05-11 NVIDIA S3 기준):
+
+```
+configuration/franka_robot_schema.usd        ( ~4 KB)   ← articulation schema
+Props/panda_link0.usd                        (~2.1 MB)
+Props/panda_link1.usd                        (~502 KB)
+Props/panda_link2.usd                        (~502 KB)
+Props/panda_link3.usd                        (~868 KB)
+Props/panda_link4.usd                        (~868 KB)
+Props/panda_link5.usd                        (~780 KB)
+Props/panda_link6.usd                        (~2.3 MB)
+Props/panda_link7.usd                        (~1.3 MB)
+Props/panda_hand.usd                         (~688 KB)
+Props/panda_leftfinger.usd                   ( ~74 KB)
+Props/panda_rightfinger.usd                  ( ~71 KB)
+```
+
+증상 — Isaac Sim 콘솔 경고:
+```
+[Warning] [omni.usd] Could not load sublayer @configuration/franka_robot_schema.usd@
+[Warning] [omni.usd] Could not open asset @Props/panda_link0.usd@ for reference ...
+[Warning] [omni.usd] Could not open asset @Props/panda_hand.usd@ for reference ...
+```
+
+이런 경고가 보이면 `bash scripts/download_franka_usd.sh` 를 다시 실행해
+누락 파일을 받으면 됩니다.
 
 ### 11.3 자산 경로 탐색 우선순위
 
