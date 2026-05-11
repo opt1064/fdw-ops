@@ -25,7 +25,25 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 @dataclass
 class UsdAssetSpec:
-    """일반 USD 자산 메타데이터 (로봇 articulation이 아닌 reference 자산)."""
+    """일반 USD 자산 메타데이터 (로봇 articulation이 아닌 reference 자산).
+
+    variant_selection:
+        USD variant set 선택 매핑 (variant_set_name -> variant_name).
+        Reference attach 직후 ``prim.GetVariantSets().GetVariantSet(k)
+        .SetVariantSelection(v)`` 형태로 적용된다.
+
+        예) NovaCarter (NVIDIA 공식 Asset Structure 기준)::
+
+            variant_selection = {
+                "Configuration": "Base",          # Base / Fully Merged / No_Internals / Skirt_only
+                "Physics":       "Physics_Base",  # No_Physics / Physics_Base
+                "Sensors":       "All_Sensors",   # None / All_Sensors
+            }
+
+        None 또는 빈 dict이면 USD 기본(authored default) variant가 사용된다.
+        Variant set이 USD에 정의되어 있지 않으면 SetVariantSelection은
+        무시되며(no-op) 경고 로그만 남긴다.
+    """
 
     name: str                          # "nova_carter", "klt_bin", ...
     usd_subpath: str                   # "Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd"
@@ -34,6 +52,7 @@ class UsdAssetSpec:
     base_offset_z: float = 0.0         # ground (z=0) 위에 올릴 때 보정
     description: str = ""
     is_articulation: bool = False      # True면 SingleArticulation으로 wrap 시도
+    variant_selection: Optional[Dict[str, str]] = None  # variant-set composition 자산용
 
 
 # =============================================================================
@@ -52,6 +71,26 @@ ASSET_CATALOG: Dict[str, UsdAssetSpec] = {
         category="amr",
         description="NVIDIA Nova Carter — full sensor stack AMR",
         is_articulation=True,
+        # NovaCarter는 variant-set 컨테이너 (4 KB wrapper가 아니라 variant
+        # composition arc 사용). variant 선택이 없으면 Configuration / Physics
+        # / Sensors variant payload가 서로 다른 기본값으로 골라져 PhysicsJoint
+        # body0/body1 prim이 stage에 없어 "CreateJoint - no bodies defined at
+        # body0 and body1" 경고가 발생한다.
+        #
+        # 공식 옵션 (Asset Structure 문서):
+        #   Configuration: Base / Fully Merged / No_Internals / Skirt_only
+        #   Physics      : No_Physics / Physics_Base
+        #   Sensors      : None / All_Sensors
+        #
+        # variant 이름 spelling이 실제 USD와 다를 경우 (예: "Fully Merged" vs
+        # "Full_Merged"), scene_builder가 SetVariantSelection 실패를 감지하고
+        # 사용 가능한 variant 목록을 로그로 출력한다. 그 출력대로 본 dict를
+        # 보정하면 된다.
+        variant_selection={
+            "Configuration": "Base",
+            "Physics": "Physics_Base",
+            "Sensors": "All_Sensors",
+        },
     ),
     "jetbot": UsdAssetSpec(
         name="jetbot",

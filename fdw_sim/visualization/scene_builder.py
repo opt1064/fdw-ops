@@ -443,11 +443,21 @@ class SceneBuilder:
                           translation: Tuple[float, float, float] = (0.0, 0.0, 0.0),
                           scale: Tuple[float, float, float] = (1.0, 1.0, 1.0),
                           rotate_z_deg: float = 0.0,
+                          variant_selection: Optional[Dict[str, str]] = None,
                           ) -> Optional[object]:
         """USD 파일을 prim에 reference로 attach.
 
         실 자산이 로컬/원격에서 안 잡힐 수 있으므로 호출자 측에서 사전 검증
         (find_local_asset 등) 후 호출하는 것을 권장.
+
+        variant_selection:
+            ``{variant_set_name: variant_name}`` 형태의 dict.
+            AddReference 직후 ``prim.GetVariantSets().GetVariantSet(k)
+            .SetVariantSelection(v)`` 가 적용된다. NovaCarter처럼 USD가
+            variant-set 컨테이너인 경우, 이 값이 없으면 Physics/Configuration
+            variant payload가 일관되지 않은 기본값으로 골라져
+            "PhysicsUSD::CreateJoint - no bodies defined at body0 and body1"
+            경고가 발생한다. 자세한 내용은 `asset_catalog.UsdAssetSpec` 참고.
         """
         UsdGeom = self._UsdGeom
         Gf = self._Gf
@@ -474,6 +484,13 @@ class SceneBuilder:
             logger.warning("[VIS] add_usd_reference: AddReference failed for "
                            "%s (%s): %s", prim_path, usd_path, e)
             return None
+
+        # 1.5) variant selection — NovaCarter 등 variant-set 컨테이너용.
+        #      AddReference 직후, transform 적용 이전에 반드시 호출해야
+        #      compose 그래프가 올바른 variant payload(rigid body / joint
+        #      target prim)를 stage에 포함시킨다.
+        if variant_selection:
+            self._apply_variant_selection(prim, variant_selection, usd_path)
 
         # 2) transform — reference 다음에 설정하면 reference 안의 root xform을
         #    덮어쓰게 된다. 정확한 순서: SetReference → AddTranslate/Scale/Rotate.
@@ -544,6 +561,7 @@ class SceneBuilder:
             translation=position,
             scale=spec.scale,
             rotate_z_deg=rotate_z_deg,
+            variant_selection=spec.variant_selection,
         )
         # add_usd_reference는 이미 reference attach 성공 여부를 검증한다.
         # children==0 이라도 reference만 붙었으면 다음 frame에 compose 된다.
@@ -583,6 +601,7 @@ class SceneBuilder:
             translation=offset,
             scale=spec.scale,
             rotate_z_deg=rotate_z_deg,
+            variant_selection=spec.variant_selection,
         )
         if prim is None:
             return None
@@ -701,6 +720,7 @@ class SceneBuilder:
                 slot_path, usd_path,
                 translation=(tx, ty, tz),
                 scale=spec.scale,
+                variant_selection=spec.variant_selection,
             )
             # add_usd_reference 가 reference attach 성공을 이미 검증함.
             # children==0 이어도 다음 frame에 compose 되므로 prim is not None 으로 충분.
@@ -845,6 +865,74 @@ class SceneBuilder:
     # ========================================================================
     # 내부 helper
     # ========================================================================
+    def _apply_variant_selection(self, prim, variant_selection: Dict[str, str],
+                                  usd_path: str) -> None:
+        """USD variant set 선택을 prim에 적용 (NovaCarter 등 variant 컨테이너용).
+
+        Args:
+            prim:               variant를 적용할 USD prim (이미 AddReference 후)
+            variant_selection:  ``{variant_set_name: variant_name}``
+            usd_path:           로그용 — 어떤 USD에 대한 적용인지 표시
+
+        실패 모드:
+          * variant set 자체가 USD에 없음    → 경고 + 사용 가능 set 목록 출력
+          * 지정한 variant name이 set에 없음 → 경고 + 사용 가능 variant 출력
+                                                + 기본값으로 폴백 (변경 없음)
+          * pxr API 예외                      → 경고 + 다음 set 시도
+
+        모든 실패는 경고 레벨로만 처리하고 reference 자체는 살려둔다.
+        그렇게 해야 variant 이름 spelling이 약간 어긋난 경우라도 기본 variant로
+        장면이 보여지고, 사용자가 로그에 출력된 사용 가능 목록을 보고
+        ``asset_catalog.py``의 spelling을 보정할 수 있다.
+        """
+        try:
+            vsets = prim.GetVariantSets()
+        except Exception as e:
+            logger.warning("[VIS] variant: GetVariantSets failed on %s (%s): %s",
+                           prim.GetPath(), usd_path, e)
+            return
+
+        try:
+            available_sets = list(vsets.GetNames())
+        except Exception:
+            available_sets = []
+
+        for set_name, variant_name in variant_selection.items():
+            if set_name not in available_sets:
+                logger.warning(
+                    "[VIS] variant: set '%s' NOT FOUND on %s "
+                    "(usd=%s). Available variant sets: %s — "
+                    "skipping this selection (default variant used).",
+                    set_name, prim.GetPath(), usd_path,
+                    available_sets if available_sets else "(none)")
+                continue
+
+            try:
+                vset = vsets.GetVariantSet(set_name)
+                available_variants = list(vset.GetVariantNames())
+            except Exception as e:
+                logger.warning("[VIS] variant: GetVariantSet('%s') failed on %s: %s",
+                               set_name, prim.GetPath(), e)
+                continue
+
+            if variant_name not in available_variants:
+                logger.warning(
+                    "[VIS] variant: '%s' NOT in set '%s' on %s "
+                    "(usd=%s). Available variants in this set: %s — "
+                    "leaving default. Please fix asset_catalog.UsdAssetSpec.variant_selection.",
+                    variant_name, set_name, prim.GetPath(), usd_path,
+                    available_variants)
+                continue
+
+            try:
+                ok = vset.SetVariantSelection(variant_name)
+                logger.info("[VIS] variant: %s.%s = %s (ok=%s) on %s",
+                            set_name, variant_name, variant_name, ok,
+                            prim.GetPath())
+            except Exception as e:
+                logger.warning("[VIS] variant: SetVariantSelection(%s=%s) failed: %s",
+                               set_name, variant_name, e)
+
     def _enforce_xform_order(self, xformable) -> None:
         """USD 표준 xform op 순서로 재정렬: translate → rotate → scale.
 

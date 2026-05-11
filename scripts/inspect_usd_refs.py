@@ -71,6 +71,32 @@ JOINT_BODY_PATTERN = re.compile(
     rb"physics:body[01].*?</?([A-Za-z_][A-Za-z0-9_/]*)>", re.DOTALL)
 
 
+# Variant-set composition 표식 — USDC TOKENS 테이블에 박혀 있는 키워드.
+# 이 중 어느 하나라도 strings 에서 발견되면 해당 USD 는 variant-set 컨테이너
+# 일 가능성이 높음 (NovaCarter 처럼 4 KB wrapper 가 아니라 variant payload
+# 를 lazy-load 하는 구조).
+VARIANT_KEYWORDS = (
+    "variantSel",       # variantSelection (자식 토큰)
+    "variantSet",       # variantSets
+    "variantSetNames",
+)
+
+# NVIDIA 공식 NovaCarter variant 이름 (Asset Structure 문서 기준).
+# inspect 결과에 이 토큰들이 보이면 NovaCarter-style 자산으로 판단 가능.
+NOVA_CARTER_VARIANT_HINTS = (
+    "Configuration",
+    "Physics",
+    "Sensors",
+    "Physics_Base",
+    "No_Physics",
+    "All_Sensors",
+    "Skirt_only",
+    "No_Internals",
+    "Full_Merged",     # USDC 토큰화로 공백이 _ 로 보일 수 있음
+    "Fully Merged",
+)
+
+
 def extract_strings(usd_path: Path) -> bytes:
     """USDC 바이너리에서 printable strings 만 추출.
 
@@ -266,6 +292,29 @@ def extract_refs(usd_path: Path,
     return refs
 
 
+def detect_variant_composition(usd_path: Path) -> Tuple[bool, List[str], List[str]]:
+    """USD 가 variant-set 컨테이너인지 감지.
+
+    Returns:
+        (is_variant_container, found_keywords, found_variant_names)
+
+        is_variant_container : VARIANT_KEYWORDS 중 하나 이상이 strings 에서
+                                발견되면 True
+        found_keywords       : 실제로 발견된 키워드 부분집합
+        found_variant_names  : NOVA_CARTER_VARIANT_HINTS 중 발견된 토큰
+                                (NovaCarter 같은 알려진 자산 식별용)
+    """
+    blob = extract_strings(usd_path)
+    try:
+        text = blob.decode("utf-8", errors="ignore")
+    except Exception:
+        text = ""
+
+    found_keywords = [kw for kw in VARIANT_KEYWORDS if kw in text]
+    found_variant_names = [v for v in NOVA_CARTER_VARIANT_HINTS if v in text]
+    return (bool(found_keywords), found_keywords, found_variant_names)
+
+
 def extract_joint_bodies(usd_path: Path) -> List[str]:
     """Physics joint 가 참조하는 body prim path 목록 (중복 제거)."""
     blob = extract_strings(usd_path)
@@ -395,6 +444,30 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"=== Inspecting: {args.usd}")
     print(f"    size: {args.usd.stat().st_size:,} bytes")
     print(f"    USDC : {_is_usdc(args.usd)}")
+
+    # Variant-set 컨테이너 감지 — NovaCarter 처럼 4 KB wrapper 가 아니라
+    # variant payload 를 lazy-load 하는 구조라면 variant 선택 없이는
+    # PhysicsJoint body0/body1 prim 이 stage 에 없을 수 있음.
+    is_variant, var_keywords, var_names = detect_variant_composition(args.usd)
+    if is_variant:
+        print(f"    Variants: YES — keywords found: {', '.join(var_keywords)}")
+        if var_names:
+            print(f"              candidate variant names: {', '.join(var_names)}")
+        print()
+        print("    [VARIANT HINT] 이 USD 는 variant-set 컨테이너입니다.")
+        print("      → AddReference 후 다음과 같이 variant 선택을 적용해야")
+        print("        PhysicsJoint body0/body1 prim 이 stage 에 포함됩니다:")
+        print("            prim.GetVariantSets().GetVariantSet(name)")
+        print("                .SetVariantSelection(value)")
+        print("      → fdw_sim/visualization/asset_catalog.py 의")
+        print("        UsdAssetSpec.variant_selection 에 매핑을 정의하세요.")
+        # NovaCarter 인 경우 권장 매핑 안내
+        if any(n in var_names for n in ("Physics_Base", "All_Sensors",
+                                          "Skirt_only", "Full_Merged")):
+            print("      → NovaCarter 권장값 (NVIDIA Asset Structure 문서):")
+            print("            Configuration = Base")
+            print("            Physics       = Physics_Base")
+            print("            Sensors       = All_Sensors")
 
     # --dump-strings : 파일 내부 모든 printable 문자열 그대로 출력
     if args.dump_strings:
