@@ -87,6 +87,17 @@ class SimulationConfig:
     force_lighting_mode: Optional[str] = None # None=Kit 기본, "camera"|"stage"|"rig" 강제
     safe_mode: bool = False                   # True면 위 3개를 가장 보수적인 값으로 일괄 설정
 
+    # Level 2.3: 셀별 실 USD 자산 사용 옵션 (placeholder fallback 자동)
+    use_real_inspection_cam: bool = True      # inspection 셀에 실 카메라 prim
+    use_real_amr: bool = True                 # AMR을 USD(NovaCarter 등)로 로드
+    amr_asset_name: str = "nova_carter"       # asset_catalog 엔트리 이름
+                                               # nova_carter | jetbot | iw_hub | iw_hub_static
+                                               # nova_carter Props/* 404 이슈 시 jetbot/iw_hub_static 권장
+    use_real_smart_rack: bool = True          # material 셀에 KLT bin USD rack
+    smart_rack_asset_name: str = "klt_bin"    # asset_catalog 엔트리 이름
+    use_real_forming_arm: bool = True         # forming 셀에 실 UR 로봇팔
+    forming_robot_name: str = "ur10"          # robot_loader.ROBOT_CATALOG 키
+
 
 # =============================================================================
 # Manager
@@ -559,6 +570,14 @@ class SimulationManager:
             spark_rate=self.config.spark_rate,
             spark_lifetime_sec=self.config.spark_lifetime_sec,
             rmpflow_register_obstacles=self.config.rmpflow_register_obstacles,
+            # Level 2.3
+            use_real_inspection_cam=self.config.use_real_inspection_cam,
+            use_real_amr=self.config.use_real_amr,
+            amr_asset_name=self.config.amr_asset_name,
+            use_real_smart_rack=self.config.use_real_smart_rack,
+            smart_rack_asset_name=self.config.smart_rack_asset_name,
+            use_real_forming_arm=self.config.use_real_forming_arm,
+            forming_robot_name=self.config.forming_robot_name,
         )
         self.visualizer = WorkshopVisualizer(bus=self.bus, config=viz_cfg)
 

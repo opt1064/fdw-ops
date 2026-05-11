@@ -36,6 +36,16 @@ PROCESSING 단계에서 TCP(엔드 이펙터) 위치에 PointInstancer 기반 �
         python scripts/run_poc1_level2_2.py --gui --real-robot \
             --spark-rate 60 --spark-lifetime 0.6
 
+    # Level 2.3: AMR을 NovaCarter 대신 Jetbot으로 (Props/* 404 우회)
+    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
+        python scripts/run_poc1_level2_2.py --gui --real-robot \
+            --amr-asset jetbot
+
+    # Level 2.3: AMR/카메라/Rack 모두 placeholder로 (로봇팔만 실제)
+    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
+        python scripts/run_poc1_level2_2.py --gui --real-robot \
+            --no-real-amr --no-real-smart-rack --no-real-inspection-cam
+
 전제:
     * Isaac Sim 5.1.0 + Nucleus 접속 가능 (or 환경변수 ISAAC_ASSETS_ROOT 지정)
     * Franka USD : Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd (Isaac 5.1 경로)
@@ -59,6 +69,11 @@ from fdw_sim.utils.logging_setup import setup_logging
 
 VALID_ROBOTS = ["franka_panda", "ur10", "franka_alt"]
 VALID_MOTION_MODES = ["auto", "rmpflow", "ik", "heuristic"]
+
+# Level 2.3 USD 자산 카탈로그 선택지
+VALID_AMR_ASSETS = ["nova_carter", "jetbot", "iw_hub", "iw_hub_static"]
+VALID_SMART_RACKS = ["klt_bin", "cardboard_box"]
+VALID_FORMING_ROBOTS = ["ur10", "ur10e", "ur5e", "ur16e"]
 
 
 def main() -> int:
@@ -108,6 +123,33 @@ def main() -> int:
     p.add_argument("--no-rmpflow-obstacles", dest="rmpflow_register_obstacles",
                    action="store_false", default=True,
                    help="RMPflow에 작업대/부품 장애물 등록 비활성")
+
+    # ----------------------------------------------------- Level 2.3 신규 플래그
+    # 셀별 실 USD 자산 선택. NovaCarter Props/* 404 이슈 우회를 위해
+    # --amr-asset jetbot 또는 iw_hub_static 으로 즉시 스왑 가능.
+    p.add_argument("--amr-asset", choices=VALID_AMR_ASSETS, default="nova_carter",
+                   help="AMR USD 자산: nova_carter(기본) | jetbot | "
+                        "iw_hub | iw_hub_static. "
+                        "NovaCarter joint body 누락 경고 발생 시 "
+                        "jetbot/iw_hub_static 권장 (self-contained)")
+    p.add_argument("--no-real-amr", dest="use_real_amr",
+                   action="store_false", default=True,
+                   help="AMR을 USD 대신 placeholder 박스로 그림")
+    p.add_argument("--smart-rack-asset", choices=VALID_SMART_RACKS,
+                   default="klt_bin",
+                   help="Material 셀 smart rack USD 자산 (기본 klt_bin)")
+    p.add_argument("--no-real-smart-rack", dest="use_real_smart_rack",
+                   action="store_false", default=True,
+                   help="Smart rack을 USD 대신 placeholder 박스로 그림")
+    p.add_argument("--forming-robot", choices=VALID_FORMING_ROBOTS,
+                   default="ur10",
+                   help="Forming 셀 로봇팔 (기본 ur10)")
+    p.add_argument("--no-real-forming-arm", dest="use_real_forming_arm",
+                   action="store_false", default=True,
+                   help="Forming 셀 로봇팔을 placeholder 박스로 그림")
+    p.add_argument("--no-real-inspection-cam", dest="use_real_inspection_cam",
+                   action="store_false", default=True,
+                   help="Inspection 셀 카메라를 USD 대신 placeholder로 그림")
 
     # RTX / Denoiser 안정성 옵션 (AGX Thor Blackwell GPU 호환)
     p.add_argument("--render-mode", choices=["RaytracedLighting", "PathTracing"],
@@ -181,6 +223,15 @@ def main() -> int:
     sim.config.spark_lifetime_sec = args.spark_lifetime
     sim.config.rmpflow_register_obstacles = args.rmpflow_register_obstacles
 
+    # Level 2.3 옵션 — 셀별 실 USD 자산 선택
+    sim.config.use_real_amr = args.use_real_amr
+    sim.config.amr_asset_name = args.amr_asset
+    sim.config.use_real_smart_rack = args.use_real_smart_rack
+    sim.config.smart_rack_asset_name = args.smart_rack_asset
+    sim.config.use_real_forming_arm = args.use_real_forming_arm
+    sim.config.forming_robot_name = args.forming_robot
+    sim.config.use_real_inspection_cam = args.use_real_inspection_cam
+
     # RTX 안정성 옵션
     sim.config.render_mode = args.render_mode
     sim.config.disable_nrd_denoiser = not args.enable_denoiser
@@ -214,6 +265,14 @@ def main() -> int:
     print(f" Spark lifetime   : {sim.config.spark_lifetime_sec:.2f} s")
     print(f" Weld path offset : ±{sim.config.weld_path_offset_y:.2f} m")
     print(f" Weld path height : {sim.config.weld_path_height:.3f} m")
+    print(f" --- Level 2.3 USD assets ---")
+    print(f" Real AMR         : {sim.config.use_real_amr} "
+          f"({sim.config.amr_asset_name})")
+    print(f" Real smart rack  : {sim.config.use_real_smart_rack} "
+          f"({sim.config.smart_rack_asset_name})")
+    print(f" Real forming arm : {sim.config.use_real_forming_arm} "
+          f"({sim.config.forming_robot_name})")
+    print(f" Real inspect cam : {sim.config.use_real_inspection_cam}")
     print(f" Render mode      : {sim.config.render_mode}")
     print(f" NRD denoiser     : {'OFF (Blackwell-safe)' if sim.config.disable_nrd_denoiser else 'ON'}")
     print(f" RTX log spam     : {'suppressed' if sim.config.suppress_rtx_log_spam else 'visible'}")

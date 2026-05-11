@@ -182,3 +182,92 @@ cfg = WorkshopVizConfig(
 - `use_real_robot` (Level 2.1) 은 welding 셀 전용으로 의미 유지
 - forming 셀의 `use_real_forming_arm=True`는 내부적으로 `_spawn_robot_arm`을
   잠시 `robot_name=forming_robot_name`으로 스왑해 호출 → 끝나면 원복
+
+## 트러블슈팅 — NovaCarter `CreateJoint - no bodies defined at body0 and body1`
+
+### 증상
+
+NovaCarter AMR 로드 시 다음과 같은 5개 노란색 Physics USD 경고 팝업이 뜬다:
+
+```
+PhysicsUSD::CreateJoint - no bodies defined at body0 and body1, joint prim:
+  /World/FDW/AMRs/AMR_01_USD/joint_swing_left
+  /World/FDW/AMRs/AMR_01_USD/joint_swing_right
+  /World/FDW/AMRs/AMR_01_USD/joint_caster_left
+  /World/FDW/AMRs/AMR_01_USD/joint_caster_right
+  /World/FDW/AMRs/AMR_02_USD/joint_swing_left
+```
+
+### 원인
+
+`nova_carter_physics.usd` 는 swing/caster joint 를 정의하지만, joint 가
+참조하는 body prim (chassis, wheel, caster 등) 은 별도의 sub-USD
+(`Props/nova_carter_{base,chassis,wheel,caster}.usd`) 에 있다. 그런데
+이 Props/* 경로들이 Isaac 5.1 S3 버킷에서 404 를 반환해 다운로드되지
+않아, joint 만 로드되고 body 가 없어 위 경고가 발생한다.
+
+### 해결책 (우선순위 순)
+
+**1) 가장 빠른 우회: 다른 AMR로 스왑**
+
+`run_poc1_level2_2.py` 의 신규 `--amr-asset` 플래그로 즉시 변경 가능:
+
+```bash
+# Jetbot (compact 2-wheel AMR — self-contained 으로 확인됨)
+python scripts/run_poc1_level2_2.py --gui --real-robot --amr-asset jetbot
+
+# Idealworks iw_hub_static (no actuation, 가장 단순)
+python scripts/run_poc1_level2_2.py --gui --real-robot --amr-asset iw_hub_static
+
+# AMR 자체를 placeholder 박스로 (warning 0)
+python scripts/run_poc1_level2_2.py --gui --real-robot --no-real-amr
+```
+
+**2) 실제 의존성 추출 (NovaCarter Props 경로 정정)**
+
+NVIDIA S3 의 실제 sub-USD 경로를 찾기 위해 `scripts/inspect_usd_refs.py`
+사용:
+
+```bash
+# 직접 참조만 확인
+python scripts/inspect_usd_refs.py \
+    ~/isaac_assets/Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd
+
+# 재귀 + 누락된 sub-USD 만 Isaac/... subpath 형태로 출력
+python scripts/inspect_usd_refs.py --recursive --only-missing --print-subpaths \
+    ~/isaac_assets/Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd
+
+# Physics joint 의 body relationship target 도 추출
+python scripts/inspect_usd_refs.py --joints \
+    ~/isaac_assets/Isaac/Robots/NVIDIA/NovaCarter/Variants/Physics/nova_carter_physics.usd
+```
+
+출력의 `Missing sub-USD subpaths (Isaac/...)` 섹션을
+`scripts/download_isaac_assets.sh` 의 `download_subpath` 호출에 추가하면
+완전한 의존성 트리를 구성할 수 있다.
+
+**3) 다른 AMR 자산 카탈로그 사용 — CLI 플래그 매트릭스**
+
+| AMR | 자체 포함도 | CreateJoint 경고 | 권장 용도 |
+|---|---|---|---|
+| `nova_carter` | Props/* 404 (현재) | 5개 (swing/caster) | 본격 사용 전 sub-USD 검증 필요 |
+| `jetbot` | ✅ self-contained | 0 | **임시 대체 권장** |
+| `iw_hub_static` | ✅ no articulation | 0 | 가장 안전, 정지 모델 |
+| `iw_hub` | ? | 미검증 | 추가 검증 필요 |
+
+### 진단 도구 — `scripts/inspect_usd_refs.py`
+
+Isaac Sim / Omni 의존성 없이 동작 (strings/grep 만 사용). USDC 바이너리
+안에 텍스트로 박혀 있는 `@<path>@` 참조와 `physics:body0/body1`
+relationship target 을 추출한다.
+
+```bash
+python scripts/inspect_usd_refs.py --help
+```
+
+옵션:
+- `--recursive` / `-r` : sub-USD 를 따라가며 재귀 스캔
+- `--max-depth N` : 재귀 깊이 제한 (기본 4)
+- `--only-missing` : 로컬에 없는 sub-USD 만 출력
+- `--joints` : Physics joint body 참조 prim path 추출
+- `--print-subpaths` : `Isaac/...` 형태로 출력 (download script 입력용)
