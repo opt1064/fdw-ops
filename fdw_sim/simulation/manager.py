@@ -66,6 +66,12 @@ class SimulationConfig:
     weld_path_offset_y: float = 0.25    # 용접 경로 길이 (m), 입력 버퍼 중심 ±offset
     weld_path_height: float = 0.05      # 부품 위 용접 높이 (m)
 
+    # Level 2.1: 렌더링 / RTX 안정성 옵션 (AGX Thor Blackwell GPU 호환)
+    render_mode: str = "RaytracedLighting"   # "RaytracedLighting" | "PathTracing"
+                                              # PathTracing은 NRD denoiser 필요 → Blackwell에서 셰이더 실패
+    disable_nrd_denoiser: bool = True         # rtx.denoising.plugin (NRD) 비활성 — Blackwell 호환 패치
+    suppress_rtx_log_spam: bool = True        # rtx.denoising 등 반복 에러 로그 억제
+
 
 # =============================================================================
 # Manager
@@ -221,9 +227,68 @@ class SimulationManager:
         self._isaac_world.scene.add_default_ground_plane()
         self._isaac_world.reset()
 
+        # 2.5) RTX / Denoiser 설정 (AGX Thor Blackwell GPU 호환 패치)
+        self._apply_rtx_settings()
+
         # 3) 시각화 빌드 (옵션)
         if self.config.enable_visualization:
             self._build_visualization()
+
+    def _apply_rtx_settings(self) -> None:
+        """RTX 렌더러 설정 — Blackwell GPU(AGX Thor)에서 NRD denoiser 셰이더
+        컴파일 실패로 매 프레임 에러 로그가 쏟아지는 문제를 회피한다.
+
+        주요 처리:
+            1) 렌더 모드를 PathTracing → RaytracedLighting으로 (NRD 불필요)
+            2) rtx.denoising.* 플러그인 자체를 비활성
+            3) carb 로그 필터로 반복 에러 출력 억제
+        """
+        try:
+            import carb  # type: ignore
+            settings = carb.settings.get_settings()
+        except Exception as e:
+            logger.debug("[SIM] carb settings unavailable: %s", e)
+            return
+
+        # 1) 렌더 모드 (RaytracedLighting은 NRD를 사용하지 않음)
+        try:
+            settings.set("/rtx/rendermode", self.config.render_mode)
+            # 추가 호환성: 일부 빌드에서 키 경로가 다름
+            settings.set("/rtx/pathtracing/enabled", False
+                         if self.config.render_mode == "RaytracedLighting" else True)
+            logger.info("[SIM] RTX render mode = %s", self.config.render_mode)
+        except Exception as e:
+            logger.debug("[SIM] failed to set render mode: %s", e)
+
+        # 2) NRD denoiser 비활성 (Blackwell 셰이더 호환성 회피)
+        if self.config.disable_nrd_denoiser:
+            try:
+                # NRD 관련 모든 키를 false로
+                settings.set("/rtx/post/dlss/execMode", 0)
+                settings.set("/rtx-transient/dldenoiser/enabled", False)
+                settings.set("/rtx/newDenoiser/enabled", False)
+                settings.set("/rtx/directLighting/sampledLighting/enabled", False)
+                # NRD 플러그인 자체
+                settings.set("/rtx/denoising/enabled", False)
+                settings.set("/rtx/denoising/nrd/enabled", False)
+                # PathTracing denoiser (만약 PathTracing 모드여도 OFF)
+                settings.set("/rtx/pathtracing/denoiser/enabled", False)
+                settings.set("/rtx/pathtracing/optixDenoiser/enabled", False)
+                logger.info("[SIM] NRD/path-tracing denoiser disabled "
+                            "(Blackwell GPU compatibility)")
+            except Exception as e:
+                logger.debug("[SIM] failed to disable denoiser: %s", e)
+
+        # 3) 로그 스팸 억제 — rtx.denoising 채널의 [Error] 출력 차단
+        if self.config.suppress_rtx_log_spam:
+            try:
+                # carb 로그 채널 별 레벨 제어
+                settings.set("/log/channels/rtx.denoising/level", "fatal")
+                settings.set("/log/channels/rtx.denoising.plugin/level", "fatal")
+                settings.set("/log/channels/rtx-transient.denoiser/level", "fatal")
+                logger.info("[SIM] rtx.denoising log channels muted")
+            except Exception as e:
+                logger.debug("[SIM] failed to set log filter: %s", e)
 
     def _build_visualization(self) -> None:
         """Isaac Sim 시작 후 USD 시각화 구성."""

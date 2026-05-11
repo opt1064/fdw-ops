@@ -79,11 +79,27 @@ def main() -> int:
     p.add_argument("--weld-height", type=float, default=0.05,
                    help="용접 경로의 부품 표면 위 높이 (m)")
 
+    # RTX / Denoiser 안정성 옵션 (AGX Thor Blackwell GPU 호환)
+    p.add_argument("--render-mode", choices=["RaytracedLighting", "PathTracing"],
+                   default="RaytracedLighting",
+                   help="RTX 렌더 모드 (기본: RaytracedLighting — NRD denoiser 불필요)")
+    p.add_argument("--enable-denoiser", action="store_true",
+                   help="NRD denoiser 강제 활성 (Blackwell GPU에서는 권장하지 않음)")
+    p.add_argument("--show-rtx-log", action="store_true",
+                   help="rtx.denoising 로그를 그대로 출력 (디버깅용)")
+
     p.add_argument("--log-level", default="INFO",
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
     args = p.parse_args()
     setup_logging(level=args.log_level)
+
+    # RTX denoiser 환경변수 사전 설정 (SimulationApp 시작 전에 적용되어야 함)
+    import os
+    if not args.enable_denoiser:
+        # carb 설정과 동일 키를 환경변수로도 주입 (가장 신뢰성 있는 방식)
+        os.environ.setdefault("RTX_RENDERMODE", args.render_mode)
+        os.environ.setdefault("OMNI_KIT_ALLOW_ROOT", "1")
 
     cfg = load_config(args.config)
 
@@ -111,6 +127,11 @@ def main() -> int:
     sim.config.weld_path_offset_y = args.weld_offset
     sim.config.weld_path_height = args.weld_height
 
+    # RTX 안정성 옵션
+    sim.config.render_mode = args.render_mode
+    sim.config.disable_nrd_denoiser = not args.enable_denoiser
+    sim.config.suppress_rtx_log_spam = not args.show_rtx_log
+
     print("=" * 70)
     print(" FDW-OPS PoC-1 Level 2.1 — 실 로봇팔(Franka/UR10) + IK 데모")
     print("=" * 70)
@@ -125,6 +146,9 @@ def main() -> int:
     print(f" IK enabled       : {sim.config.enable_ik}")
     print(f" Weld path offset : ±{sim.config.weld_path_offset_y:.2f} m")
     print(f" Weld path height : {sim.config.weld_path_height:.3f} m")
+    print(f" Render mode      : {sim.config.render_mode}")
+    print(f" NRD denoiser     : {'OFF (Blackwell-safe)' if sim.config.disable_nrd_denoiser else 'ON'}")
+    print(f" RTX log spam     : {'suppressed' if sim.config.suppress_rtx_log_spam else 'visible'}")
     print("=" * 70)
     if sim.config.use_real_robot:
         print(" [Hint] Franka/UR10 USD가 NGC/Nucleus에서 처음 로드되면")
