@@ -76,18 +76,44 @@ forming_robot_name: str = "ur10"
 기존 `download_franka_usd.sh`를 확장해 Level 2.3에 필요한 자산을 모두
 로컬에 받는다.
 
+**중요 — sub-USD 자동 추출**: Isaac Sim USD는 메인 USD가 내부적으로
+sub-USD(메쉬/머티리얼/Variants)를 reference 한다. 메인만 받으면
+`@small_KLT_visual.usd@ 못 찾음` 류 경고와 함께 메쉬가 안 보일 수 있다.
+이 스크립트는 다운로드한 USD를 `strings|grep`으로 스캔해 `@...@` 형식
+reference 를 자동으로 추출/재귀 다운로드 한다 (최대 깊이 4).
+
 ```bash
-# 전부 받기 (기본)
+# 전부 받기 (기본) — 메인 + 명시한 sub + USD 안 자동 추출 reference
 bash scripts/download_isaac_assets.sh
 
 # 카테고리만 받기
-ONLY=amr     bash scripts/download_isaac_assets.sh   # NovaCarter/Jetbot/iw_hub
-ONLY=robots  bash scripts/download_isaac_assets.sh   # UR10/UR10e/UR5e/UR16e
-ONLY=props   bash scripts/download_isaac_assets.sh   # KLT bin / cardboard
-ONLY=franka  bash scripts/download_isaac_assets.sh   # Level 2.1 Franka
+ONLY=amr     bash scripts/download_isaac_assets.sh   # NovaCarter/Jetbot/iw_hub + sub-USDs
+ONLY=robots  bash scripts/download_isaac_assets.sh   # UR10/UR10e/UR5e/UR16e + sub-USDs
+ONLY=props   bash scripts/download_isaac_assets.sh   # KLT bin + small_KLT_visual.usd + ...
+ONLY=franka  bash scripts/download_isaac_assets.sh   # Level 2.1 Franka + Materials.usd
 ```
 
 `ISAAC_NUCLEUS_DIR_LOCAL=$HOME/isaac_assets` 설정 시 자동 사용.
+
+### sub-USD 누락 시 증상 (실제 사용자 보고)
+
+```
+[Warning] Could not open asset @small_KLT_visual.usd@ for reference 
+  introduced by @.../KLT_Bin/small_KLT_visual_collision.usd@</Root>
+
+[Warning] Could not open asset @.../NovaCarter/Variants/Physics/nova_carter_physics.usd@ 
+  for payload introduced by @.../NovaCarter/nova_carter.usd@
+```
+
+stage diagnose 출력:
+```
+amr:AMR_01    children=0 ref=...nova_carter.usd        ← ref는 attach, mesh 누락
+cell:WELDING_CELL_01/RobotArm  children=12 ref=...franka.usd  ← OK
+```
+
+`children=0 + ref=...usd` 패턴은 **메인 USD는 attach 됐지만 sub-USD payload
+가 없어 빈 prim**이라는 뜻 → 재다운로드 필요. 업데이트된 스크립트의 자동
+추출 로직이 이 케이스를 해결한다.
 
 ## 실행
 
