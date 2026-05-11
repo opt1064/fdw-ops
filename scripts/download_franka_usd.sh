@@ -7,9 +7,14 @@
 #   에서 직접 fetch 하려고 하면 Omni Client HTTPS resolver가 제대로
 #   동작하지 않아 빈 prim만 만들어지고 자식이 0개가 되는 경우가 있다.
 #
+# ⚠️ Isaac Sim 5.1에서 NVIDIA가 USD 자산 경로를 재구성했다.
+#    옛 경로:  Isaac/Robots/Franka/franka.usd                          (4.x — 5.1에서 404)
+#    새 경로:  Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd      (5.1 정식 경로)
+#    참고:    https://docs.isaacsim.omniverse.nvidia.com/5.1.0/assets/usd_assets_robots.html
+#
 # 이 스크립트는 Franka Panda USD 와 그것이 reference 하는 sub-USD/meshes/
-# materials를 모두 ~/isaac_assets/Isaac/Robots/Franka/ 에 받아둔다.
-# 그리고 시뮬레이터를 실행할 때 다음 환경변수를 설정하면 끝:
+# materials를 모두 ~/isaac_assets/Isaac/Robots/FrankaRobotics/FrankaPanda/
+# 에 받아둔다. 시뮬레이터 실행 시 환경변수 한 줄로 사용 가능:
 #
 #     export ISAAC_NUCLEUS_DIR_LOCAL=~/isaac_assets
 #
@@ -24,7 +29,9 @@ set -u
 
 DEST="${DEST:-$HOME/isaac_assets}"
 BASE_URL="https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1"
-FRANKA_DIR="$DEST/Isaac/Robots/Franka"
+# Isaac 5.1 신규 경로
+FRANKA_SUBDIR="Isaac/Robots/FrankaRobotics/FrankaPanda"
+FRANKA_DIR="$DEST/$FRANKA_SUBDIR"
 
 color() { printf "\033[%sm%s\033[0m" "$1" "$2"; }
 info()  { echo "$(color "36" "[INFO]") $*"; }
@@ -35,7 +42,7 @@ err()   { echo "$(color "31" "[FAIL]") $*"; }
 mkdir -p "$FRANKA_DIR"
 
 info "Destination : $FRANKA_DIR"
-info "Source root : $BASE_URL/Isaac/Robots/Franka/"
+info "Source root : $BASE_URL/$FRANKA_SUBDIR/"
 
 # wget 확인
 if ! command -v wget >/dev/null 2>&1; then
@@ -48,7 +55,7 @@ fi
 # ---------------------------------------------------------------------
 download_file() {
     local rel="$1"
-    local url="$BASE_URL/Isaac/Robots/Franka/$rel"
+    local url="$BASE_URL/$FRANKA_SUBDIR/$rel"
     local dst="$FRANKA_DIR/$rel"
     mkdir -p "$(dirname "$dst")"
     if [ -f "$dst" ] && [ -s "$dst" ]; then
@@ -71,14 +78,42 @@ download_file() {
     fi
 }
 
-# Isaac 5.1 Franka 디렉토리의 알려진 파일 목록
+# Isaac 5.1 FrankaPanda 디렉토리의 알려진 파일 목록
 # (NVIDIA S3는 listing이 안되므로 명시적으로 시도)
+# franka_alt_fingers.usd 는 5.1에서 사라졌고, panda_instanceable.usd 는
+# 형제 디렉토리 FrankaEmika/ 로 이동했다.
 TOP_FILES=(
     "franka.usd"
-    "franka_alt_fingers.usd"
-    "franka_instanceable.usd"
-    "franka_mimic.usd"
 )
+
+# Isaac 5.1 형제 디렉토리에 있는 관련 변종들도 함께 받아둔다.
+# 받기 실패해도 무시 (404 가능).
+SIBLING_FILES=(
+    "Isaac/Robots/FrankaRobotics/FrankaEmika/panda_instanceable.usd"
+    "Isaac/Robots/FrankaRobotics/FrankaFR3/fr3.usd"
+    "Isaac/Robots/FrankaRobotics/FactoryFranka/factory_franka.usd"
+    "Isaac/Robots/FrankaRobotics/FactoryFranka/factory_franka_instanceable.usd"
+)
+
+download_sibling() {
+    local subpath="$1"
+    local url="$BASE_URL/$subpath"
+    local dst="$DEST/$subpath"
+    mkdir -p "$(dirname "$dst")"
+    if [ -f "$dst" ] && [ -s "$dst" ]; then
+        ok "exists: $subpath"
+        return 0
+    fi
+    info "downloading sibling: $subpath"
+    if wget -q --show-progress -O "$dst" "$url" && [ -s "$dst" ]; then
+        ok "got: $subpath ($(du -h "$dst" | cut -f1))"
+        return 0
+    else
+        warn "missing (optional): $subpath"
+        rm -f "$dst"
+        return 1
+    fi
+}
 
 info "=== 1) Top-level USD 파일 ==="
 GOT_ANY=0
@@ -91,9 +126,17 @@ done
 if [ "$GOT_ANY" -eq 0 ]; then
     err "최상위 franka.usd 파일을 하나도 못 받았습니다."
     err "URL이 바뀌었을 가능성이 있습니다. 다음을 직접 확인해주세요:"
-    err "  $BASE_URL/Isaac/Robots/Franka/franka.usd"
+    err "  $BASE_URL/$FRANKA_SUBDIR/franka.usd"
+    err "참고 (Isaac 5.1 공식 자산 목록):"
+    err "  https://docs.isaacsim.omniverse.nvidia.com/5.1.0/assets/usd_assets_robots.html"
     exit 2
 fi
+
+# 형제 디렉토리(FrankaEmika/FrankaFR3/FactoryFranka)도 best-effort로 받음
+info "=== 1b) Isaac 5.1 Franka 형제 자산 ==="
+for f in "${SIBLING_FILES[@]}"; do
+    download_sibling "$f" || true
+done
 
 # ---------------------------------------------------------------------
 # 2) franka.usd 내부 reference 자동 추출 → sub-files 받기
@@ -121,10 +164,11 @@ if [ -z "$REFS" ]; then
         info "franka.usd에 외부 reference가 없습니다 (self-contained)."
     fi
 
-    # 휴리스틱: Isaac 5.1 Franka에 흔히 같이 있는 sub-files
+    # 휴리스틱: Isaac 5.1 FrankaPanda 디렉토리에 함께 있을 수 있는 sub-files
+    # (디렉토리 listing이 막혀있어 best-effort로 시도)
     HEURISTIC_FILES=(
-        "Props/franka_alt_fingers/franka_alt_fingers.usd"
         "Props/instanceable_meshes.usd"
+        "Props/franka_alt_fingers.usd"
         "Collisions/collisions.usd"
         "Mesh/mesh.usd"
         "panda_hand.usd"
@@ -138,9 +182,19 @@ if [ -z "$REFS" ]; then
         "panda_link7.usd"
         "panda_finger.usd"
     )
-    info "휴리스틱 sub-file 시도:"
+    info "휴리스틱 sub-file 시도 (FrankaPanda/ 하위):"
     for f in "${HEURISTIC_FILES[@]}"; do
         download_file "$f" || true
+    done
+
+    # franka.usd 가 ../../ 패턴으로 참조하는 공용 Props (Robotiq gripper 등)도 시도
+    info "휴리스틱 공용 Props 시도 (Isaac/Robots/ 공용):"
+    COMMON_PROPS=(
+        "Isaac/Props/Robotiq/Robotiq_2F_85/Robotiq_2F_85.usd"
+        "Isaac/Robots/Robotiq/Robotiq_2F_85/Robotiq_2F_85.usd"
+    )
+    for f in "${COMMON_PROPS[@]}"; do
+        download_sibling "$f" || true
     done
 else
     info "발견된 reference 수: $(echo "$REFS" | wc -l)"

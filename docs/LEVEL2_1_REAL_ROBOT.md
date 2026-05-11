@@ -20,7 +20,13 @@
 
 ### `fdw_sim/visualization/robot_loader.py`
 - `RobotSpec` 데이터클래스 — USD 경로 / EE 프레임 / 홈 자세 / base offset
-- `ROBOT_CATALOG`: `franka_panda`, `ur10`, `franka_alt`(5.x 신규 경로 fallback)
+- `ROBOT_CATALOG` (Isaac 5.1 정식 경로):
+  - `franka_panda` → `Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd`
+  - `franka_panda_instanceable` → `Isaac/Robots/FrankaRobotics/FrankaEmika/panda_instanceable.usd`
+  - `franka_fr3` → `Isaac/Robots/FrankaRobotics/FrankaFR3/fr3.usd`
+  - `factory_franka` → `Isaac/Robots/FrankaRobotics/FactoryFranka/factory_franka.usd`
+  - `ur10` → `Isaac/Robots/UniversalRobots/ur10/ur10.usd`
+  - `franka_panda_legacy` → `Isaac/Robots/Franka/franka.usd` (⚠️ 4.x 경로, 5.1 S3에서는 404, 로컬용 fallback)
 - `get_isaac_assets_root()` — 우선순위:
   1. 환경변수 `ISAAC_NUCLEUS_DIR`
   2. `isaacsim.storage.native.get_assets_root_path()` (5.x)
@@ -124,7 +130,7 @@ ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
 | `--realtime` | off | 시뮬레이션을 실시간 속도로 |
 | `--anim-duration N` | 2.5 | 셀 간 부품 이동 애니메이션 길이(s) |
 | **`--real-robot`** | off | 실 로봇팔 USD 로드 |
-| **`--robot {franka_panda,ur10,franka_alt}`** | `franka_panda` | 로봇 모델 |
+| **`--robot {franka_panda,franka_panda_instanceable,franka_fr3,factory_franka,ur10,franka_panda_legacy}`** | `franka_panda` | 로봇 모델 |
 | **`--no-ik`** | off | IK 비활성 (홈 자세 고정) |
 | **`--weld-offset N`** | 0.25 | 용접 경로 ±길이(m) |
 | **`--weld-height N`** | 0.05 | 부품 표면 위 용접 높이(m) |
@@ -133,11 +139,24 @@ ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
 
 ## 6. NGC / Nucleus 자산 요구사항
 
-Isaac Sim 5.1.0에서 Franka/UR10 USD는 다음 경로에 있습니다.
+⚠️ **중요**: Isaac Sim 5.1에서 NVIDIA가 USD 자산 디렉토리 구조를 재편했습니다.
+Isaac 4.x 시절의 `Isaac/Robots/Franka/franka.usd` 경로는 더 이상 존재하지
+않으며 NVIDIA S3 버킷에서 `NoSuchKey` 오류를 반환합니다.
 
+Isaac Sim 5.1.0 정식 경로 — 출처: [docs.isaacsim.omniverse.nvidia.com/5.1.0/assets/usd_assets_robots.html](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/assets/usd_assets_robots.html)
+
+| 로봇 | Isaac 5.1 경로 | 직접 다운로드 URL |
+|---|---|---|
+| Franka Panda | `Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd` | [franka.usd](https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd) (29 KB, ✅ 검증됨) |
+| Franka Panda (inst.) | `Isaac/Robots/FrankaRobotics/FrankaEmika/panda_instanceable.usd` | [panda_instanceable.usd](https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Robots/FrankaRobotics/FrankaEmika/panda_instanceable.usd) (11 KB) |
+| Franka FR3 | `Isaac/Robots/FrankaRobotics/FrankaFR3/fr3.usd` | [fr3.usd](https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Robots/FrankaRobotics/FrankaFR3/fr3.usd) (17 MB) |
+| Factory Franka | `Isaac/Robots/FrankaRobotics/FactoryFranka/factory_franka.usd` | [factory_franka.usd](https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Robots/FrankaRobotics/FactoryFranka/factory_franka.usd) (67 KB) |
+| UR10 | `Isaac/Robots/UniversalRobots/ur10/ur10.usd` | [ur10.usd](https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Robots/UniversalRobots/ur10/ur10.usd) (11 KB) |
+
+Omniverse Nucleus 경로:
 ```
-omniverse://localhost/NVIDIA/Assets/Isaac/Robots/Franka/franka.usd
-omniverse://localhost/NVIDIA/Assets/Isaac/Robots/UR10/ur10.usd
+omniverse://localhost/NVIDIA/Assets/Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd
+omniverse://localhost/NVIDIA/Assets/Isaac/Robots/UniversalRobots/ur10/ur10.usd
 ```
 
 또는 로컬 캐시 경로:
@@ -150,8 +169,6 @@ omniverse://localhost/NVIDIA/Assets/Isaac/Robots/UR10/ur10.usd
 ```bash
 export ISAAC_NUCLEUS_DIR=/path/to/your/isaac_assets
 ```
-
-> **참고**: Franka USD 경로가 5.x에서 변경된 경우 `--robot franka_alt`로 fallback 경로(`Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd`)를 시도해 보세요.
 
 ---
 
@@ -311,7 +328,7 @@ NVIDIA S3 URL을 반환하지만, AGX Thor에서는 Omni Client HTTPS resolver�
 [VIS] *** robot prim /World/FDW/Cells/WELDING_CELL_01/RobotArm has 0 children
      — USD likely failed to resolve (...
      path: https://omniverse-content-production.s3-us-west-2.amazonaws.com
-           /Assets/Isaac/5.1/Isaac/Robots/Franka/franka.usd)
+           /Assets/Isaac/5.1/Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd)
 ```
 
 ### 11.2 해결 — 로컬에 Franka USD 받기
@@ -334,7 +351,7 @@ ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
 
 성공 시 로그:
 ```
-[VIS]     USD path: /home/isweon/isaac_assets/Isaac/Robots/Franka/franka.usd
+[VIS]     USD path: /home/isweon/isaac_assets/Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd
 [VIS]     source   : LOCAL disk
 [VIS] <<< robot franka_panda loaded successfully (children=N>0, articulation=True)
 ```

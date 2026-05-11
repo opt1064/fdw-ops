@@ -3,11 +3,16 @@
 Isaac Sim 5.x에서 기본 제공되는 로봇 모델(Franka Panda, UR10 등)을
 NVIDIA Nucleus 경로에서 가져와 USD 스테이지에 배치한다.
 
-USD 경로:
-    Franka Panda  : /Isaac/Robots/Franka/franka.usd
-    UR10          : /Isaac/Robots/UR10/ur10.usd
-    Carter v1     : /Isaac/Robots/Carter/carter_v1.usd
-    Jetbot        : /Isaac/Robots/Jetbot/jetbot.usd
+USD 경로 (Isaac Sim 5.1 — NVIDIA가 5.0+에서 디렉토리 구조를 재편함):
+    Franka Panda           : /Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd
+    Franka Panda (inst.)   : /Isaac/Robots/FrankaRobotics/FrankaEmika/panda_instanceable.usd
+    Franka FR3             : /Isaac/Robots/FrankaRobotics/FrankaFR3/fr3.usd
+    Factory Franka         : /Isaac/Robots/FrankaRobotics/FactoryFranka/factory_franka.usd
+    UR10                   : /Isaac/Robots/UniversalRobots/ur10/ur10.usd
+    Carter v1              : /Isaac/Robots/NVIDIA/Carter/carter_v1.usd
+
+⚠️ Isaac 4.x의 옛 경로(/Isaac/Robots/Franka/franka.usd 등)는 5.1 S3 버킷에
+   더 이상 존재하지 않으며 NoSuchKey 오류를 반환한다.
 
 Isaac Sim의 자산 서버는 기본적으로 `omniverse://localhost/NVIDIA/Assets/Isaac`
 또는 로컬 캐시(`~/Documents/Kit/shared/exts/...`)에 마운트된다.
@@ -62,30 +67,58 @@ class RobotSpec:
     description: str = ""
 
 
-# Isaac Sim 5.x 기본 카탈로그
+# Isaac Sim 5.1 기본 카탈로그 (NVIDIA 공식 경로 — 2025-10 기준)
+#   확인: https://docs.isaacsim.omniverse.nvidia.com/5.1.0/assets/usd_assets_robots.html
 ROBOT_CATALOG: Dict[str, RobotSpec] = {
     "franka_panda": RobotSpec(
         name="franka_panda",
-        usd_subpath="Isaac/Robots/Franka/franka.usd",
-        end_effector_frame="panda_hand",
-        home_joint_positions=[0.012, -0.57, 0.0, -2.81, 0.0, 3.04, 0.741, 0.04, 0.04],
-        base_offset_z=0.0,
-        description="Franka Emika Panda 7-DOF arm with parallel gripper",
-    ),
-    "ur10": RobotSpec(
-        name="ur10",
-        usd_subpath="Isaac/Robots/UR10/ur10.usd",
-        end_effector_frame="ee_link",
-        home_joint_positions=[0.0, -1.57, 1.57, -1.57, -1.57, 0.0],
-        base_offset_z=0.0,
-        description="Universal Robots UR10 6-DOF arm",
-    ),
-    # 5.x 신규 경로 (혹시 기본 경로가 다를 경우 fallback)
-    "franka_alt": RobotSpec(
-        name="franka_alt",
         usd_subpath="Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd",
         end_effector_frame="panda_hand",
         home_joint_positions=[0.012, -0.57, 0.0, -2.81, 0.0, 3.04, 0.741, 0.04, 0.04],
+        base_offset_z=0.0,
+        description="Franka Emika Panda 7-DOF arm with parallel gripper (Isaac 5.1)",
+    ),
+    "franka_panda_instanceable": RobotSpec(
+        name="franka_panda_instanceable",
+        usd_subpath="Isaac/Robots/FrankaRobotics/FrankaEmika/panda_instanceable.usd",
+        end_effector_frame="panda_hand",
+        home_joint_positions=[0.012, -0.57, 0.0, -2.81, 0.0, 3.04, 0.741, 0.04, 0.04],
+        base_offset_z=0.0,
+        description="Franka Panda instanceable variant (efficient duplication)",
+    ),
+    "franka_fr3": RobotSpec(
+        name="franka_fr3",
+        usd_subpath="Isaac/Robots/FrankaRobotics/FrankaFR3/fr3.usd",
+        end_effector_frame="fr3_hand",
+        home_joint_positions=[0.0, -0.57, 0.0, -2.81, 0.0, 3.04, 0.741],
+        base_offset_z=0.0,
+        description="Franka FR3 next-gen 7-DOF arm (Isaac 5.1)",
+    ),
+    "factory_franka": RobotSpec(
+        name="factory_franka",
+        usd_subpath="Isaac/Robots/FrankaRobotics/FactoryFranka/factory_franka.usd",
+        end_effector_frame="panda_hand",
+        home_joint_positions=[0.012, -0.57, 0.0, -2.81, 0.0, 3.04, 0.741, 0.04, 0.04],
+        base_offset_z=0.0,
+        description="Factory-tuned Franka for IndustrialReal-style simulation",
+    ),
+    "ur10": RobotSpec(
+        name="ur10",
+        usd_subpath="Isaac/Robots/UniversalRobots/ur10/ur10.usd",
+        end_effector_frame="ee_link",
+        home_joint_positions=[0.0, -1.57, 1.57, -1.57, -1.57, 0.0],
+        base_offset_z=0.0,
+        description="Universal Robots UR10 6-DOF arm (Isaac 5.1)",
+    ),
+    # === Legacy fallbacks (Isaac 4.x 경로 — 더 이상 작동하지 않음) ===
+    # 일부 로컬 디스크 인스톨이 옛 구조를 유지하는 경우를 위해 남겨둠.
+    # 원격 fetch는 NoSuchKey가 나므로 LOCAL에서만 매치되어야 함.
+    "franka_panda_legacy": RobotSpec(
+        name="franka_panda_legacy",
+        usd_subpath="Isaac/Robots/Franka/franka.usd",
+        end_effector_frame="panda_hand",
+        home_joint_positions=[0.012, -0.57, 0.0, -2.81, 0.0, 3.04, 0.741, 0.04, 0.04],
+        description="[LEGACY 4.x] only resolves if locally present",
     ),
 }
 

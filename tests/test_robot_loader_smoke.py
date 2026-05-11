@@ -26,19 +26,35 @@ class TestRobotLoaderImport(unittest.TestCase):
     def test_robot_catalog_defined(self):
         from fdw_sim.visualization.robot_loader import ROBOT_CATALOG, RobotSpec
 
+        # Isaac 5.1 정식 카탈로그 엔트리
         self.assertIn("franka_panda", ROBOT_CATALOG)
         self.assertIn("ur10", ROBOT_CATALOG)
-        self.assertIn("franka_alt", ROBOT_CATALOG)
+        # Isaac 5.1에서 추가된 변종들
+        self.assertIn("franka_panda_instanceable", ROBOT_CATALOG)
+        self.assertIn("franka_fr3", ROBOT_CATALOG)
+        self.assertIn("factory_franka", ROBOT_CATALOG)
+        # 레거시 4.x 경로도 로컬 fallback용으로 유지
+        self.assertIn("franka_panda_legacy", ROBOT_CATALOG)
 
         franka = ROBOT_CATALOG["franka_panda"]
         self.assertIsInstance(franka, RobotSpec)
         self.assertEqual(franka.end_effector_frame, "panda_hand")
         self.assertEqual(len(franka.home_joint_positions), 9)  # 7 joints + 2 finger
         self.assertTrue(franka.usd_subpath.endswith("franka.usd"))
+        # Isaac 5.1 새 경로 구조 검증
+        self.assertEqual(
+            franka.usd_subpath,
+            "Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd",
+        )
 
         ur10 = ROBOT_CATALOG["ur10"]
         self.assertEqual(ur10.end_effector_frame, "ee_link")
         self.assertEqual(len(ur10.home_joint_positions), 6)
+        # Isaac 5.1에서 UR10도 UniversalRobots/ 아래로 이동
+        self.assertEqual(
+            ur10.usd_subpath,
+            "Isaac/Robots/UniversalRobots/ur10/ur10.usd",
+        )
 
     def test_resolve_assets_root_default(self):
         """환경변수 미지정 시에도 default 경로를 반환."""
@@ -69,9 +85,11 @@ class TestRobotLoaderImport(unittest.TestCase):
             self.assertEqual(root, "/tmp/fake_isaac_assets")
 
             franka_path = resolve_robot_usd_path(ROBOT_CATALOG["franka_panda"])
+            # Isaac 5.1 정식 경로: FrankaRobotics/FrankaPanda/
             self.assertEqual(
                 franka_path,
-                "/tmp/fake_isaac_assets/Isaac/Robots/Franka/franka.usd",
+                "/tmp/fake_isaac_assets/Isaac/Robots/"
+                "FrankaRobotics/FrankaPanda/franka.usd",
             )
         finally:
             if prev is None:
