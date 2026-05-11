@@ -298,7 +298,79 @@ ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
 
 ---
 
-## 11. 다음 단계 (Level 2.2 후보)
+## 11. AGX Thor — Franka USD 로컬 자산 설치 (필수)
+
+진단 결과 시스템 어디에도 `franka.usd`가 없고 `get_assets_root_path()`이
+NVIDIA S3 URL을 반환하지만, AGX Thor에서는 Omni Client HTTPS resolver가
+이를 fetch하지 못해 **빈 prim**(자식 0개)만 생기는 문제가 발견되었습니다.
+
+### 11.1 증상
+
+```
+[VIS] >>> attempting to load real robot franka_panda for cell WELDING_CELL_01
+[VIS] *** robot prim /World/FDW/Cells/WELDING_CELL_01/RobotArm has 0 children
+     — USD likely failed to resolve (...
+     path: https://omniverse-content-production.s3-us-west-2.amazonaws.com
+           /Assets/Isaac/5.1/Isaac/Robots/Franka/franka.usd)
+```
+
+### 11.2 해결 — 로컬에 Franka USD 받기
+
+```bash
+# 1) Franka USD + sub-references 자동 다운로드
+bash scripts/download_franka_usd.sh
+
+# 2) 시뮬레이터가 로컬 USD를 사용하도록 환경변수 설정
+export ISAAC_NUCLEUS_DIR_LOCAL=~/isaac_assets
+
+# 영구 설정
+echo 'export ISAAC_NUCLEUS_DIR_LOCAL="$HOME/isaac_assets"' >> ~/.bashrc
+
+# 3) 실행
+ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
+    python scripts/run_poc1_level2_1.py --gui --real-robot --robot franka_panda \
+    --safe-mode
+```
+
+성공 시 로그:
+```
+[VIS]     USD path: /home/isweon/isaac_assets/Isaac/Robots/Franka/franka.usd
+[VIS]     source   : LOCAL disk
+[VIS] <<< robot franka_panda loaded successfully (children=N>0, articulation=True)
+```
+
+### 11.3 자산 경로 탐색 우선순위
+
+`resolve_robot_usd_path()`는 다음 순서로 USD 경로를 결정:
+
+1. **`FDW_<ROBOT>_USD` env** — 단일 파일 직접 지정 (예: `FDW_FRANKA_PANDA_USD=/path/franka.usd`)
+2. **`ISAAC_NUCLEUS_DIR_LOCAL` env** — 루트 디렉토리, 그 아래 `Isaac/Robots/<...>/<...>.usd` 탐색
+3. **표준 후보 디렉토리** — `LOCAL_ASSET_CANDIDATES`:
+   - `~/isaac_assets`, `~/isaac_assets/Isaac/5.1`
+   - `~/Documents/Omniverse/Library/Isaac-Sim Full/Assets/Isaac/5.1`
+   - `~/.local/share/ov/data/assets/Isaac/5.1`
+   - `/opt/nvidia/isaac-sim-assets/5.1`, `/opt/ov/assets/Isaac/5.1`
+4. **`ISAAC_NUCLEUS_DIR` env** — 원격 Nucleus 경로
+5. **`get_assets_root_path()`** — Isaac Sim 5.x 표준 API (S3 fallback 위험)
+6. **하드코드** — `omniverse://localhost/NVIDIA/Assets/Isaac`
+
+`fdw_sim.visualization.robot_loader.diagnose_robot_assets()` 함수로 현재
+환경에서 어떻게 경로가 해석되는지 진단 정보를 얻을 수 있습니다.
+
+### 11.4 로드 검증
+
+`RobotLoader.load_robot()`은 `AddReference()` 후 다음을 수행:
+
+- `omni.kit.app.update()` 를 최대 3회 호출 (비동기 payload resolve trigger)
+- `prim.GetChildren()` 길이 검사
+- 0이면 즉시 `RuntimeError` 발생 → `_spawn_robot_arm()`이 placeholder로 자동 fallback
+
+이전에는 빈 prim이 조용히 남아 있어 IK 컨트롤러가 동작은 하지만 화면에는
+아무것도 안 보이는 상태였는데, 이제는 placeholder가 명확히 대신 표시됩니다.
+
+---
+
+## 12. 다음 단계 (Level 2.2 후보)
 
 - [ ] **RMPflow 적용** — 충돌 회피 + 다이나믹 응답
 - [ ] **용접 스파크/궤적 파티클** — 토치 끝점에 emission

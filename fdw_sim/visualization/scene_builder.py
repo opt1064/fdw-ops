@@ -315,10 +315,19 @@ class SceneBuilder:
         spec = ROBOT_CATALOG.get(robot_name)
         if spec is not None:
             usd_path = resolve_robot_usd_path(spec)
+            is_remote = (usd_path.startswith("omniverse://")
+                         or usd_path.startswith("http://")
+                         or usd_path.startswith("https://"))
             logger.info("[VIS] >>> attempting to load real robot %s for cell %s",
                         robot_name, cell_id)
             logger.info("[VIS]     USD path: %s", usd_path)
+            logger.info("[VIS]     source   : %s",
+                        "REMOTE (Nucleus/S3)" if is_remote else "LOCAL disk")
             logger.info("[VIS]     base position (world): %s", world_pos)
+            if is_remote:
+                logger.warning("[VIS]     >> remote USD — AGX Thor에서 fetch 실패 가능. "
+                               "권장: scripts/download_franka_usd.sh 실행 후 "
+                               "ISAAC_NUCLEUS_DIR_LOCAL=~/isaac_assets 설정")
         else:
             logger.error("[VIS] unknown robot_name: %s", robot_name)
             return None

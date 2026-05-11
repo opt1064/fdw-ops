@@ -19,11 +19,33 @@ Isaac Sim이 시작되지 않은 환경에서도 모듈 자체는 import 가능�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import logging
 import os
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# 자산 경로 후보 — 로컬 디스크 우선 탐색
+# =============================================================================
+# AGX Thor / JetPack 환경에서 Nucleus 서버가 안 떠있고 S3 fallback이
+# 비실용적인 경우가 많아, 로컬 디스크 후보 디렉토리를 먼저 시도한다.
+# 각 후보는 그 안에 "Isaac/Robots/Franka/franka.usd"가 존재해야 매치.
+LOCAL_ASSET_CANDIDATES = [
+    # 우리 프로젝트가 추천하는 위치
+    "~/isaac_assets",
+    "~/isaac_assets/Isaac/5.1",
+    # Omniverse Launcher 기본 설치 경로
+    "~/Documents/Omniverse/Library/Isaac-Sim Full/Assets/Isaac/5.1",
+    "~/Documents/Omniverse/Library/Isaac/5.1",
+    # Omniverse user data
+    "~/.local/share/ov/data/assets/Isaac/5.1",
+    # 시스템 전역
+    "/opt/nvidia/isaac-sim-assets/5.1",
+    "/opt/ov/assets/Isaac/5.1",
+]
 
 
 # =============================================================================
@@ -71,13 +93,61 @@ ROBOT_CATALOG: Dict[str, RobotSpec] = {
 # =============================================================================
 # Nucleus 경로 해석
 # =============================================================================
+def _check_local_candidate(candidate_root: str, spec_subpath: str) -> Optional[str]:
+    """후보 디렉토리에 spec_subpath의 USD가 실제로 존재하는지 검사.
+
+    Returns:
+        존재하면 절대 경로(file:// 형태 아님 — pxr USD가 절대 경로도 받음),
+        없으면 None.
+    """
+    full = Path(os.path.expanduser(candidate_root)) / spec_subpath
+    if full.is_file():
+        return str(full)
+    return None
+
+
+def find_local_robot_usd(spec: "RobotSpec") -> Optional[str]:
+    """로컬 디스크에서 robot USD 파일을 찾음.
+
+    LOCAL_ASSET_CANDIDATES + ISAAC_NUCLEUS_DIR_LOCAL 환경변수 + 명시적 파일 경로
+    (FDW_FRANKA_USD 등)를 차례로 시도한다.
+    """
+    # 1) 직접 파일 경로 환경변수 (가장 명시적)
+    env_key = f"FDW_{spec.name.upper()}_USD"
+    direct = os.environ.get(env_key)
+    if direct and Path(direct).is_file():
+        logger.info("[RobotLoader] using %s=%s", env_key, direct)
+        return direct
+
+    # 2) ISAAC_NUCLEUS_DIR_LOCAL — 로컬 디스크 전용 루트
+    local_root = os.environ.get("ISAAC_NUCLEUS_DIR_LOCAL")
+    if local_root:
+        found = _check_local_candidate(local_root, spec.usd_subpath)
+        if found:
+            logger.info("[RobotLoader] resolved via ISAAC_NUCLEUS_DIR_LOCAL: %s",
+                        found)
+            return found
+
+    # 3) 표준 후보 디렉토리
+    for cand in LOCAL_ASSET_CANDIDATES:
+        found = _check_local_candidate(cand, spec.usd_subpath)
+        if found:
+            logger.info("[RobotLoader] resolved via local candidate: %s", found)
+            return found
+
+    return None
+
+
 def get_isaac_assets_root() -> str:
-    """Isaac Sim 5.x 자산 루트 경로 — 환경에 따라 자동 선택.
+    """Isaac Sim 5.x 자산 루트 경로 — 환경에 따라 자동 선택 (원격용).
 
     우선순위:
       1) 환경변수 ISAAC_NUCLEUS_DIR
       2) Isaac Sim 5.x의 get_assets_root_path()
       3) 기본값 omniverse://localhost/NVIDIA/Assets/Isaac
+
+    주의: 이 함수는 원격(Nucleus/S3) 경로만 반환. 로컬 디스크 자산은
+    find_local_robot_usd()로 별도 탐색한다.
     """
     # 1) 환경변수
     if os.environ.get("ISAAC_NUCLEUS_DIR"):
@@ -106,9 +176,41 @@ def get_isaac_assets_root() -> str:
 
 
 def resolve_robot_usd_path(spec: RobotSpec) -> str:
-    """RobotSpec → 절대 USD 경로."""
+    """RobotSpec → 절대 USD 경로 (로컬 우선, 원격 fallback).
+
+    탐색 순서:
+      1) 로컬 디스크 (FDW_*_USD env / ISAAC_NUCLEUS_DIR_LOCAL / 표준 후보)
+      2) ISAAC_NUCLEUS_DIR / Nucleus / S3 fallback
+    """
+    local = find_local_robot_usd(spec)
+    if local:
+        return local
+
     root = get_isaac_assets_root()
     return f"{root}/{spec.usd_subpath}"
+
+
+def diagnose_robot_assets() -> Dict[str, object]:
+    """현재 환경에서 robot 자산이 어떻게 해석되는지 사람이 읽을 수 있는
+    진단 정보를 반환. 콘솔에 출력하거나 troubleshooting 메시지에 포함.
+    """
+    report: Dict[str, object] = {
+        "env_ISAAC_NUCLEUS_DIR": os.environ.get("ISAAC_NUCLEUS_DIR", "<unset>"),
+        "env_ISAAC_NUCLEUS_DIR_LOCAL":
+            os.environ.get("ISAAC_NUCLEUS_DIR_LOCAL", "<unset>"),
+        "remote_root": get_isaac_assets_root(),
+        "candidates": [],
+        "resolved": {},
+    }
+    for cand in LOCAL_ASSET_CANDIDATES:
+        expanded = os.path.expanduser(cand)
+        report["candidates"].append({  # type: ignore[union-attr]
+            "path": expanded,
+            "exists": Path(expanded).is_dir(),
+        })
+    for name, spec in ROBOT_CATALOG.items():
+        report["resolved"][name] = resolve_robot_usd_path(spec)  # type: ignore[index]
+    return report
 
 
 # =============================================================================
@@ -167,7 +269,11 @@ class RobotLoader:
             return None
 
         usd_path = resolve_robot_usd_path(spec)
-        logger.info("[RobotLoader] loading %s from %s", robot_name, usd_path)
+        is_local = not (usd_path.startswith("omniverse://")
+                        or usd_path.startswith("http://")
+                        or usd_path.startswith("https://"))
+        logger.info("[RobotLoader] loading %s from %s (local=%s)",
+                    robot_name, usd_path, is_local)
 
         # 1) USD reference 추가
         from pxr import Usd, UsdGeom, Sdf, Gf
@@ -184,7 +290,12 @@ class RobotLoader:
 
         # reference 추가
         refs = prim.GetReferences()
-        refs.AddReference(usd_path)
+        try:
+            refs.AddReference(usd_path)
+        except Exception as e:
+            raise RuntimeError(
+                f"AddReference failed for {robot_name} ({usd_path}): {e}"
+            ) from e
 
         # 위치 / 회전 적용
         xformable = UsdGeom.Xformable(prim)
@@ -197,6 +308,20 @@ class RobotLoader:
             r_op = xformable.AddRotateZOp()
             r_op.Set(orientation_deg_z)
 
+        # 1.5) USD payload load 검증 — 자식 prim이 0이면 reference resolve 실패
+        # 비동기 로드라 가능성 있으니 짧게 한 두 번 stage update 후 재확인.
+        if not self._verify_reference_loaded(prim, usd_path):
+            # 명시적 에러 — 호출자(_spawn_robot_arm)가 placeholder로 fallback 가능
+            raise RuntimeError(
+                f"Robot USD reference failed to resolve: {usd_path}\n"
+                f"  prim {prim_path} has 0 children after AddReference.\n"
+                f"  Likely cause: file not found / Nucleus not running / "
+                f"S3 fetch blocked.\n"
+                f"  Hint: place franka.usd locally and set ISAAC_NUCLEUS_DIR_LOCAL "
+                f"or FDW_{spec.name.upper()}_USD env var, or run "
+                f"`bash scripts/download_franka_usd.sh` to download."
+            )
+
         # 2) Articulation wrapper 시도
         articulation = self._wrap_articulation(prim_path, robot_name)
 
@@ -208,6 +333,37 @@ class RobotLoader:
         logger.info("[RobotLoader] %s placed @ %s (articulation=%s)",
                     robot_name, position, articulation is not None)
         return articulation
+
+    # ------------------------------------------------------------------
+    def _verify_reference_loaded(self, prim, usd_path: str,
+                                   max_updates: int = 3) -> bool:
+        """AddReference 후 자식 prim이 채워졌는지 확인.
+
+        Omniverse USD payload는 일부 비동기로 resolve되므로 stage update를
+        몇 번 돌려본 뒤 자식이 생기는지 본다.
+        """
+        def _has_children() -> bool:
+            try:
+                return len(list(prim.GetChildren())) > 0
+            except Exception:
+                return False
+
+        if _has_children():
+            return True
+
+        # stage update를 짧게 돌려 비동기 payload resolve를 트리거
+        try:
+            import omni.kit.app  # type: ignore
+            app = omni.kit.app.get_app()
+            for _ in range(max_updates):
+                app.update()
+                if _has_children():
+                    return True
+        except Exception:
+            # omni.kit.app가 없는 환경(테스트 등)에서는 그냥 현재 상태로 판단
+            pass
+
+        return _has_children()
 
     # ------------------------------------------------------------------
     def _wrap_articulation(self, prim_path: str, robot_name: str) -> Optional[object]:
