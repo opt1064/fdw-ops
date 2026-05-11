@@ -212,6 +212,39 @@ Configuration / Physics / Sensors variant set 을 각각 명시적으로 선택�
   성공한다. spelling 이 어긋나면 USD verification 실패
   (`arcNum < srcInfo.size()`) 로 reference 자체가 drop 된다.
 
+> **2026-05 Thor 실측 분기 — 현재 카탈로그 추정값의 근거**
+>
+> 첫 시도 (`Configuration="Base"`, `Sensors="All_Sensors"`) 가 Thor 에서
+> 다음 두 가지 동시 실패를 일으켰다:
+>
+>   1. USD composition `arcNum < srcInfo.size()` assertion
+>      — 누락 sublayer 보고 경로: `Variants/nova_carter_merged_no_internals.usd`
+>      → 실제 USD 에 **"Base" 라는 variant 가 존재하지 않으며**, 옳은
+>      이름은 "No_Internals" 계열로 추정된다 (`merged_no_internals.usd`
+>      라는 sublayer 이름 자체가 강력한 단서).
+>
+>   2. 5 개의 sensor sub-USD payload 누락 경고
+>      (`Hawk/hawk_v1.1_nominal.usd`, `Owl/owl.usd`,
+>      `Slamtec/RPLidar_S2e.usd`, `HESAI/XT-32.usd`,
+>      `Variants/nova_carter_sim_optimized.usd`)
+>      → `Sensors="All_Sensors"` 가 이 sub-USD 들을 모두 요구하지만
+>      `download_isaac_assets.sh` 가 아직 끌어오지 않음.
+>
+> 따라서 현재 `asset_catalog.py` 의 NovaCarter 엔트리는:
+>
+> ```python
+> variant_selection={
+>     "Configuration": "No_Internals",   # CreateJoint 누락 회피
+>     "Physics":       "Physics_Base",   # articulation 유지
+>     "Sensors":       "None",           # sub-USD payload 의존 회피
+> }
+> ```
+>
+> 으로 설정되어 있다. **이 spelling 이 USD 와 한 글자라도 다르면**
+> `scene_builder._apply_variant_selection` 가 WARN 로그로 사용 가능한
+> variant 이름 목록을 출력하므로, 그 출력을 참고해 한 번 더 보정하면
+> 된다 (또는 아래 절의 `dump_usd_variants.py` 로 라이브 덤프).
+
 **원인 B — sub-USD payload 누락**
 
 variant 가 정확히 골라져도, variant payload (예:
@@ -238,17 +271,41 @@ python scripts/run_poc1_level2_2.py --gui --real-robot --amr-asset iw_hub_static
 python scripts/run_poc1_level2_2.py --gui --real-robot --no-real-amr
 ```
 
-**2) variant 이름을 정확히 dump — `scripts/dump_usd_variants.py` (권장)**
+**2) variant 이름을 정확히 dump — `scripts/dump_usd_variants.py` (권장, AppLauncher 기반)**
 
 `inspect_usd_refs.py --dump-strings` 는 USDC TOKENS 테이블에서 regex 로
 토큰을 뽑기 때문에 variant 이름이 부분적으로만 보일 수 있다. 정확한
 variant 이름이 필요할 때는 pxr.Usd 로 stage 를 열어 라이브 composition
 의 variant 메타데이터를 직접 dump 하는 다음 도구를 사용한다.
 
+> **왜 AppLauncher 부팅이 필요한가** — Isaac Sim 5.1 wheel install
+> (`pip install isaacsim`) 환경에서는 pxr 가 PEP 420 namespace package
+> 로 `$CONDA_PREFIX/lib/python3.11/site-packages/isaacsim/extscache/`
+> 아래 여러 패키지(`omni.usd.libs-*`, `omni.usd.schema.physx-*`,
+> `omni.anim.navigation.schema-*`, …)에 분산되어 있다. 단순한
+> `sys.path.insert` + `LD_LIBRARY_PATH` 추가만으로는 `.so` 간 의존이
+> 풀리지 않아 import 가 실패한다 (`~/IsaacLab/isaaclab.sh -p` 도 같은
+> 이유로 실패 — 단지 같은 conda python 을 호출할 뿐 SimulationApp 을
+> 부팅하지 않기 때문). 따라서 `dump_usd_variants.py` 는 Isaac Sim 의
+> 정공 boot 경로(IsaacLab `AppLauncher` → `isaacsim.SimulationApp`
+> fallback)를 거친 뒤에 pxr 를 import 한다. 부팅 오버헤드 ~10–15s.
+
 ```bash
-# Isaac Sim conda env 또는 isaac-sim 의 python.sh 로 실행
+# Isaac Sim conda env 활성화 후 — headless 부팅으로 GUI 비용 회피
 conda activate isaac_sim
-python scripts/dump_usd_variants.py \
+ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
+    python scripts/dump_usd_variants.py \
+    ~/isaac_assets/Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd
+
+# JSON 출력 (CI/스크립트 chaining)
+ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
+    python scripts/dump_usd_variants.py --json \
+    ~/isaac_assets/Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd \
+    > nova_carter_variants.json
+
+# (드물게) Isaac Sim deb install 등 pxr 가 이미 sys.path 에 있는 환경
+USD_DUMP_NO_APP=1 \
+    python scripts/dump_usd_variants.py \
     ~/isaac_assets/Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd
 ```
 
