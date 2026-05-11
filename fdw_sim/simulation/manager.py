@@ -184,13 +184,22 @@ class SimulationManager:
         1) isaacsim 메타 패키지가 설치된 경우: from isaacsim import SimulationApp
         2) Isaac Lab만 설치된 경우: isaaclab.app.AppLauncher 사용 (권장)
         """
+        # 0) RTX denoiser 사전 차단 (AGX Thor Blackwell GPU 호환)
+        #    SimulationApp 시작 전에 환경변수와 stderr 필터를 미리 잡아야
+        #    rtx.denoising.plugin 셰이더 컴파일 에러 로그 폭주를 막을 수 있다.
+        self._pre_app_rtx_guard()
+
         # 1) SimulationApp 가장 먼저 생성 (Carbonite 요구사항)
+        # carb experimental settings를 launch kwargs로 미리 주입
+        extra_args = self._build_app_launch_args()
+
         try:
             # 우선 Isaac Lab의 AppLauncher 시도 (확장 자동 로드)
             from isaaclab.app import AppLauncher  # type: ignore
             launcher_args = {
                 "headless": self.config.headless,
                 "livestream": self.config.livestream,
+                **extra_args,
                 **self.config.isaac_app_kwargs,
             }
             self._isaac_launcher = AppLauncher(launcher_args)
@@ -203,6 +212,7 @@ class SimulationManager:
             from isaacsim import SimulationApp  # type: ignore
             app_kwargs = {
                 "headless": self.config.headless,
+                **extra_args,
                 **self.config.isaac_app_kwargs,
             }
             if self.config.livestream > 0:
@@ -211,6 +221,10 @@ class SimulationManager:
             logger.info("[SIM] Isaac Sim launched via SimulationApp "
                         "(headless=%s, livestream=%d)",
                         self.config.headless, self.config.livestream)
+
+        # 1.5) SimulationApp 직후 — World 생성 전에 RTX/log 설정 적용
+        #      (denoiser plugin이 첫 프레임 렌더 전에 비활성되어야 함)
+        self._apply_rtx_settings()
 
         # 2) 그 다음에 World import / 생성
         try:
@@ -227,12 +241,105 @@ class SimulationManager:
         self._isaac_world.scene.add_default_ground_plane()
         self._isaac_world.reset()
 
-        # 2.5) RTX / Denoiser 설정 (AGX Thor Blackwell GPU 호환 패치)
+        # 2.5) World 생성 후에도 한 번 더 적용 (일부 키는 reset에서 덮어쓰임)
         self._apply_rtx_settings()
 
         # 3) 시각화 빌드 (옵션)
         if self.config.enable_visualization:
             self._build_visualization()
+
+    def _pre_app_rtx_guard(self) -> None:
+        """SimulationApp 시작 전 환경변수 + stderr 필터 설치.
+
+        SimulationApp이 인스턴스화되는 순간 carb logger가 stdout/stderr로
+        직접 로그를 쏘기 때문에, Python logger 레벨로는 막을 수 없다.
+        따라서 다음 두 가지를 미리 처리한다:
+          1) 환경변수 — Kit가 시작 시 읽는 RTX 관련 기본값
+          2) stderr 필터 스레드 — 'rtx.denoising' 포함 라인을 drop
+        """
+        if not (self.config.disable_nrd_denoiser or self.config.suppress_rtx_log_spam):
+            return
+
+        import os
+        # 1) 환경변수로 carb settings 사전 주입 (Kit 5.x 지원)
+        env_overrides = {
+            "CARB_APP_PATH": os.environ.get("CARB_APP_PATH", ""),
+            # 렌더 모드
+            "RTX_RENDERMODE": self.config.render_mode,
+            # NRD denoiser 차단용 추가 키
+            "RTX_DENOISING_ENABLED": "0",
+            "RTX_NEWDENOISER_ENABLED": "0",
+        }
+        for k, v in env_overrides.items():
+            if v:
+                os.environ.setdefault(k, v)
+
+        # 2) stderr 필터 — 'rtx.denoising' 라인을 화면에서 차단
+        if self.config.suppress_rtx_log_spam:
+            self._install_stderr_filter([
+                "rtx.denoising",
+                "PackForNRD",
+                "rtx/nrd/",
+            ])
+
+    def _install_stderr_filter(self, drop_substrings: List[str]) -> None:
+        """stderr/stdout에 필터 wrapper 설치 — 지정 substring 포함 라인 drop.
+
+        carb logger는 C++ 레이어에서 직접 stderr fd로 write 하므로,
+        Python sys.stderr 교체만으로는 부족할 수 있다. 그러나 대부분의
+        Kit 로그 채널은 Python stderr를 통과하므로 효과가 있다.
+        """
+        import sys
+
+        if getattr(self, "_stderr_filter_installed", False):
+            return
+
+        class _FilteredStream:
+            def __init__(self, base, drops):
+                self._base = base
+                self._drops = drops
+                self._buf = ""
+
+            def write(self, s):
+                # 라인 단위 처리
+                self._buf += s
+                while "\n" in self._buf:
+                    line, self._buf = self._buf.split("\n", 1)
+                    if not any(d in line for d in self._drops):
+                        self._base.write(line + "\n")
+                return len(s)
+
+            def flush(self):
+                if self._buf and not any(d in self._buf for d in self._drops):
+                    self._base.write(self._buf)
+                    self._buf = ""
+                self._base.flush()
+
+            def __getattr__(self, name):
+                return getattr(self._base, name)
+
+        sys.stderr = _FilteredStream(sys.stderr, drop_substrings)
+        sys.stdout = _FilteredStream(sys.stdout, drop_substrings)
+        self._stderr_filter_installed = True
+        logger.info("[SIM] stderr filter installed (drop: %s)", drop_substrings)
+
+    def _build_app_launch_args(self) -> Dict[str, Any]:
+        """SimulationApp / AppLauncher에 전달할 추가 인자.
+
+        Kit는 dict 키를 '--/rtx/...' 형식 CLI 인자로 변환해 carb settings에
+        주입한다. 따라서 disable_nrd_denoiser=True이면 여기서 미리 settings를
+        지정할 수 있다.
+        """
+        if not self.config.disable_nrd_denoiser:
+            return {}
+
+        # Kit launch kwargs는 일반적으로 정해진 키만 인식하므로
+        # carb settings 인젝션은 env 변수 + _apply_rtx_settings에 의존.
+        # 안전한 키만 전달.
+        return {
+            "renderer": "RayTracedLighting" if self.config.render_mode == "RaytracedLighting"
+                        else "PathTracing",
+        }
 
     def _apply_rtx_settings(self) -> None:
         """RTX 렌더러 설정 — Blackwell GPU(AGX Thor)에서 NRD denoiser 셰이더
