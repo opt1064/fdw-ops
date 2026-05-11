@@ -53,7 +53,7 @@ class SimulationConfig:
     headless: bool = True
     stage_units_in_meters: float = 1.0
     livestream: int = 0  # 0=off, 1=Native, 2=WebRTC
-    isaac_app_kwargs: Dict[str, Any] = field(default_factory=dict)
+    isaac_app_kwargs: Dict[str, Any] = field(default_factory=dict)  # type: ignore[arg-type]
 
     # 시각화 (mode == "isaac" 일 때만 사용)
     enable_visualization: bool = True
@@ -71,6 +71,13 @@ class SimulationConfig:
                                               # PathTracing은 NRD denoiser 필요 → Blackwell에서 셰이더 실패
     disable_nrd_denoiser: bool = True         # rtx.denoising.plugin (NRD) 비활성 — Blackwell 호환 패치
     suppress_rtx_log_spam: bool = True        # rtx.denoising 등 반복 에러 로그 억제
+
+    # Level 2.1: GPU device-lost 회피용 안전 토글 (VkResult: ERROR_DEVICE_LOST 대응)
+    # AGX Thor Blackwell에서 Aftermath/SceneCamera/Lighting setup 단계 GPU 크래시 회피
+    skip_auto_camera: bool = False            # WorkshopVisualizer.build_scene 끝의 _auto_frame_camera 건너뜀
+    disable_aftermath: bool = True            # NV Aftermath GPU crash dumper 비활성 (vk submit 부담↓)
+    force_lighting_mode: Optional[str] = None # None=Kit 기본, "camera"|"stage"|"rig" 강제
+    safe_mode: bool = False                   # True면 위 3개를 가장 보수적인 값으로 일괄 설정
 
 
 # =============================================================================
@@ -184,7 +191,21 @@ class SimulationManager:
         1) isaacsim 메타 패키지가 설치된 경우: from isaacsim import SimulationApp
         2) Isaac Lab만 설치된 경우: isaaclab.app.AppLauncher 사용 (권장)
         """
-        # 0) RTX denoiser 사전 차단 (AGX Thor Blackwell GPU 호환)
+        # 0) safe_mode 일괄 적용 — AGX Thor에서 GPU device lost 회피
+        if self.config.safe_mode:
+            self.config.skip_auto_camera = True
+            self.config.disable_aftermath = True
+            self.config.disable_nrd_denoiser = True
+            self.config.suppress_rtx_log_spam = True
+            self.config.render_mode = "RaytracedLighting"
+            if self.config.force_lighting_mode is None:
+                self.config.force_lighting_mode = "camera"
+            logger.warning("[SIM] SAFE_MODE engaged — "
+                           "skip_auto_camera=ON, disable_aftermath=ON, "
+                           "force_lighting_mode=%s, render=RaytracedLighting",
+                           self.config.force_lighting_mode)
+
+        # 0.1) RTX denoiser + Aftermath 사전 차단 (AGX Thor Blackwell GPU 호환)
         #    SimulationApp 시작 전에 환경변수와 stderr 필터를 미리 잡아야
         #    rtx.denoising.plugin 셰이더 컴파일 에러 로그 폭주를 막을 수 있다.
         self._pre_app_rtx_guard()
@@ -257,7 +278,9 @@ class SimulationManager:
           1) 환경변수 — Kit가 시작 시 읽는 RTX 관련 기본값
           2) stderr 필터 스레드 — 'rtx.denoising' 포함 라인을 drop
         """
-        if not (self.config.disable_nrd_denoiser or self.config.suppress_rtx_log_spam):
+        if not (self.config.disable_nrd_denoiser
+                or self.config.suppress_rtx_log_spam
+                or self.config.disable_aftermath):
             return
 
         import os
@@ -270,6 +293,21 @@ class SimulationManager:
             "RTX_DENOISING_ENABLED": "0",
             "RTX_NEWDENOISER_ENABLED": "0",
         }
+        # Aftermath GPU crash dumper 비활성
+        # — Aftermath는 매 vk submit에 콜백을 끼워 넣어 device lost 확률을 높일 수 있음
+        if self.config.disable_aftermath:
+            env_overrides.update({
+                "NVDA_AFTERMATH": "0",
+                "RTX_AFTERMATH_ENABLED": "0",
+                "NSIGHT_AFTERMATH_ENABLED": "0",
+                # NGX/Optix 자체 비활성 (Blackwell에서 미지원 — 셰이더 로드 자체를 건너뜀)
+                "RTX_NGX_ENABLED": "0",
+                "OMNI_KIT_DISABLE_GPU_FALLBACK": "0",
+                # breakpad crash reporter (Aftermath 동반) — symbol upload 부담 제거
+                "OMNI_KIT_CRASH_REPORT_DISABLED": "1",
+            })
+            logger.info("[SIM] Aftermath / NGX / breakpad disabled via env "
+                        "(Blackwell device-lost 회피)")
         for k, v in env_overrides.items():
             if v:
                 os.environ.setdefault(k, v)
@@ -431,7 +469,45 @@ class SimulationManager:
             logger.info("[SIM] NRD/path-tracing denoiser disabled "
                         "(Blackwell GPU compatibility)")
 
-        # 3) 로그 스팸 억제 — carb 로그 레벨 (int)로 설정
+        # 3) Aftermath / NGX / breakpad 비활성 (GPU device-lost 회피)
+        if self.config.disable_aftermath:
+            for key, val in [
+                ("/rtx/aftermath/enabled", False),
+                ("/rtx/aftermath/shaderHashAttachment/enabled", False),
+                ("/app/renderer/enableGpuCrashDumping", False),
+                ("/app/enableCrashReporting", False),
+                ("/app/runLoops/main/manualModeEnabled", False),
+                ("/persistent/app/captureFrame/captureMode", 0),
+                # NGX / Optix
+                ("/rtx-transient/ngx/enabled", False),
+                ("/rtx/ngx/enabled", False),
+                # Vulkan resource upload 안정화
+                ("/rtx/resourcemanager/maxStagedUploadMB", 64),
+                ("/rtx/resourcemanager/texturestreaming/async", False),
+            ]:
+                _try_set(key, val)
+            logger.info("[SIM] Aftermath + NGX + async upload disabled "
+                        "(Blackwell device-lost 회피)")
+
+        # 4) Lighting menu mode 강제 (GPU crash 마지막 명령이 SetLightingMenuMode였음)
+        if self.config.force_lighting_mode:
+            mode_map = {"camera": 0, "stage": 1, "rig": 2}
+            mode_val = mode_map.get(self.config.force_lighting_mode, 0)
+            for key, val in [
+                ("/rtx/sceneDb/ambientLightIntensity", 0.3),
+                ("/persistent/app/viewport/displayOptions", 31951),
+                ("/persistent/app/stage/upAxis", "Z"),
+                # Kit 5.x 라이팅 메뉴 모드
+                ("/persistent/app/viewport/Viewport/Viewport0/lightingMode",
+                 self.config.force_lighting_mode),
+                ("/app/renderer/skipMaterialLoading", False),
+            ]:
+                _try_set(key, val)
+            logger.info("[SIM] lighting mode forced to '%s' (idx=%d) "
+                        "— GPU crash 직전 'SetLightingMenuModeCommand' 회피",
+                        self.config.force_lighting_mode, mode_val)
+
+        # 5) 로그 스팸 억제 — carb 로그 레벨 (int)로 설정
         # [Error] [carb.dictionary.plugin] getStringRawInternal: item ... is not a string
         # → /log/channels/.../level 키는 string이 아니라 int (carb.logging.LEVEL_*)
         if self.config.suppress_rtx_log_spam:
@@ -468,6 +544,7 @@ class SimulationManager:
             enable_ik=self.config.enable_ik,
             weld_path_offset_y=self.config.weld_path_offset_y,
             weld_path_height=self.config.weld_path_height,
+            skip_auto_camera=self.config.skip_auto_camera,
         )
         self.visualizer = WorkshopVisualizer(bus=self.bus, config=viz_cfg)
 

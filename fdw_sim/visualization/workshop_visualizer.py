@@ -83,6 +83,10 @@ class WorkshopVizConfig:
     weld_path_offset_y: float = 0.25         # 용접 경로의 y 방향 범위 (±)
     weld_path_height: float = 0.05           # 용접 경로의 부품 표면 위 높이
 
+    # Level 2.1: GPU device-lost 회피용 안전 토글
+    skip_auto_camera: bool = False           # True면 _auto_frame_camera 건너뜀
+                                              # (AGX Thor에서 SceneCamera 생성이 GPU crash trigger인 경우)
+
 
 class WorkshopVisualizer:
     """추상 셀을 USD 스테이지에 매핑하고 step마다 부품 위치를 갱신.
@@ -258,7 +262,12 @@ class WorkshopVisualizer:
                     len(self._pending_cells), len(self._pending_amrs))
 
         # 카메라 자동 framing — 모든 셀이 한눈에 보이도록 viewport 이동
-        self._auto_frame_camera()
+        # skip_auto_camera=True인 경우 (GPU device-lost 회피용) 건너뜀
+        if self.config.skip_auto_camera:
+            logger.warning("[VIS] auto camera framing SKIPPED "
+                           "(skip_auto_camera=True — GPU device-lost 회피 모드)")
+        else:
+            self._auto_frame_camera()
 
     def _auto_frame_camera(self) -> None:
         """등록된 셀들의 bounding box를 기반으로 viewport 카메라 자동 배치."""
@@ -281,9 +290,25 @@ class WorkshopVisualizer:
                 center=(cx, cy, cz),
                 distance=distance,
                 height=height,
+                # viewport active-camera 변경은 위험할 수 있어 분리됨
+                # skip_auto_camera=False여도 viewport switch는 환경변수로 추가 제어 가능
+                set_viewport_camera=self._should_set_viewport_camera(),
             )
         except Exception:
             logger.exception("[VIS] auto frame camera failed")
+
+    def _should_set_viewport_camera(self) -> bool:
+        """viewport active-camera 변경 허용 여부.
+
+        환경변수 FDW_DISABLE_VIEWPORT_SWITCH=1 이면 카메라 prim은 만들되
+        viewport 변경(SetActiveCamera)은 건너뜀. AGX Thor에서 이 호출이
+        SetLightingMenuModeCommand를 트리거하고 GPU device-lost를
+        일으키는 경우의 회피책.
+        """
+        import os
+        if os.environ.get("FDW_DISABLE_VIEWPORT_SWITCH", "") == "1":
+            return False
+        return True
 
     # ========================================================================
     # 좌표 헬퍼

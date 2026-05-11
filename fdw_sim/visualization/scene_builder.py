@@ -100,14 +100,22 @@ class SceneBuilder:
     def frame_viewport_to_scene(self,
                                   center: Tuple[float, float, float] = (5.0, 0.0, 1.0),
                                   distance: float = 12.0,
-                                  height: float = 6.0) -> None:
+                                  height: float = 6.0,
+                                  set_viewport_camera: bool = True) -> None:
         """Isaac Sim viewport의 perspective 카메라를 셀 전체가 보이도록 이동.
 
         viewport에서 직접 perspective 카메라를 조작하기 어려우므로,
         새 카메라 prim을 만들어 viewport active camera로 설정한다.
+
+        Args:
+            set_viewport_camera: False면 카메라 prim은 만들되 viewport active camera
+                는 바꾸지 않음 (omni.kit.viewport.utility 호출이 AGX Thor에서
+                SetLightingMenuModeCommand를 트리거하고 GPU device-lost를
+                유발하는 경우의 회피 모드).
         """
+        # 1) 카메라 prim 생성 (USD 레벨만 — GPU 자원 업로드 없음)
+        cam_path = f"{self.config.root_prim_path}/SceneCamera"
         try:
-            cam_path = f"{self.config.root_prim_path}/SceneCamera"
             UsdGeom = self._UsdGeom
             Gf = self._Gf
 
@@ -138,20 +146,30 @@ class SceneBuilder:
             rx_op = xformable.AddRotateXOp()
             rx_op.Set(90.0 + pitch_deg)  # Z-up → Y-forward 보정
 
-            # viewport의 active camera로 설정
-            try:
-                import omni.kit.viewport.utility as vp_util  # type: ignore
-                vp = vp_util.get_active_viewport()
-                if vp is not None:
-                    vp.set_active_camera(cam_path)
-                    logger.info("[VIS] viewport camera set to %s", cam_path)
-            except Exception as e:
-                logger.debug("[VIS] could not set viewport camera: %s", e)
-
-            logger.info("[VIS] scene camera created @ %s looking at %s",
+            logger.info("[VIS] scene camera prim created @ %s looking at %s",
                         cam_pos, target)
         except Exception:
-            logger.exception("[VIS] frame_viewport_to_scene failed")
+            logger.exception("[VIS] scene camera prim creation failed — skipping")
+            return
+
+        # 2) viewport active camera 설정 — 분리된 try/except
+        # 이 부분이 AGX Thor에서 SetLightingMenuModeCommand를 트리거하므로
+        # set_viewport_camera=False로 disable 가능
+        if not set_viewport_camera:
+            logger.warning("[VIS] viewport active-camera switch SKIPPED "
+                           "(set_viewport_camera=False — GPU device-lost 회피)")
+            return
+
+        try:
+            import omni.kit.viewport.utility as vp_util  # type: ignore
+            vp = vp_util.get_active_viewport()
+            if vp is not None:
+                vp.set_active_camera(cam_path)
+                logger.info("[VIS] viewport camera set to %s", cam_path)
+        except Exception as e:
+            # viewport util 자체가 lighting mode를 건드릴 수 있으니
+            # 실패하더라도 카메라 prim은 이미 만들어졌으니 안전하게 계속
+            logger.warning("[VIS] could not set viewport camera (continuing): %s", e)
 
     # ========================================================================
     # 셀 (work bench)

@@ -223,7 +223,82 @@ python tests/test_visualization_smoke.py
 
 ---
 
-## 10. 다음 단계 (Level 2.2 후보)
+## 10. AGX Thor Blackwell — GPU device-lost 트러블슈팅
+
+부팅은 깨끗하지만 첫 GPU 리소스 업로드 단계에서 다음과 같이 죽는 경우:
+
+```
+[Error] [carb.graphics-vulkan.plugin] VkResult: ERROR_DEVICE_LOST
+[Error] [omni.kit.renderer.plugin] uploadData: failed to end and submit ResourceLoader
+[Error] [gpu.foundation.plugin] A GPU crash occurred. Exiting the application...
+'lastCommand' = 'SetLightingMenuModeCommand(lighting_mode=stage,...)'
+Segmentation fault (core dumped)
+```
+
+이는 RTX 셰이더 컴파일 spam과는 별개 문제로, **NVIDIA Aftermath GPU crash
+dumper / `SetLightingMenuModeCommand` / `omni.kit.viewport.utility` 호출**
+중 하나가 vk submit 시점에 device-lost를 유발하는 것으로 추정됩니다.
+
+### 10.1 즉시 대응 — `--safe-mode`
+
+가장 보수적인 설정을 한 번에 적용합니다:
+
+```bash
+ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
+    python scripts/run_poc1_level2_1.py --gui --real-robot --robot franka_panda \
+    --safe-mode
+```
+
+`--safe-mode`는 다음을 일괄 적용합니다:
+- `skip_auto_camera = True` — `WorkshopVisualizer._auto_frame_camera()` 건너뜀
+- `disable_aftermath = True` — `NVDA_AFTERMATH=0` + carb `/rtx/aftermath/*` OFF
+- `render_mode = RaytracedLighting` (NRD 불필요)
+- `force_lighting_mode = camera` — Kit 기본 stage lighting setup 회피
+- breakpad crash reporter 비활성
+
+### 10.2 세부 토글
+
+| 플래그 | 끄는 대상 |
+|---|---|
+| `--skip-auto-camera` | 카메라 자동 framing (SceneCamera prim 생성) |
+| `--disable-aftermath` | Aftermath GPU dumper (기본 ON) |
+| `--enable-aftermath` | Aftermath 강제 활성 (디버깅용) |
+| `--force-lighting-mode camera` | stage lighting 자동 전환 회피 |
+| `--disable-viewport-switch` | 카메라 prim은 만들되 viewport active camera 전환은 하지 않음 |
+| `--headless` | viewport 자체를 안 띄움 (가장 안전) |
+| `--no-viz` | USD 시각화 빌드 전체 건너뜀 |
+
+### 10.3 자동 이등분 진단
+
+원인이 어느 단계인지 좁히기 위한 6-step 스크립트:
+
+```bash
+ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
+    bash scripts/diagnose_gpu_crash.sh
+```
+
+순차적으로 6개 시나리오를 실행하며 logs/diag-* 에 결과를 저장합니다.
+
+| Step | 시나리오 | 첫 FAIL의 의미 |
+|---|---|---|
+| 1 | `--headless --no-viz --safe-mode` | Isaac Sim 자체 / 드라이버 문제 |
+| 2 | `--headless --safe-mode` | USD 시각화 빌드 자체 |
+| 3 | `--headless --safe-mode --real-robot` | Franka USD 로드 |
+| 4 | `--gui --safe-mode --real-robot` | GUI / Kit lighting setup |
+| 5 | `--gui --real-robot --force-lighting-mode camera`<br>(skip-auto-camera OFF) | auto-camera/viewport switch trigger |
+| 6 | `--gui --real-robot` (baseline) | 원본 크래시 재현 |
+
+### 10.4 권장 fallback 시나리오
+
+- **GUI가 꼭 필요 없다면**: `--headless --safe-mode --real-robot`
+  → Franka USD 로드와 IK 모션 로직은 검증 가능, 시각적 확인은 KPI 로그로
+- **GUI가 필요하면**: `--gui --safe-mode` 부터 시작 → 점진적으로 토글 해제
+- **WebRTC 스트리밍**: `--livestream 2 --safe-mode` — 로컬 viewport를 띄우지
+  않고 클라이언트에서만 렌더링되므로 device-lost 확률이 더 낮음
+
+---
+
+## 11. 다음 단계 (Level 2.2 후보)
 
 - [ ] **RMPflow 적용** — 충돌 회피 + 다이나믹 응답
 - [ ] **용접 스파크/궤적 파티클** — 토치 끝점에 emission

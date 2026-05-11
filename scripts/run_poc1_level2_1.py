@@ -88,6 +88,24 @@ def main() -> int:
     p.add_argument("--show-rtx-log", action="store_true",
                    help="rtx.denoising 로그를 그대로 출력 (디버깅용)")
 
+    # GPU device-lost 회피용 안전 모드 (VkResult: ERROR_DEVICE_LOST 대응)
+    p.add_argument("--safe-mode", action="store_true",
+                   help="AGX Thor Blackwell GPU device-lost 회피 — "
+                        "auto camera/Aftermath/NGX 등 가장 보수적인 설정 일괄 적용")
+    p.add_argument("--skip-auto-camera", action="store_true",
+                   help="WorkshopVisualizer 카메라 자동 framing 건너뜀")
+    p.add_argument("--disable-aftermath", action="store_true", default=True,
+                   help="NV Aftermath GPU crash dumper 비활성 (기본: ON)")
+    p.add_argument("--enable-aftermath", dest="disable_aftermath",
+                   action="store_false",
+                   help="Aftermath 강제 활성 (디버깅용 — device-lost 위험↑)")
+    p.add_argument("--force-lighting-mode",
+                   choices=["camera", "stage", "rig"], default=None,
+                   help="라이팅 메뉴 모드 강제 — SetLightingMenuModeCommand 회피")
+    p.add_argument("--disable-viewport-switch", action="store_true",
+                   help="카메라 prim은 만들되 viewport 활성 카메라는 바꾸지 않음 "
+                        "(omni.kit.viewport.utility 호출이 GPU crash trigger인 경우)")
+
     p.add_argument("--log-level", default="INFO",
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
@@ -132,6 +150,14 @@ def main() -> int:
     sim.config.disable_nrd_denoiser = not args.enable_denoiser
     sim.config.suppress_rtx_log_spam = not args.show_rtx_log
 
+    # GPU device-lost 회피 옵션
+    sim.config.safe_mode = args.safe_mode
+    sim.config.skip_auto_camera = args.safe_mode or args.skip_auto_camera
+    sim.config.disable_aftermath = args.disable_aftermath
+    sim.config.force_lighting_mode = args.force_lighting_mode
+    if args.disable_viewport_switch:
+        os.environ["FDW_DISABLE_VIEWPORT_SWITCH"] = "1"
+
     print("=" * 70)
     print(" FDW-OPS PoC-1 Level 2.1 — 실 로봇팔(Franka/UR10) + IK 데모")
     print("=" * 70)
@@ -149,6 +175,11 @@ def main() -> int:
     print(f" Render mode      : {sim.config.render_mode}")
     print(f" NRD denoiser     : {'OFF (Blackwell-safe)' if sim.config.disable_nrd_denoiser else 'ON'}")
     print(f" RTX log spam     : {'suppressed' if sim.config.suppress_rtx_log_spam else 'visible'}")
+    print(f" Safe mode        : {'ON (skip_auto_camera + aftermath_off)' if sim.config.safe_mode else 'OFF'}")
+    print(f" Skip auto camera : {sim.config.skip_auto_camera}")
+    print(f" Disable Aftermath: {sim.config.disable_aftermath}")
+    print(f" Force lighting   : {sim.config.force_lighting_mode or '(Kit default)'}")
+    print(f" Viewport switch  : {'DISABLED' if os.environ.get('FDW_DISABLE_VIEWPORT_SWITCH') == '1' else 'enabled'}")
     print("=" * 70)
     if sim.config.use_real_robot:
         print(" [Hint] Franka/UR10 USD가 NGC/Nucleus에서 처음 로드되면")
