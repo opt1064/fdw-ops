@@ -103,6 +103,16 @@ class WorkshopVizConfig:
     # RMPflow 장애물 등록
     rmpflow_register_obstacles: bool = True  # 부품/작업대를 Sphere 장애물로 등록
 
+    # ---------------------------------------------------------------- Level 2.3
+    # 셀별 실 USD 자산 사용 옵션 (placeholder fallback 자동)
+    use_real_inspection_cam: bool = True     # inspection 셀에 실 카메라 prim
+    use_real_amr: bool = True                # AMR을 USD(NovaCarter 등)로 로드
+    amr_asset_name: str = "nova_carter"      # asset_catalog 엔트리 이름
+    use_real_smart_rack: bool = True         # material 셀에 KLT bin USD rack
+    smart_rack_asset_name: str = "klt_bin"   # asset_catalog 엔트리 이름
+    use_real_forming_arm: bool = True        # forming 셀에 실 UR 로봇팔
+    forming_robot_name: str = "ur10"         # robot_loader.ROBOT_CATALOG 키
+
 
 class WorkshopVisualizer:
     """추상 셀을 USD 스테이지에 매핑하고 step마다 부품 위치를 갱신.
@@ -330,17 +340,70 @@ class WorkshopVisualizer:
 
             # 셀 종류별 부속 시각요소
             if ctype == "material" and self.config.show_smart_rack:
-                self.scene.add_smart_rack(cid, capacity=8)
+                placed = None
+                if self.config.use_real_smart_rack:
+                    try:
+                        placed = self.scene.add_smart_rack_real(
+                            cid,
+                            capacity=6,
+                            prop_asset=self.config.smart_rack_asset_name,
+                        )
+                    except Exception:
+                        logger.exception("[VIS] add_smart_rack_real failed for %s", cid)
+                        placed = None
+                if placed is None:
+                    # placeholder fallback (cube rack)
+                    self.scene.add_smart_rack(cid, capacity=8)
             elif ctype == "welding" and self.config.show_robot_arm:
                 self._spawn_robot_arm(cid, color=(1.0, 0.45, 0.1))
             elif ctype == "inspection" and self.config.show_camera:
-                self.scene.add_camera_placeholder(cid)
+                placed = None
+                if self.config.use_real_inspection_cam:
+                    try:
+                        placed = self.scene.add_inspection_camera_real(cid)
+                    except Exception:
+                        logger.exception("[VIS] add_inspection_camera_real failed for %s", cid)
+                        placed = None
+                if placed is None:
+                    self.scene.add_camera_placeholder(cid)
             elif ctype == "forming" and self.config.show_robot_arm:
-                self.scene.add_robot_arm_placeholder(cid, color=(0.7, 0.5, 0.1))
+                # forming 셀: 실 UR 로봇팔 우선, 실패 시 placeholder
+                spawned = False
+                if self.config.use_real_forming_arm:
+                    try:
+                        # _spawn_robot_arm은 self.config.robot_name을 사용하므로
+                        # 임시로 forming_robot_name으로 스왑한다.
+                        saved_name = self.config.robot_name
+                        saved_use_real = self.config.use_real_robot
+                        self.config.robot_name = self.config.forming_robot_name
+                        self.config.use_real_robot = True
+                        try:
+                            self._spawn_robot_arm(cid, color=(0.7, 0.5, 0.1))
+                            spawned = cid in self._robots
+                        finally:
+                            self.config.robot_name = saved_name
+                            self.config.use_real_robot = saved_use_real
+                    except Exception:
+                        logger.exception("[VIS] forming arm USD load failed for %s", cid)
+                        spawned = False
+                if not spawned:
+                    self.scene.add_robot_arm_placeholder(cid, color=(0.7, 0.5, 0.1))
 
-        # AMR 배치
+        # AMR 배치 — 실 USD(NovaCarter 등) 우선, 실패 시 cube placeholder
         for a in self._pending_amrs:
-            self.scene.add_amr(a["amr_id"], position=a["position"])
+            placed = None
+            if self.config.use_real_amr:
+                try:
+                    placed = self.scene.add_amr_usd(
+                        a["amr_id"],
+                        asset_name=self.config.amr_asset_name,
+                        position=a["position"],
+                    )
+                except Exception:
+                    logger.exception("[VIS] add_amr_usd failed for %s", a["amr_id"])
+                    placed = None
+            if placed is None:
+                self.scene.add_amr(a["amr_id"], position=a["position"])
 
         logger.info("[VIS] workshop scene built: %d cells, %d AMRs",
                     len(self._pending_cells), len(self._pending_amrs))

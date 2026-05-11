@@ -435,6 +435,263 @@ class SceneBuilder:
         return cam_root
 
     # ========================================================================
+    # Level 2.3: 일반 USD 자산 reference (AMR / sensor / rack / etc.)
+    # ========================================================================
+    def add_usd_reference(self,
+                          prim_path: str,
+                          usd_path: str,
+                          translation: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+                          scale: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+                          rotate_z_deg: float = 0.0,
+                          ) -> Optional[object]:
+        """USD 파일을 prim에 reference로 attach.
+
+        실 자산이 로컬/원격에서 안 잡힐 수 있으므로 호출자 측에서 사전 검증
+        (find_local_asset 등) 후 호출하는 것을 권장.
+        """
+        UsdGeom = self._UsdGeom
+        Gf = self._Gf
+
+        # 부모 prim 보장
+        parent_path = "/".join(prim_path.rstrip("/").split("/")[:-1]) or "/World"
+        if not self._stage.GetPrimAtPath(parent_path):
+            UsdGeom.Xform.Define(self._stage, parent_path)
+
+        UsdGeom.Xform.Define(self._stage, prim_path)
+        prim = self._stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            logger.warning("[VIS] add_usd_reference: prim define failed @ %s",
+                           prim_path)
+            return None
+
+        try:
+            refs = prim.GetReferences()
+            refs.AddReference(usd_path)
+        except Exception as e:
+            logger.warning("[VIS] add_usd_reference: AddReference failed for "
+                           "%s (%s): %s", prim_path, usd_path, e)
+            return None
+
+        # transform
+        xformable = UsdGeom.Xformable(prim)
+        xformable.ClearXformOpOrder()
+        t = xformable.AddTranslateOp()
+        t.Set(Gf.Vec3d(*translation))
+        if abs(rotate_z_deg) > 1e-6:
+            r = xformable.AddRotateZOp()
+            r.Set(float(rotate_z_deg))
+        if scale != (1.0, 1.0, 1.0):
+            s = xformable.AddScaleOp()
+            s.Set(Gf.Vec3f(*scale))
+
+        child_count = len(list(prim.GetChildren()))
+        if child_count == 0:
+            logger.warning("[VIS] add_usd_reference: %s loaded but has 0 children "
+                           "(USD likely failed to resolve: %s)", prim_path, usd_path)
+        else:
+            logger.info("[VIS] add_usd_reference: %s @ %s (children=%d)",
+                        prim_path, translation, child_count)
+        return prim
+
+    def add_amr_usd(self, amr_id: str,
+                    asset_name: str = "nova_carter",
+                    position: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+                    rotate_z_deg: float = 0.0,
+                    ) -> Optional[str]:
+        """ASSET_CATALOG의 AMR USD를 로드 (실패 시 None — 호출자가 placeholder fallback)."""
+        from fdw_sim.visualization.asset_catalog import (
+            ASSET_CATALOG, find_local_asset, resolve_asset_usd_path,
+        )
+
+        spec = ASSET_CATALOG.get(asset_name)
+        if spec is None:
+            logger.warning("[VIS] add_amr_usd: unknown asset %s", asset_name)
+            return None
+
+        local = find_local_asset(spec)
+        usd_path = local if local is not None else resolve_asset_usd_path(spec)
+        if local is None:
+            is_remote = (usd_path.startswith("omniverse://")
+                         or usd_path.startswith("http://")
+                         or usd_path.startswith("https://"))
+            if is_remote:
+                logger.warning("[VIS] add_amr_usd: %s only available remotely "
+                               "(%s) — may fail without Nucleus",
+                               asset_name, usd_path)
+
+        amr_path = f"{self.config.root_prim_path}/AMRs/{amr_id}_USD"
+        prim = self.add_usd_reference(
+            amr_path, usd_path,
+            translation=position,
+            scale=spec.scale,
+            rotate_z_deg=rotate_z_deg,
+        )
+        if prim is None or len(list(prim.GetChildren())) == 0:
+            return None
+
+        self._amr_prims[amr_id] = amr_path
+        return amr_path
+
+    def add_cell_prop(self, cell_id: str,
+                      asset_name: str,
+                      offset: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+                      rotate_z_deg: float = 0.0,
+                      ) -> Optional[str]:
+        """셀 위에 일반 USD prop(rack/box 등)을 reference로 부착."""
+        from fdw_sim.visualization.asset_catalog import (
+            ASSET_CATALOG, find_local_asset, resolve_asset_usd_path,
+        )
+
+        spec = ASSET_CATALOG.get(asset_name)
+        if spec is None:
+            return None
+
+        cell_root = self._cell_prims.get(cell_id)
+        if cell_root is None:
+            return None
+
+        local = find_local_asset(spec)
+        usd_path = local if local is not None else resolve_asset_usd_path(spec)
+
+        prop_path = f"{cell_root}/Prop_{asset_name}"
+        prim = self.add_usd_reference(
+            prop_path, usd_path,
+            translation=offset,
+            scale=spec.scale,
+            rotate_z_deg=rotate_z_deg,
+        )
+        if prim is None or len(list(prim.GetChildren())) == 0:
+            return None
+        return prop_path
+
+    def add_inspection_camera_real(self, cell_id: str,
+                                    height: float = 1.4,
+                                    use_usd_camera: bool = True,
+                                    ) -> Optional[str]:
+        """Inspection Cell용 — 사실적 카메라(housing + lens + pole) + UsdGeom.Camera prim."""
+        cell_root = self._cell_prims.get(cell_id)
+        if cell_root is None:
+            return None
+
+        cam_root = f"{cell_root}/InspectionCam"
+        self._UsdGeom.Xform.Define(self._stage, cam_root)
+        self._set_translate(cam_root, (0.0, -0.4, height))
+
+        # housing
+        housing = f"{cam_root}/Housing"
+        cube = self._UsdGeom.Cube.Define(self._stage, housing)
+        cube.CreateSizeAttr(1.0)
+        self._set_scale(housing, (0.06, 0.08, 0.06))
+        self._set_translate(housing, (0.0, 0.0, 0.0))
+        self._set_color(housing, (0.15, 0.15, 0.2))
+
+        # lens (실린더)
+        lens = f"{cam_root}/Lens"
+        cyl = self._UsdGeom.Cylinder.Define(self._stage, lens)
+        cyl.CreateRadiusAttr(0.035)
+        cyl.CreateHeightAttr(0.08)
+        cyl.CreateAxisAttr("Y")
+        self._set_translate(lens, (0.0, 0.10, 0.0))
+        self._set_color(lens, (0.02, 0.02, 0.02))
+
+        # ring (포커스 링)
+        ring = f"{cam_root}/Ring"
+        ring_cyl = self._UsdGeom.Cylinder.Define(self._stage, ring)
+        ring_cyl.CreateRadiusAttr(0.045)
+        ring_cyl.CreateHeightAttr(0.01)
+        ring_cyl.CreateAxisAttr("Y")
+        self._set_translate(ring, (0.0, 0.14, 0.0))
+        self._set_color(ring, (0.7, 0.6, 0.1))
+
+        # 마운트 폴
+        pole = f"{cam_root}/Pole"
+        pole_cyl = self._UsdGeom.Cylinder.Define(self._stage, pole)
+        pole_cyl.CreateRadiusAttr(0.02)
+        pole_cyl.CreateHeightAttr(height - 0.1)
+        pole_cyl.CreateAxisAttr("Z")
+        self._set_translate(pole, (0.0, -0.05, -(height - 0.1) / 2))
+        self._set_color(pole, (0.4, 0.4, 0.45))
+
+        # 실 USD Camera prim
+        if use_usd_camera:
+            cam_prim_path = f"{cam_root}/Camera"
+            try:
+                cam = self._UsdGeom.Camera.Define(self._stage, cam_prim_path)
+                cam.CreateFocalLengthAttr(35.0)
+                cam.CreateClippingRangeAttr(self._Gf.Vec2f(0.05, 100.0))
+                cam_x = self._UsdGeom.Xformable(cam.GetPrim())
+                cam_x.ClearXformOpOrder()
+                rop = cam_x.AddRotateXOp()
+                rop.Set(-60.0)
+            except Exception:
+                logger.warning("[VIS] inspection USD camera prim failed",
+                               exc_info=True)
+
+        logger.info("[VIS] inspection camera (real-style) added @ %s", cell_id)
+        return cam_root
+
+    def add_smart_rack_real(self, cell_id: str,
+                             capacity: int = 6,
+                             prop_asset: str = "klt_bin",
+                             ) -> Optional[str]:
+        """Material Cell — 실 KLT bin USD를 격자로 배치.
+
+        prop_asset이 로컬에 없으면 None → 호출자가 add_smart_rack() 큐브로 fallback.
+        """
+        from fdw_sim.visualization.asset_catalog import (
+            ASSET_CATALOG, find_local_asset,
+        )
+
+        spec = ASSET_CATALOG.get(prop_asset)
+        if spec is None:
+            return None
+
+        cell_root = self._cell_prims.get(cell_id)
+        if cell_root is None:
+            return None
+
+        local = find_local_asset(spec)
+        if local is None:
+            logger.info("[VIS] add_smart_rack_real: %s not local — fallback",
+                        prop_asset)
+            return None
+        usd_path = local
+
+        rack_path = f"{cell_root}/SmartRack_USD"
+        self._UsdGeom.Xform.Define(self._stage, rack_path)
+        self._set_translate(rack_path, (0.0, 0.8, 0.85))
+
+        cols = 3
+        slot_w = 0.25
+        slot_h = 0.20
+
+        success = 0
+        for i in range(capacity):
+            r = i // cols
+            c = i % cols
+            slot_path = f"{rack_path}/Slot_{i:02d}"
+            tx = (c - cols / 2 + 0.5) * slot_w
+            ty = 0.0
+            tz = r * slot_h
+            prim = self.add_usd_reference(
+                slot_path, usd_path,
+                translation=(tx, ty, tz),
+                scale=spec.scale,
+            )
+            if prim is not None and len(list(prim.GetChildren())) > 0:
+                success += 1
+
+        if success == 0:
+            logger.warning("[VIS] add_smart_rack_real: 0 slots succeeded "
+                           "— removing %s", rack_path)
+            self._stage.RemovePrim(rack_path)
+            return None
+
+        logger.info("[VIS] smart rack (USD) added @ %s (slots=%d/%d, asset=%s)",
+                    cell_id, success, capacity, prop_asset)
+        return rack_path
+
+    # ========================================================================
     # 부품 (Part)
     # ========================================================================
     def add_part(self, part_id: str,
