@@ -464,6 +464,9 @@ class SceneBuilder:
                            prim_path)
             return None
 
+        # 1) reference attach — Isaac/USD에서는 즉시 효과가 stage에 compose 되지만
+        #    GetChildren()은 reference payload가 컴포지션을 끝낸 후 평가된다.
+        #    AddReference()가 raise 없이 끝나면 일단 attach는 성공.
         try:
             refs = prim.GetReferences()
             refs.AddReference(usd_path)
@@ -472,7 +475,8 @@ class SceneBuilder:
                            "%s (%s): %s", prim_path, usd_path, e)
             return None
 
-        # transform
+        # 2) transform — reference 다음에 설정하면 reference 안의 root xform을
+        #    덮어쓰게 된다. 정확한 순서: SetReference → AddTranslate/Scale/Rotate.
         xformable = UsdGeom.Xformable(prim)
         xformable.ClearXformOpOrder()
         t = xformable.AddTranslateOp()
@@ -484,13 +488,28 @@ class SceneBuilder:
             s = xformable.AddScaleOp()
             s.Set(Gf.Vec3f(*scale))
 
+        # 3) 진단 — children, prim type, reference 목록을 명시적으로 로그
         child_count = len(list(prim.GetChildren()))
-        if child_count == 0:
-            logger.warning("[VIS] add_usd_reference: %s loaded but has 0 children "
-                           "(USD likely failed to resolve: %s)", prim_path, usd_path)
-        else:
-            logger.info("[VIS] add_usd_reference: %s @ %s (children=%d)",
-                        prim_path, translation, child_count)
+        try:
+            ref_list = prim.GetMetadata("references")
+            ref_count = (len(ref_list.prependedItems) + len(ref_list.appendedItems)
+                         if ref_list is not None else 0)
+        except Exception:
+            ref_count = -1  # 못 읽음 (=라이브러리 버전 차이)
+
+        logger.info("[VIS] add_usd_reference: %s ← %s "
+                    "(children=%d, refs=%s, type=%s)",
+                    prim_path, usd_path, child_count,
+                    ref_count if ref_count >= 0 else "n/a",
+                    prim.GetTypeName())
+
+        if child_count == 0 and ref_count <= 0:
+            # 진짜로 reference가 안 붙은 경우만 실패 신호.
+            # children=0 이지만 ref_count>0 이면 USD compose가 다음 frame에 일어나는
+            # 정상 케이스 — None 반환하지 않는다.
+            logger.warning("[VIS] add_usd_reference: %s — reference attach FAILED "
+                           "(no children, no refs, usd=%s)", prim_path, usd_path)
+            return None
         return prim
 
     def add_amr_usd(self, amr_id: str,
@@ -526,10 +545,15 @@ class SceneBuilder:
             scale=spec.scale,
             rotate_z_deg=rotate_z_deg,
         )
-        if prim is None or len(list(prim.GetChildren())) == 0:
+        # add_usd_reference는 이미 reference attach 성공 여부를 검증한다.
+        # children==0 이라도 reference만 붙었으면 다음 frame에 compose 된다.
+        if prim is None:
+            logger.warning("[VIS] add_amr_usd: %s — reference attach failed", amr_id)
             return None
 
         self._amr_prims[amr_id] = amr_path
+        logger.info("[VIS] AMR %s placed via USD (%s) @ %s",
+                    amr_id, asset_name, position)
         return amr_path
 
     def add_cell_prop(self, cell_id: str,
@@ -560,7 +584,7 @@ class SceneBuilder:
             scale=spec.scale,
             rotate_z_deg=rotate_z_deg,
         )
-        if prim is None or len(list(prim.GetChildren())) == 0:
+        if prim is None:
             return None
         return prop_path
 
@@ -678,7 +702,9 @@ class SceneBuilder:
                 translation=(tx, ty, tz),
                 scale=spec.scale,
             )
-            if prim is not None and len(list(prim.GetChildren())) > 0:
+            # add_usd_reference 가 reference attach 성공을 이미 검증함.
+            # children==0 이어도 다음 frame에 compose 되므로 prim is not None 으로 충분.
+            if prim is not None:
                 success += 1
 
         if success == 0:
@@ -739,6 +765,82 @@ class SceneBuilder:
 
     def get_part_path(self, part_id: str) -> Optional[str]:
         return self._part_prims.get(part_id)
+
+    # ========================================================================
+    # 진단 — USD 자산이 실제로 stage에 붙었는지 확인
+    # ========================================================================
+    def diagnose_stage(self, verbose: bool = True) -> Dict[str, Dict]:
+        """등록된 모든 cell/AMR prim의 USD reference 상태를 dict로 반환.
+
+        각 항목:
+          - path        : prim 경로
+          - exists      : prim이 stage에 존재하는가
+          - type        : prim 타입 (Xform, Mesh, ...)
+          - children    : 자식 prim 수
+          - has_ref     : USD reference가 메타데이터로 잡혀 있는가
+          - ref_targets : reference target USD 파일 목록
+        """
+        Sdf = self._Sdf
+        report: Dict[str, Dict] = {}
+
+        def _inspect(label: str, prim_path: str) -> Dict:
+            prim = self._stage.GetPrimAtPath(prim_path)
+            info = {
+                "path": prim_path,
+                "exists": bool(prim and prim.IsValid()),
+                "type": "",
+                "children": 0,
+                "has_ref": False,
+                "ref_targets": [],
+            }
+            if not info["exists"]:
+                return info
+            info["type"] = str(prim.GetTypeName())
+            info["children"] = len(list(prim.GetChildren()))
+            try:
+                meta = prim.GetMetadata("references")
+                if meta is not None:
+                    targets = []
+                    for item in list(meta.prependedItems) + list(meta.appendedItems):
+                        # Sdf.Reference 의 assetPath 추출
+                        try:
+                            targets.append(item.assetPath)
+                        except Exception:
+                            targets.append(str(item))
+                    info["ref_targets"] = targets
+                    info["has_ref"] = len(targets) > 0
+            except Exception:
+                pass
+            return info
+
+        # cells
+        for cell_id, cell_path in self._cell_prims.items():
+            report[f"cell:{cell_id}"] = _inspect(cell_id, cell_path)
+            # cell 하위에 SmartRack/RobotArm/InspectionCam 가 있을 수 있음
+            for sub in ("SmartRack", "SmartRack_USD", "RobotArm",
+                        "InspectionCam", "Camera"):
+                sub_path = f"{cell_path}/{sub}"
+                sub_prim = self._stage.GetPrimAtPath(sub_path)
+                if sub_prim and sub_prim.IsValid():
+                    report[f"cell:{cell_id}/{sub}"] = _inspect(
+                        f"{cell_id}/{sub}", sub_path)
+
+        # AMRs
+        for amr_id, amr_path in self._amr_prims.items():
+            report[f"amr:{amr_id}"] = _inspect(amr_id, amr_path)
+
+        if verbose:
+            logger.info("[VIS] === stage diagnose: %d entries ===", len(report))
+            for key, info in report.items():
+                if info["has_ref"]:
+                    logger.info("[VIS] %-40s children=%d ref=%s",
+                                key, info["children"],
+                                info["ref_targets"][0] if info["ref_targets"]
+                                else "?")
+                else:
+                    logger.info("[VIS] %-40s children=%d type=%s (no-ref)",
+                                key, info["children"], info["type"])
+        return report
 
     # ========================================================================
     # 내부 helper

@@ -408,6 +408,16 @@ class WorkshopVisualizer:
         logger.info("[VIS] workshop scene built: %d cells, %d AMRs",
                     len(self._pending_cells), len(self._pending_amrs))
 
+        # Level 2.3 진단 — 어떤 cell/AMR이 실 USD reference를 갖고 있고
+        # 어떤 것이 placeholder fallback 으로 떨어졌는지 명시적으로 출력.
+        # 환경변수 FDW_DISABLE_STAGE_DIAGNOSE=1 로 끌 수 있다.
+        import os as _os
+        if _os.environ.get("FDW_DISABLE_STAGE_DIAGNOSE", "") != "1":
+            try:
+                self.scene.diagnose_stage(verbose=True)
+            except Exception:
+                logger.exception("[VIS] diagnose_stage failed")
+
         # 카메라 자동 framing — 모든 셀이 한눈에 보이도록 viewport 이동
         # skip_auto_camera=True인 경우 (GPU device-lost 회피용) 건너뜀
         if self.config.skip_auto_camera:
