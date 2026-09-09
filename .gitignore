@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual envs
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs / Outputs
+fdw_sim/logs/
+fdw_sim/data/
+*.log
+*.jsonl
+
+# Isaac Sim caches (should never be committed)
+.cache/
+.nv/
+ComputeCache/
+GLCache/
+
+# OS
+Thumbs.db
