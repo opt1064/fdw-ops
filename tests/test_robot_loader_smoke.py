@@ -217,6 +217,10 @@ class TestSimulationConfigLevel21(unittest.TestCase):
         self.assertTrue(cfg.enable_ik)
         self.assertAlmostEqual(cfg.weld_path_offset_y, 0.25)
         self.assertAlmostEqual(cfg.weld_path_height, 0.05)
+        # livestream>0일 때 기본적으로 AppLauncher를 건너뛰도록 하는 스위치
+        # (Thor aarch64에서 AppLauncher의 experience 파일이 livestream 1/2
+        # 모두 omni.kit.livestream.webrtc 미존재로 부팅 실패하는 것 확인됨).
+        self.assertFalse(cfg.force_applauncher_for_livestream)
 
     def test_simulation_config_overrides(self):
         from fdw_sim.simulation.manager import SimulationConfig

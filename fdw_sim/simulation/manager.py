@@ -54,6 +54,16 @@ class SimulationConfig:
     stage_units_in_meters: float = 1.0
     livestream: int = 0  # 0=off, 1=Native, 2=WebRTC
     isaac_app_kwargs: Dict[str, Any] = field(default_factory=dict)  # type: ignore[arg-type]
+    force_applauncher_for_livestream: bool = False
+    # AGX Thor(aarch64)에서는 livestream=1도 2도 IsaacLab AppLauncher의
+    # experience 파일(isaaclab.python.kit)이 요구하는
+    # omni.services.livestream.nvcf -> omni.kit.livestream.webrtc 의존성
+    # 자체가 aarch64 빌드가 없어서 둘 다 부팅 단계에서 죽는다 (livestream
+    # 값과 무관하게 동일 에러). isaacsim 메타패키지의 기본 experience
+    # 파일은 이 nvcf 의존을 강제하지 않아 Jetson/AGX 스트리밍에 더 적합할
+    # 가능성이 높으므로, livestream>0일 때는 기본적으로 AppLauncher를
+    # 건너뛰고 곧장 isaacsim.SimulationApp을 사용한다. (x86_64 등에서
+    # AppLauncher 경유 livestream이 필요하면 True로 설정해 되돌릴 수 있다.)
 
     # 시각화 (mode == "isaac" 일 때만 사용)
     enable_visualization: bool = True
@@ -249,7 +259,17 @@ class SimulationManager:
         except ImportError:
             AppLauncher = None  # type: ignore[assignment]
 
-        if AppLauncher is not None:
+        # livestream>0이면 기본적으로 AppLauncher를 건너뛴다 — 이유는
+        # force_applauncher_for_livestream 필드 주석 참고 (Thor aarch64에서
+        # AppLauncher의 experience 파일이 livestream 1/2 모두 동일하게
+        # omni.kit.livestream.webrtc 미존재로 부팅 실패하는 것 확인됨).
+        use_applauncher = (
+            AppLauncher is not None
+            and (self.config.livestream == 0
+                 or self.config.force_applauncher_for_livestream)
+        )
+
+        if use_applauncher:
             launcher_args = {
                 "headless": self.config.headless,
                 "livestream": self.config.livestream,
@@ -262,7 +282,9 @@ class SimulationManager:
                         "(headless=%s, livestream=%d)",
                         self.config.headless, self.config.livestream)
         else:
-            # Fallback: isaacsim 메타 패키지 사용 (isaaclab이 아예 미설치된 경우만)
+            # isaacsim 메타 패키지 직접 사용 — isaaclab이 미설치된 경우이거나,
+            # livestream>0이라 AppLauncher의 experience 파일(webrtc 강제
+            # 의존)을 의도적으로 건너뛴 경우.
             from isaacsim import SimulationApp  # type: ignore
             app_kwargs = {
                 "headless": self.config.headless,
