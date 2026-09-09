@@ -243,31 +243,40 @@ class SimulationManager:
         # carb experimental settings를 launch kwargs로 미리 주입
         extra_args = self._build_app_launch_args()
 
-        # Isaac Lab의 AppLauncher가 설치돼 있는지만 먼저 확인한다 (import 실패 =
-        # isaaclab 패키지 자체가 없는 경우에만 fallback으로 넘어가야 한다).
-        # AppLauncher(...) 생성 자체는 이 try에 넣지 않는다 — Kit 부팅이 도중에
-        # 실패하면 (예: 확장 dependency solver 실패) SimulationApp.__init__ 내부의
-        # `from omni.kit.usd import layers` 등에서 ModuleNotFoundError가 올라오는데,
-        # 이것도 ImportError의 서브클래스라서 예전 코드는 "isaaclab 미설치"로 착각하고
-        # 이미 절반쯤 부팅되다 만 같은 프로세스 안에서 SimulationApp()을 다시
-        # 시도했다. Kit/Carbonite는 프로세스당 한 번만 안전하게 초기화되므로 이
-        # 재시도는 항상 같은 에러로 다시 죽고, 진짜 원인(첫 실패)은 로그에 묻혀
-        # 사라진다. 아래처럼 import 여부만 분기하면 AppLauncher 부팅 중 실패는
-        # 마스킹되지 않고 그대로 위로 올라가 원인을 바로 알 수 있다.
-        try:
-            from isaaclab.app import AppLauncher  # type: ignore
-        except ImportError:
-            AppLauncher = None  # type: ignore[assignment]
-
         # livestream>0이면 기본적으로 AppLauncher를 건너뛴다 — 이유는
         # force_applauncher_for_livestream 필드 주석 참고 (Thor aarch64에서
         # AppLauncher의 experience 파일이 livestream 1/2 모두 동일하게
         # omni.kit.livestream.webrtc 미존재로 부팅 실패하는 것 확인됨).
-        use_applauncher = (
-            AppLauncher is not None
-            and (self.config.livestream == 0
-                 or self.config.force_applauncher_for_livestream)
+        #
+        # 이 여부를 "import 해보고 나서" 판단하면 안 된다 — `import isaaclab.app`
+        # 자체가 부작용으로 여러 omni/pxr 인접 모듈을 먼저 로드해 버려서, 그 뒤에
+        # (AppLauncher를 쓰지 않고) 순수 `SimulationApp()`을 호출하면 Isaac Sim이
+        # "SimulationApp 생성 전에 다른 omni 모듈이 먼저 import됨"으로 감지하고
+        # 부팅에 실패한다 (Thor 실측, livestream=1 재현). 그래서 AppLauncher를
+        # 쓸지 여부를 config만 보고 먼저 정하고, 실제로 쓸 계획일 때만 import한다.
+        want_applauncher = (
+            self.config.livestream == 0
+            or self.config.force_applauncher_for_livestream
         )
+
+        AppLauncher = None
+        if want_applauncher:
+            # isaaclab 패키지 자체가 없는 경우에만 이 import가 실패해야 한다.
+            # AppLauncher(...) 생성 자체는 이 try에 넣지 않는다 — Kit 부팅이 도중에
+            # 실패하면 (예: 확장 dependency solver 실패) SimulationApp.__init__ 내부의
+            # `from omni.kit.usd import layers` 등에서 ModuleNotFoundError가 올라오는데,
+            # 이것도 ImportError의 서브클래스라서 예전 코드는 "isaaclab 미설치"로 착각하고
+            # 이미 절반쯤 부팅되다 만 같은 프로세스 안에서 SimulationApp()을 다시
+            # 시도했다. Kit/Carbonite는 프로세스당 한 번만 안전하게 초기화되므로 이
+            # 재시도는 항상 같은 에러로 다시 죽고, 진짜 원인(첫 실패)은 로그에 묻혀
+            # 사라진다. 아래처럼 import 여부만 분기하면 AppLauncher 부팅 중 실패는
+            # 마스킹되지 않고 그대로 위로 올라가 원인을 바로 알 수 있다.
+            try:
+                from isaaclab.app import AppLauncher  # type: ignore
+            except ImportError:
+                AppLauncher = None  # type: ignore[assignment]
+
+        use_applauncher = want_applauncher and AppLauncher is not None
 
         if use_applauncher:
             launcher_args = {
