@@ -128,23 +128,58 @@ class SceneBuilder:
             cam_pos = (cx - distance * 0.6, cy - distance * 0.7, cz + height)
             target = (cx, cy, cz)
 
-            # look-at 행렬 계산 (단순 버전)
+            # look-at 행렬 계산 — forward/right/up 기저벡터를 직접 구해 4x4
+            # transform 하나로 설정한다 (RotateZ+RotateX 오일러각을 손으로
+            # 조합하던 이전 버전은 합성 순서/부호 실수가 나기 쉬웠고, 실측
+            # (Thor RDP GUI)에서 카메라가 씬을 완전히 빗나가는 것으로 확인됨 —
+            # 그라운드 플레인을 거의 옆에서 보는 각도로 렌더링됨).
             import math
-            dx = target[0] - cam_pos[0]
-            dy = target[1] - cam_pos[1]
-            dz = target[2] - cam_pos[2]
-            yaw_deg = math.degrees(math.atan2(dx, -dy))
-            horiz = math.sqrt(dx * dx + dy * dy)
-            pitch_deg = -math.degrees(math.atan2(dz, horiz))
+
+            def _sub(a, b):
+                return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+            def _cross(a, b):
+                return (a[1] * b[2] - a[2] * b[1],
+                        a[2] * b[0] - a[0] * b[2],
+                        a[0] * b[1] - a[1] * b[0])
+
+            def _normalize(v, fallback=(0.0, 0.0, 1.0)):
+                length = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+                if length < 1e-9:
+                    return fallback
+                return (v[0] / length, v[1] / length, v[2] / length)
+
+            # 이 프로젝트의 모든 위치는 Z를 높이로 취급하므로(Isaac Sim
+            # 기본 stage도 Z-up) world up은 항상 (0,0,1).
+            world_up = (0.0, 0.0, 1.0)
+            forward = _normalize(_sub(target, cam_pos))
+            right_raw = _cross(forward, world_up)
+            right_len = math.sqrt(sum(c * c for c in right_raw))
+            if right_len < 1e-6:
+                # forward가 world_up과 거의 평행(카메라가 거의 수직으로
+                # 내려다보는 경우) — 임의의 right 축으로 폴백.
+                right = (1.0, 0.0, 0.0)
+            else:
+                right = tuple(c / right_len for c in right_raw)
+            up = _cross(right, forward)  # right, forward 모두 단위벡터라 이미 정규화됨
+
+            # USD 카메라는 로컬 -Z 방향을 바라보고 +Y가 up, +X가 right이다.
+            # Gf.Matrix4d는 row-vector 규약(v' = v * M)이라 회전 성분은
+            # 행(row)에 기저벡터를, 4번째 행에 translation을 넣는다.
+            rx, ry, rz = right
+            ux, uy, uz = up
+            fx, fy, fz = forward
+            ex, ey, ez = cam_pos
+            look_at_matrix = Gf.Matrix4d(
+                rx, ry, rz, 0.0,
+                ux, uy, uz, 0.0,
+                -fx, -fy, -fz, 0.0,
+                ex, ey, ez, 1.0,
+            )
 
             xformable = UsdGeom.Xformable(cam.GetPrim())
             xformable.ClearXformOpOrder()
-            t_op = xformable.AddTranslateOp()
-            t_op.Set(Gf.Vec3d(*cam_pos))
-            rz_op = xformable.AddRotateZOp()
-            rz_op.Set(yaw_deg)
-            rx_op = xformable.AddRotateXOp()
-            rx_op.Set(90.0 + pitch_deg)  # Z-up → Y-forward 보정
+            xformable.AddTransformOp().Set(look_at_matrix)
 
             logger.info("[VIS] scene camera prim created @ %s looking at %s",
                         cam_pos, target)
