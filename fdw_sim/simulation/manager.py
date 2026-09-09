@@ -233,9 +233,23 @@ class SimulationManager:
         # carb experimental settings를 launch kwargs로 미리 주입
         extra_args = self._build_app_launch_args()
 
+        # Isaac Lab의 AppLauncher가 설치돼 있는지만 먼저 확인한다 (import 실패 =
+        # isaaclab 패키지 자체가 없는 경우에만 fallback으로 넘어가야 한다).
+        # AppLauncher(...) 생성 자체는 이 try에 넣지 않는다 — Kit 부팅이 도중에
+        # 실패하면 (예: 확장 dependency solver 실패) SimulationApp.__init__ 내부의
+        # `from omni.kit.usd import layers` 등에서 ModuleNotFoundError가 올라오는데,
+        # 이것도 ImportError의 서브클래스라서 예전 코드는 "isaaclab 미설치"로 착각하고
+        # 이미 절반쯤 부팅되다 만 같은 프로세스 안에서 SimulationApp()을 다시
+        # 시도했다. Kit/Carbonite는 프로세스당 한 번만 안전하게 초기화되므로 이
+        # 재시도는 항상 같은 에러로 다시 죽고, 진짜 원인(첫 실패)은 로그에 묻혀
+        # 사라진다. 아래처럼 import 여부만 분기하면 AppLauncher 부팅 중 실패는
+        # 마스킹되지 않고 그대로 위로 올라가 원인을 바로 알 수 있다.
         try:
-            # 우선 Isaac Lab의 AppLauncher 시도 (확장 자동 로드)
             from isaaclab.app import AppLauncher  # type: ignore
+        except ImportError:
+            AppLauncher = None  # type: ignore[assignment]
+
+        if AppLauncher is not None:
             launcher_args = {
                 "headless": self.config.headless,
                 "livestream": self.config.livestream,
@@ -247,8 +261,8 @@ class SimulationManager:
             logger.info("[SIM] Isaac Sim launched via Isaac Lab AppLauncher "
                         "(headless=%s, livestream=%d)",
                         self.config.headless, self.config.livestream)
-        except ImportError:
-            # Fallback: isaacsim 메타 패키지 사용
+        else:
+            # Fallback: isaacsim 메타 패키지 사용 (isaaclab이 아예 미설치된 경우만)
             from isaacsim import SimulationApp  # type: ignore
             app_kwargs = {
                 "headless": self.config.headless,
