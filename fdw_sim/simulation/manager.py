@@ -302,10 +302,40 @@ class SimulationManager:
             }
             if self.config.livestream > 0:
                 app_kwargs["livestream"] = self.config.livestream
+
+            # experience를 지정하지 않으면 SimulationApp은 다음 3개 후보를
+            # $EXP_PATH에서 순서대로 찾는다:
+            #   omni.isaac.sim.python.kit / isaacsim.exp.base.python.kit /
+            #   isaacsim.exp.base.kit
+            # Thor의 isaacsim wheel 설치에는 이 셋이 전부 없고(있는 건
+            # isaacsim.exp.compatibility_check.kit 하나뿐), 그 결과 experience
+            # 가 빈 채로 남아 Kit이 omni.kit.usd조차 없는 사실상 빈 확장
+            # 세트로 부팅되어 11ms 만에 죽는다 (Thor 실측:
+            # ModuleNotFoundError: No module named 'omni.kit.usd').
+            # IsaacLab의 headless experience 파일은 실제로 존재하고
+            # (AppLauncher 경유 headless=False 부팅 성공으로 완전한 확장
+            # 세트임이 이미 확인됨) livestream 값과 무관하게 안전하므로
+            # (AppLauncher를 거치지 않아 nvcf/webrtc 의존은 발생하지 않음)
+            # best-effort로 찾아서 채운다.
+            if "experience" not in app_kwargs:
+                resolved_exp = self._resolve_isaaclab_experience_file()
+                if resolved_exp:
+                    app_kwargs["experience"] = resolved_exp
+                    logger.info("[SIM] plain SimulationApp: using IsaacLab "
+                                "experience file %s", resolved_exp)
+                else:
+                    logger.warning(
+                        "[SIM] plain SimulationApp: could not locate an "
+                        "IsaacLab experience file — falling back to "
+                        "SimulationApp's own default resolution, which may "
+                        "fail if none of its 3 default candidates exist "
+                        "(set FDW_ISAAC_EXPERIENCE_FILE to override).")
+
             self._isaac_app = SimulationApp(app_kwargs)
             logger.info("[SIM] Isaac Sim launched via SimulationApp "
-                        "(headless=%s, livestream=%d)",
-                        self.config.headless, self.config.livestream)
+                        "(headless=%s, livestream=%d, experience=%s)",
+                        self.config.headless, self.config.livestream,
+                        app_kwargs.get("experience", "<default>"))
 
         # 1.5) SimulationApp 직후 — World 생성 전에 RTX/log 설정 적용
         #      (denoiser plugin이 첫 프레임 렌더 전에 비활성되어야 함)
@@ -463,6 +493,47 @@ class SimulationManager:
         # 이 메시지는 필터 설치 이후 fd=2로 직접 가는 게 아니라
         # python logger를 통해 가므로 그대로 보임
         logger.info("[SIM] fd-level stderr filter installed (drop: %s)", drops)
+
+    def _resolve_isaaclab_experience_file(self) -> Optional[str]:
+        """plain SimulationApp()용 IsaacLab experience(.kit) 파일 경로를
+        best-effort로 찾는다.
+
+        환경변수 FDW_ISAAC_EXPERIENCE_FILE로 직접 지정 가능. 없으면
+        `isaaclab` 패키지 위치로부터 IsaacLab repo 루트(`<repo>/source/
+        isaaclab/isaaclab/__init__.py` → `<repo>`)를 역산해
+        `<repo>/apps/isaaclab.python{.headless}.kit`을 찾는다 (AppLauncher가
+        headless/livestream 조합에 따라 고르는 것과 동일한 이름 규칙 —
+        `isaaclab.app.app_launcher._resolve_experience_file` 참고).
+
+        찾지 못하면 None을 반환한다 — 없는 경로를 억지로 채워 새로운
+        혼란스러운 에러를 만들지 않고, SimulationApp 자체의 기본 동작에
+        맡긴다.
+        """
+        import os
+
+        override = os.environ.get("FDW_ISAAC_EXPERIENCE_FILE")
+        if override and Path(override).is_file():
+            return override
+
+        try:
+            import importlib.util
+            spec = importlib.util.find_spec("isaaclab")
+        except Exception:
+            spec = None
+        if spec is None or not spec.origin:
+            return None
+
+        # spec.origin: <repo>/source/isaaclab/isaaclab/__init__.py
+        pkg_init = Path(spec.origin).resolve()
+        parents = pkg_init.parents
+        if len(parents) <= 3:
+            return None
+        repo_root = parents[3]
+
+        filename = ("isaaclab.python.headless.kit" if self.config.headless
+                    else "isaaclab.python.kit")
+        candidate = repo_root / "apps" / filename
+        return str(candidate) if candidate.is_file() else None
 
     def _build_app_launch_args(self) -> Dict[str, Any]:
         """SimulationApp / AppLauncher에 전달할 추가 인자.
