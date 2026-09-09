@@ -149,6 +149,34 @@ class TestIKControllerImport(unittest.TestCase):
         self.assertGreater(cfg.waypoint_blend_time, 0.0)
         self.assertGreater(cfg.home_blend_time, 0.0)
 
+    def test_get_tcp_position_exists_and_tracks_commanded_target(self):
+        """IKController도 RMPflowController와 동일하게 get_tcp_position()을
+        노출해야 한다 — 없으면 workshop_visualizer의
+        ``hasattr(ik, "get_tcp_position")`` 체크가 항상 실패해 spark emitter가
+        용접 셀에서 TCP 위치를 한 번도 못 받는다 (회귀: 787c2a4가 rmpflow_controller
+        에만 적용되고 ik_controller에는 빠졌던 문제)."""
+        from fdw_sim.visualization.ik_controller import (
+            IKConfig, IKController, WeldingPath,
+        )
+
+        class _FakeSpec:
+            end_effector_frame = "panda_hand"
+            home_joint_positions = [0.0] * 7
+
+        ctrl = IKController(articulation=None, spec=_FakeSpec(), config=IKConfig())
+        self.assertTrue(hasattr(ctrl, "get_tcp_position"))
+        self.assertIsNone(ctrl.get_tcp_position())
+
+        path = WeldingPath(start=(1.0, 0.0, 1.0), end=(1.0, 0.2, 1.0),
+                            travel_time_sec=2.0)
+        ctrl.start_path(path)
+        ctrl.update(0.1)
+
+        tcp = ctrl.get_tcp_position()
+        self.assertIsNotNone(tcp, "articulation=None이어도 commanded target으로 "
+                                    "fallback 되어야 한다")
+        self.assertEqual(len(tcp), 3)
+
 
 class TestWorkshopVisualizerImport(unittest.TestCase):
     """Level 2.1 필드가 추가된 WorkshopVizConfig 검증."""

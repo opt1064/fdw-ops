@@ -171,6 +171,149 @@ class IKController:
         self._blend_remaining: float = 0.0
         self._blend_total: float = 1.0
 
+        # 현재 추적 중인 TCP(엔드이펙터) 월드 위치 — spark emitter용.
+        self._last_tcp: Optional[Tuple[float, float, float]] = None
+
+    # ------------------------------------------------------------------
+    def get_tcp_position(self) -> Optional[Tuple[float, float, float]]:
+        """현재 추적 중인 TCP(엔드이펙터) 월드 위치 — spark emitter용.
+
+        가능하면 articulation의 실제 FK 결과(``_read_actual_tcp_from_articulation``)를
+        반영한 위치이며, FK를 읽을 수 없는 환경(테스트, USD 로드 실패)에서는
+        커맨드된 target 위치로 fallback 한다. RMPflowController의 동일 기능과
+        같은 전략 (Refs: 787c2a4 fix(rmpflow): override _last_tcp with actual FK).
+        """
+        return self._last_tcp
+
+    def _read_actual_tcp_from_articulation(self) -> Optional[Tuple[float, float, float]]:
+        """articulation의 end-effector 링크에서 실제 월드 좌표를 FK로 읽어 반환.
+
+        RMPflowController._read_actual_tcp_from_articulation과 동일한 전략
+        (best-effort, 예외를 위로 던지지 않음, 실패 시 None).
+        """
+        art = getattr(self, "articulation", None)
+        if art is None:
+            return None
+        ee_frame = getattr(self.spec, "end_effector_frame", None) if self.spec else None
+        if not ee_frame:
+            return None
+
+        try:
+            for method_name in ("get_link_world_pose",
+                                "get_world_pose_of_body",
+                                "get_body_world_pose"):
+                fn = getattr(art, method_name, None)
+                if callable(fn):
+                    try:
+                        result = fn(ee_frame)
+                    except TypeError:
+                        continue
+                    pos = self._extract_position_from_pose(result)
+                    if pos is not None:
+                        return pos
+        except Exception as e:
+            logger.debug("[IK] articulation link FK helper failed: %s", e)
+
+        try:
+            prim_path = self._resolve_end_effector_prim_path(art, ee_frame)
+            if prim_path:
+                pos = self._read_world_translation_from_prim_path(prim_path)
+                if pos is not None:
+                    return pos
+        except Exception as e:
+            logger.debug("[IK] USD xform FK read failed: %s", e)
+
+        return None
+
+    def _extract_position_from_pose(self, pose_result) -> Optional[Tuple[float, float, float]]:
+        """Isaac Sim FK helper 반환값에서 (x,y,z)만 안전하게 뽑아낸다."""
+        if pose_result is None:
+            return None
+        try:
+            candidate = pose_result
+            if isinstance(pose_result, (tuple, list)) and len(pose_result) >= 1:
+                candidate = pose_result[0]
+            x = float(candidate[0])
+            y = float(candidate[1])
+            z = float(candidate[2])
+            return (x, y, z)
+        except Exception:
+            return None
+
+    def _resolve_end_effector_prim_path(self, art, ee_frame: str) -> Optional[str]:
+        """articulation의 root prim_path + ee_frame 으로 ee prim path 추정."""
+        root = None
+        for attr in ("prim_path", "_prim_path"):
+            v = getattr(art, attr, None)
+            if isinstance(v, str) and v:
+                root = v
+                break
+        if root is None:
+            return None
+
+        simple = f"{root.rstrip('/')}/{ee_frame}"
+
+        stage = self._get_usd_stage(art)
+        if stage is None:
+            return simple
+
+        try:
+            from pxr import Sdf  # type: ignore
+            if stage.GetPrimAtPath(Sdf.Path(simple)).IsValid():
+                return simple
+        except Exception:
+            pass
+
+        try:
+            root_prim = stage.GetPrimAtPath(root)
+            if not root_prim.IsValid():
+                return simple
+            stack = [root_prim]
+            while stack:
+                p = stack.pop()
+                if p.GetName() == ee_frame:
+                    return str(p.GetPath())
+                stack.extend(p.GetChildren())
+        except Exception:
+            pass
+        return simple
+
+    def _get_usd_stage(self, art):
+        """articulation으로부터 USD stage 핸들 best-effort 추출."""
+        for attr in ("_stage", "stage"):
+            s = getattr(art, attr, None)
+            if s is not None:
+                return s
+        try:
+            import omni.usd  # type: ignore
+            ctx = omni.usd.get_context()
+            if ctx is not None:
+                return ctx.get_stage()
+        except Exception:
+            return None
+        return None
+
+    def _read_world_translation_from_prim_path(self, prim_path: str) -> Optional[Tuple[float, float, float]]:
+        """USD prim의 world translation을 XformCache로 읽음."""
+        try:
+            from pxr import UsdGeom  # type: ignore
+        except Exception:
+            return None
+        stage = self._get_usd_stage(self.articulation)
+        if stage is None:
+            return None
+        try:
+            prim = stage.GetPrimAtPath(prim_path)
+            if not prim or not prim.IsValid():
+                return None
+            xf_cache = UsdGeom.XformCache()
+            world = xf_cache.GetLocalToWorldTransform(prim)
+            t = world.ExtractTranslation()
+            return (float(t[0]), float(t[1]), float(t[2]))
+        except Exception as e:
+            logger.debug("[IK] XformCache read failed for %s: %s", prim_path, e)
+            return None
+
     # ------------------------------------------------------------------
     def _ensure_backend(self) -> None:
         if self._ik_backend is not None or self._ik_disabled:
@@ -221,6 +364,9 @@ class IKController:
         # 1) 경로 추적
         if self._active_path is not None:
             target_pos = self._active_path.update(dt)
+            # 우선 commanded target으로 fallback 값을 채워둔다 — FK가 실패해도
+            # spark emitter가 None TCP로 끊기지 않도록 (RMPflowController와 동일 전략).
+            self._last_tcp = target_pos
             if not self._active_path.is_active():
                 self._active_path = None
                 # 경로 끝났으면 home으로
@@ -228,6 +374,11 @@ class IKController:
             else:
                 # path 갱신: IK 시도 (fallback이면 보간만 진행)
                 self._track_target(target_pos)
+                # joint를 갱신한 뒤 end-effector의 실제 월드 좌표를 FK로 읽어
+                # _last_tcp를 덮어쓴다.
+                actual = self._read_actual_tcp_from_articulation()
+                if actual is not None:
+                    self._last_tcp = actual
 
         # 2) joint 보간 (path가 없을 때도 home blend 진행)
         if self._blend_remaining > 0.0 and self._target_q is not None:
