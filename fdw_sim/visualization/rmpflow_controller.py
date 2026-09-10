@@ -25,6 +25,32 @@ import math
 
 logger = logging.getLogger(__name__)
 
+_MOTION_GEN_EXTENSION = "isaacsim.robot_motion.motion_generation"
+_motion_gen_extension_checked = False
+
+
+def _ensure_motion_generation_extension() -> None:
+    """isaacsim.robot_motion.motion_generation은 pip 패키지가 아니라 Kit
+    extension이라 실행 중인 Kit 앱에 enable 되어 있어야 import 가능하다.
+
+    AppLauncher 우회를 위해 쓰는 IsaacLab의 headless experience 파일
+    (isaaclab.python.headless.kit)에는 이 extension이 기본 활성화 목록에
+    없어서, import가 항상 ModuleNotFoundError로 실패하고 heuristic으로
+    fallback 하는 원인이었다 (Thor 실측 확인). 여기서 명시적으로 켠다.
+    """
+    global _motion_gen_extension_checked
+    if _motion_gen_extension_checked:
+        return
+    _motion_gen_extension_checked = True
+    try:
+        from isaacsim.core.utils.extensions import enable_extension  # type: ignore
+        enable_extension(_MOTION_GEN_EXTENSION)
+        logger.info("[RMP] enabled Kit extension: %s", _MOTION_GEN_EXTENSION)
+    except Exception as e:
+        logger.info("[RMP] could not enable_extension(%s): %s: %s "
+                    "(will still try plain import)",
+                    _MOTION_GEN_EXTENSION, type(e).__name__, e)
+
 
 # =============================================================================
 # 데이터 모델
@@ -468,6 +494,7 @@ class RMPflowController:
         즉 import 자체가 실패했을 가능성이 유력하나 그동안 그 에러가
         보이지 않았다).
         """
+        _ensure_motion_generation_extension()
         try:
             from isaacsim.robot_motion.motion_generation import (  # type: ignore # noqa: F401
                 RmpFlow,
@@ -506,6 +533,7 @@ class RMPflowController:
             return None
 
     def _try_init_ik(self) -> Optional[_MotionBackendBase]:
+        _ensure_motion_generation_extension()
         try:
             from isaacsim.robot_motion.motion_generation.lula import (  # type: ignore # noqa: F401
                 LulaKinematicsSolver,
