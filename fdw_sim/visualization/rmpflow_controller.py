@@ -458,12 +458,24 @@ class RMPflowController:
                     "(no Isaac motion-policy deps; uses collision-sphere repulsion)")
 
     def _try_init_rmpflow(self) -> Optional[_MotionBackendBase]:
-        """isaacsim.robot_motion.motion_generation.RmpFlow 시도."""
+        """isaacsim.robot_motion.motion_generation.RmpFlow 시도.
+
+        모든 실패 경로가 로그를 남긴다 — 이전 버전은 import 실패를 조용히
+        삼켜서 (bare `except: return None`, 로그 없음), config/urdf 탐색
+        경로를 다 고쳤는데도 heuristic으로 떨어지는 원인을 알 수 없었다
+        (Thor 실측: rmp/urdf/robot_description 3개 다 정상 탐색됐을 가능성이
+        높은데도 "not found"도 "init failed"도 안 찍히고 heuristic으로 감 —
+        즉 import 자체가 실패했을 가능성이 유력하나 그동안 그 에러가
+        보이지 않았다).
+        """
         try:
             from isaacsim.robot_motion.motion_generation import (  # type: ignore # noqa: F401
                 RmpFlow,
             )
-        except Exception:
+        except Exception as e:
+            logger.info("[RMP] isaacsim.robot_motion.motion_generation import "
+                        "failed (rmpflow unavailable): %s: %s",
+                        type(e).__name__, e)
             return None
         # config 경로 자동 탐색
         import os
@@ -476,6 +488,9 @@ class RMPflowController:
                         "(rmp=%s, urdf=%s, robot_description=%s)",
                         rmp_yaml, urdf, robot_description)
             return None
+        logger.info("[RMP] rmpflow config located (rmp=%s, urdf=%s, "
+                    "robot_description=%s) — constructing backend",
+                    rmp_yaml, urdf, robot_description)
         try:
             return _RmpFlowBackend(
                 rmp_config_path=rmp_yaml,
@@ -486,7 +501,8 @@ class RMPflowController:
                 config=self.config,
             )
         except Exception as e:
-            logger.warning("[RMP] rmpflow init failed: %s", e)
+            logger.warning("[RMP] rmpflow init failed: %s: %s",
+                           type(e).__name__, e)
             return None
 
     def _try_init_ik(self) -> Optional[_MotionBackendBase]:
@@ -494,11 +510,15 @@ class RMPflowController:
             from isaacsim.robot_motion.motion_generation.lula import (  # type: ignore # noqa: F401
                 LulaKinematicsSolver,
             )
-        except Exception:
+        except Exception as e:
+            logger.info("[RMP] Lula IK import failed (ik backend unavailable): "
+                        "%s: %s", type(e).__name__, e)
             return None
         urdf = self._locate_urdf()
         rd = self._locate_robot_description()
         if not urdf or not rd:
+            logger.info("[RMP] ik urdf/robot_description not found "
+                        "(urdf=%s, robot_description=%s)", urdf, rd)
             return None
         try:
             return _LulaIKBackend(
@@ -508,7 +528,7 @@ class RMPflowController:
                 config=self.config,
             )
         except Exception as e:
-            logger.debug("[RMP] ik init failed: %s", e)
+            logger.info("[RMP] ik init failed: %s: %s", type(e).__name__, e)
             return None
 
     def _locate_bundled_motion_policy_dir(self) -> Optional[str]:
