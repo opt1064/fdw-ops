@@ -96,6 +96,9 @@ def main() -> int:
                    help="시뮬레이션을 실시간 속도로 재생")
     p.add_argument("--anim-duration", type=float, default=2.5,
                    help="셀 간 부품 이동 애니메이션 길이(초)")
+    p.add_argument("--keep-alive", action="store_true",
+                   help="모든 job 완료 후 자동 종료하지 않고 창을 계속 띄워둠 "
+                        "(창을 직접 닫거나 터미널에서 Ctrl+C 할 때까지 유지)")
 
     # Level 2.1 플래그 (재사용)
     p.add_argument("--real-robot", action="store_true",
@@ -315,6 +318,10 @@ def main() -> int:
         print("[INFO] 3 jobs 투입 — RMPflow 모션 + 스파크 파티클 시각화 시작\n")
         sim.run_until_done(all_jobs_done=True, extra_idle_sec=3.0)
         print_report(sim)
+        if args.keep_alive:
+            print("[INFO] --keep-alive: 창을 닫거나 터미널에서 Ctrl+C 할 때까지 "
+                  "종료하지 않습니다.\n")
+            sim.keep_viewer_alive()
     finally:
         sim.stop()
 

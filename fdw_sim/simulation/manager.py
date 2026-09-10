@@ -827,6 +827,29 @@ class SimulationManager:
         logger.info("[SIM] run finished (sim_time=%.1fs, completed_jobs=%d)",
                     self._sim_time, len(self.orchestrator.completed_jobs))
 
+    def keep_viewer_alive(self) -> None:
+        """모든 job이 끝난 뒤에도 창을 자동으로 닫지 않고 렌더 루프만 계속 돈다.
+
+        run_until_done() 뒤에 호출하면, 사용자가 Isaac Sim 창을 직접 닫거나
+        (GUI 창의 X 버튼 — SimulationApp.is_running()이 False가 됨) 터미널에서
+        Ctrl+C 할 때까지 물리/렌더 step만 계속 진행하고 종료하지 않는다.
+        job 스케줄링(orchestrator/cell step)은 더 이상 진행하지 않으므로 —
+        이미 끝난 작업을 다시 실행하지 않고, 화면을 그대로 유지하는 용도다.
+
+        discrete 모드이거나 SimulationApp이 없으면 즉시 리턴한다 (볼 창이 없음).
+        """
+        if self.config.mode != "isaac" or self._isaac_app is None:
+            return
+        logger.info("[SIM] keeping viewer alive — close the window or Ctrl+C to exit")
+        try:
+            while self._isaac_app.is_running():
+                if self._isaac_world is not None:
+                    self._isaac_world.step(render=not self.config.headless)
+                else:
+                    self._isaac_app.update()
+        except KeyboardInterrupt:
+            logger.info("[SIM] keep_viewer_alive interrupted by user (Ctrl+C)")
+
     def _all_cells_quiescent(self) -> bool:
         """모든 일반 셀이 IDLE 상태이고, MaterialCell의 transfer_queue/AMR이 비어있는지."""
         for cell in self.cells.values():

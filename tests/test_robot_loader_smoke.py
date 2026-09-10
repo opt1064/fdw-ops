@@ -222,6 +222,15 @@ class TestSimulationConfigLevel21(unittest.TestCase):
         # 모두 omni.kit.livestream.webrtc 미존재로 부팅 실패하는 것 확인됨).
         self.assertFalse(cfg.force_applauncher_for_livestream)
 
+    def test_keep_viewer_alive_noop_in_discrete_mode(self):
+        """keep_viewer_alive()는 discrete 모드(Isaac Sim 없음)에서 즉시
+        리턴해야 한다 — --keep-alive 옵션이 discrete 모드에서 무한 루프에
+        빠지지 않는지 확인."""
+        from fdw_sim.simulation.manager import SimulationManager, SimulationConfig
+
+        sim = SimulationManager(SimulationConfig(mode="discrete"))
+        sim.keep_viewer_alive()  # 즉시 리턴해야 함 (hang 하면 테스트가 타임아웃)
+
     def test_simulation_config_overrides(self):
         from fdw_sim.simulation.manager import SimulationConfig
 
