@@ -324,9 +324,7 @@ class _RmpFlowBackend(_MotionBackendBase):
         # 한 step 적용 — RMPflow는 articulation에 직접 명령을 쓰므로
         # joint position 리턴이 아니라 articulation 상태가 바뀜
         try:
-            action = self._articulation_policy.get_next_articulation_action(
-                step_size=1.0 / 60.0,
-            )
+            action = self._get_next_articulation_action(1.0 / 60.0)
             joint_positions = getattr(action, "joint_positions", None)
             if joint_positions is None:
                 return None
@@ -334,6 +332,15 @@ class _RmpFlowBackend(_MotionBackendBase):
         except Exception as e:
             logger.debug("[RMP] step failed: %s", e)
             return None
+
+    def _get_next_articulation_action(self, dt: float):
+        """isaacsim 버전에 따라 get_next_articulation_action()의 step 인자
+        이름/존재 여부가 다르다 (step_size / step / 무인자). positional로
+        먼저 시도하고 안 되면 무인자로 폴백한다."""
+        try:
+            return self._articulation_policy.get_next_articulation_action(dt)
+        except TypeError:
+            return self._articulation_policy.get_next_articulation_action()
 
 
 # =============================================================================
