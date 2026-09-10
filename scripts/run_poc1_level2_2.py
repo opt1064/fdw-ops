@@ -150,6 +150,12 @@ def main() -> int:
     p.add_argument("--no-real-inspection-cam", dest="use_real_inspection_cam",
                    action="store_false", default=True,
                    help="Inspection 셀 카메라를 USD 대신 placeholder로 그림")
+    p.add_argument("--no-factory-walls", dest="show_factory_walls",
+                   action="store_false", default=True,
+                   help="작업장을 감싸는 4면 벽을 그리지 않음")
+    p.add_argument("--no-ceiling-lights", dest="show_ceiling_lights",
+                   action="store_false", default=True,
+                   help="천장 조명 피팅을 그리지 않음")
 
     # RTX / Denoiser 안정성 옵션 (AGX Thor Blackwell GPU 호환)
     p.add_argument("--render-mode", choices=["RaytracedLighting", "PathTracing"],
@@ -231,6 +237,8 @@ def main() -> int:
     sim.config.use_real_forming_arm = args.use_real_forming_arm
     sim.config.forming_robot_name = args.forming_robot
     sim.config.use_real_inspection_cam = args.use_real_inspection_cam
+    sim.config.show_factory_walls = args.show_factory_walls
+    sim.config.show_ceiling_lights = args.show_ceiling_lights
 
     # RTX 안정성 옵션
     sim.config.render_mode = args.render_mode
@@ -273,6 +281,8 @@ def main() -> int:
     print(f" Real forming arm : {sim.config.use_real_forming_arm} "
           f"({sim.config.forming_robot_name})")
     print(f" Real inspect cam : {sim.config.use_real_inspection_cam}")
+    print(f" Factory walls    : {sim.config.show_factory_walls}")
+    print(f" Ceiling lights   : {sim.config.show_ceiling_lights}")
     print(f" Render mode      : {sim.config.render_mode}")
     print(f" NRD denoiser     : {'OFF (Blackwell-safe)' if sim.config.disable_nrd_denoiser else 'ON'}")
     print(f" RTX log spam     : {'suppressed' if sim.config.suppress_rtx_log_spam else 'visible'}")

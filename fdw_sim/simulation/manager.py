@@ -108,6 +108,10 @@ class SimulationConfig:
     use_real_forming_arm: bool = True         # forming 셀에 실 UR 로봇팔
     forming_robot_name: str = "ur10"          # robot_loader.ROBOT_CATALOG 키
 
+    # 환경/배경 디테일 — 순수 시각 요소(물리/충돌 없음)
+    show_factory_walls: bool = True           # 작업장을 감싸는 4면 벽
+    show_ceiling_lights: bool = True          # 셀 위 천장 조명 피팅
+
 
 # =============================================================================
 # Manager
@@ -694,6 +698,8 @@ class SimulationManager:
             smart_rack_asset_name=self.config.smart_rack_asset_name,
             use_real_forming_arm=self.config.use_real_forming_arm,
             forming_robot_name=self.config.forming_robot_name,
+            show_factory_walls=self.config.show_factory_walls,
+            show_ceiling_lights=self.config.show_ceiling_lights,
         )
         self.visualizer = WorkshopVisualizer(bus=self.bus, config=viz_cfg)
 

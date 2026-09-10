@@ -150,6 +150,19 @@ def test_scene_builder_has_new_usd_methods() -> None:
     print("[OK] SceneBuilder exposes all 5 Level 2.3 USD methods")
 
 
+def test_scene_builder_has_environment_methods() -> None:
+    """SceneBuilder가 환경/배경 디테일 메서드(벽/천장 조명)를 노출해야 한다."""
+    from fdw_sim.visualization.scene_builder import SceneBuilder
+
+    env_methods = ["add_factory_walls", "add_ceiling_lights"]
+    missing = [m for m in env_methods if not hasattr(SceneBuilder, m)]
+    assert not missing, f"SceneBuilder missing methods: {missing}"
+    for m in env_methods:
+        assert callable(getattr(SceneBuilder, m)), \
+            f"SceneBuilder.{m} is not callable"
+    print("[OK] SceneBuilder exposes factory-wall/ceiling-light methods")
+
+
 # -----------------------------------------------------------------------------
 # 4. WorkshopVizConfig — Level 2.3 필드
 # -----------------------------------------------------------------------------
@@ -181,6 +194,9 @@ def test_workshop_viz_config_has_level23_fields() -> None:
     assert cfg.show_smart_rack is True
     assert cfg.show_robot_arm is True
     assert cfg.show_camera is True
+    # 환경/배경 디테일 필드 — 기본값 True
+    assert cfg.show_factory_walls is True
+    assert cfg.show_ceiling_lights is True
     print("[OK] WorkshopVizConfig has all 7 Level 2.3 fields with defaults")
 
 
@@ -248,6 +264,7 @@ if __name__ == "__main__":
         test_find_local_asset_returns_none_when_missing,
         test_diagnose_catalog_returns_dict,
         test_scene_builder_has_new_usd_methods,
+        test_scene_builder_has_environment_methods,
         test_workshop_viz_config_has_level23_fields,
         test_workshop_viz_config_level23_overridable,
         test_workshop_visualizer_with_level23_options,

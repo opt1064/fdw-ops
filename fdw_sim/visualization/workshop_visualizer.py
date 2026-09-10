@@ -113,6 +113,10 @@ class WorkshopVizConfig:
     use_real_forming_arm: bool = True        # forming 셀에 실 UR 로봇팔
     forming_robot_name: str = "ur10"         # robot_loader.ROBOT_CATALOG 키
 
+    # 환경/배경 디테일 — 순수 시각 요소(물리/충돌 없음), 실패해도 씬 빌드는 계속됨
+    show_factory_walls: bool = True          # 작업장을 감싸는 4면 벽
+    show_ceiling_lights: bool = True         # 셀 위 천장 조명 피팅
+
 
 class WorkshopVisualizer:
     """추상 셀을 USD 스테이지에 매핑하고 step마다 부품 위치를 갱신.
@@ -326,6 +330,18 @@ class WorkshopVisualizer:
         """
         self.scene = SceneBuilder(self.scene_config)
         self.scene.add_ground_plane(size=30.0)
+
+        if self.config.show_factory_walls:
+            try:
+                self.scene.add_factory_walls()
+            except Exception:
+                logger.exception("[VIS] add_factory_walls failed — continuing without walls")
+
+        if self.config.show_ceiling_lights:
+            try:
+                self.scene.add_ceiling_lights()
+            except Exception:
+                logger.exception("[VIS] add_ceiling_lights failed — continuing without them")
 
         # 셀 배치
         for c in self._pending_cells:

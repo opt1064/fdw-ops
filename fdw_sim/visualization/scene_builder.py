@@ -84,6 +84,88 @@ class SceneBuilder:
         self._set_color(path, self.config.ground_color)
         return path
 
+    def add_factory_walls(self,
+                          bounds: Tuple[float, float, float, float] = (-6.0, 16.0, -8.0, 8.0),
+                          height: float = 4.5,
+                          thickness: float = 0.2,
+                          color: Tuple[float, float, float] = (0.55, 0.58, 0.62)) -> str:
+        """작업장을 감싸는 4면 벽 — 배경 디테일용 (충돌/물리 없이 시각 전용).
+
+        Args:
+            bounds: (x_min, x_max, y_min, y_max) — 벽으로 둘러쌀 바닥 영역.
+                기본값은 이 프로젝트의 셀 배치(material@x=0, welding@x=5,
+                inspection@x=10, AMR은 x≈-1.5)를 여유 있게 감싸도록 잡았다.
+            height: 벽 높이(m)
+            thickness: 벽 두께(m)
+        """
+        x_min, x_max, y_min, y_max = bounds
+        walls_root = f"{self.config.root_prim_path}/Environment/Walls"
+        self._UsdGeom.Xform.Define(self._stage, walls_root)
+
+        width_x = x_max - x_min
+        width_y = y_max - y_min
+        cx = (x_min + x_max) / 2.0
+        cy = (y_min + y_max) / 2.0
+        hz = height / 2.0
+
+        # (이름, 중심, half-extent) — North/South는 X축을 따라 긴 벽, East/West는 Y축
+        specs = [
+            ("North", (cx, y_max, hz), (width_x / 2.0 + thickness, thickness, hz)),
+            ("South", (cx, y_min, hz), (width_x / 2.0 + thickness, thickness, hz)),
+            ("East", (x_max, cy, hz), (thickness, width_y / 2.0 + thickness, hz)),
+            ("West", (x_min, cy, hz), (thickness, width_y / 2.0 + thickness, hz)),
+        ]
+        for name, center, half_extent in specs:
+            wall_path = f"{walls_root}/{name}"
+            wall = self._UsdGeom.Cube.Define(self._stage, wall_path)
+            wall.CreateSizeAttr(1.0)
+            self._set_scale(wall_path, half_extent)
+            self._set_translate(wall_path, center)
+            self._set_color(wall_path, color)
+
+        logger.info("[VIS] factory walls added (bounds=%s, height=%.1fm)",
+                    bounds, height)
+        return walls_root
+
+    def add_ceiling_lights(self,
+                           positions: Optional[list] = None,
+                           intensity: float = 8000.0) -> str:
+        """작업 구역 위에 사각 천장 조명(RectLight) + 피팅(박스)을 배치.
+
+        RectLight는 로컬 -Z 방향으로 발광하므로(USD 기본값), 회전 없이
+        그대로 두면 천장에서 바닥 쪽(world -Z)을 자연스럽게 비춘다.
+
+        Args:
+            positions: 조명을 둘 (x, y, z) 목록. None이면 셀 배치(x=0,5,10)
+                위쪽에 기본 3개를 놓는다.
+        """
+        if positions is None:
+            positions = [(0.0, 0.0, 4.0), (5.0, 0.0, 4.0), (10.0, 0.0, 4.0)]
+
+        lights_root = f"{self.config.root_prim_path}/Environment/CeilingLights"
+        self._UsdGeom.Xform.Define(self._stage, lights_root)
+
+        for i, pos in enumerate(positions):
+            # 조명 피팅(박스) — 발광체 자체는 안 보여도 시각적 앵커 역할
+            fixture_path = f"{lights_root}/Fixture_{i:02d}"
+            fixture = self._UsdGeom.Cube.Define(self._stage, fixture_path)
+            fixture.CreateSizeAttr(1.0)
+            self._set_scale(fixture_path, (0.6, 0.15, 0.05))
+            self._set_translate(fixture_path, pos)
+            self._set_color(fixture_path, (0.85, 0.85, 0.8))
+
+            # 실제 발광 — RectLight (피팅보다 살짝 아래, 천장 쪽에서 아래를 향해 발광)
+            light_path = f"{lights_root}/Fixture_{i:02d}_Light"
+            light = self._UsdLux.RectLight.Define(self._stage, light_path)
+            light.CreateWidthAttr(1.1)
+            light.CreateHeightAttr(0.25)
+            light.CreateIntensityAttr(intensity)
+            light.CreateColorAttr(self._Gf.Vec3f(1.0, 0.97, 0.9))
+            self._set_translate(light_path, (pos[0], pos[1], pos[2] - 0.06))
+
+        logger.info("[VIS] %d ceiling light fixtures added", len(positions))
+        return lights_root
+
     def _add_default_lighting(self) -> None:
         light_path = f"{self.config.root_prim_path}/Lighting/Distant"
         light = self._UsdLux.DistantLight.Define(self._stage, light_path)
