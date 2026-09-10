@@ -228,6 +228,7 @@ class _RmpFlowBackend(_MotionBackendBase):
     def __init__(self,
                  rmp_config_path: str,
                  urdf_path: str,
+                 robot_description_path: str,
                  end_effector_frame: str,
                  articulation,
                  config: RMPflowConfig) -> None:
@@ -237,8 +238,7 @@ class _RmpFlowBackend(_MotionBackendBase):
         )
         self._RmpFlow = RmpFlow
         self._policy = RmpFlow(
-            robot_description_path=rmp_config_path.replace(
-                "rmpflow_common", "robot_description"),
+            robot_description_path=robot_description_path,
             rmpflow_config_path=rmp_config_path,
             urdf_path=urdf_path,
             end_effector_frame_name=end_effector_frame,
@@ -469,14 +469,18 @@ class RMPflowController:
         import os
         rmp_yaml = self._locate_rmp_config()
         urdf = self._locate_urdf()
-        if not rmp_yaml or not urdf:
-            logger.info("[RMP] rmpflow config or urdf not found "
-                        "(rmp=%s, urdf=%s)", rmp_yaml, urdf)
+        robot_description = self._locate_robot_description(
+            hint_dir=os.path.dirname(rmp_yaml) if rmp_yaml else None)
+        if not rmp_yaml or not urdf or not robot_description:
+            logger.info("[RMP] rmpflow config/urdf/robot_description not found "
+                        "(rmp=%s, urdf=%s, robot_description=%s)",
+                        rmp_yaml, urdf, robot_description)
             return None
         try:
             return _RmpFlowBackend(
                 rmp_config_path=rmp_yaml,
                 urdf_path=urdf,
+                robot_description_path=robot_description,
                 end_effector_frame=self.spec.end_effector_frame,
                 articulation=self.articulation,
                 config=self.config,
@@ -507,6 +511,31 @@ class RMPflowController:
             logger.debug("[RMP] ik init failed: %s", e)
             return None
 
+    def _locate_bundled_motion_policy_dir(self) -> Optional[str]:
+        """isaacsim.robot_motion.motion_generation 확장이 함께 배포하는
+        motion_policy_configs 디렉토리를 찾는다 (Isaac Sim 5.1 pip wheel 설치 기준
+        — Thor 실측: .../site-packages/isaacsim/exts/isaacsim.robot_motion.
+        motion_generation/motion_policy_configs/franka/{lula_franka_gen.urdf,
+        rmpflow/franka_rmpflow_common.yaml, rmpflow/robot_descriptor.yaml}).
+
+        conda 환경/사용자 홈 경로를 하드코딩하지 않도록 `isaacsim` 패키지 자체의
+        설치 위치를 기준으로 상대 경로를 계산한다.
+        """
+        try:
+            import importlib.util
+            spec = importlib.util.find_spec("isaacsim")
+        except Exception:
+            return None
+        if spec is None or not spec.submodule_search_locations:
+            return None
+        import os
+        isaacsim_root = list(spec.submodule_search_locations)[0]
+        candidate = os.path.join(
+            isaacsim_root, "exts", "isaacsim.robot_motion.motion_generation",
+            "motion_policy_configs",
+        )
+        return candidate if os.path.isdir(candidate) else None
+
     def _locate_rmp_config(self) -> Optional[str]:
         import os
         # 환경변수 우선
@@ -524,6 +553,13 @@ class RMPflowController:
                 p = os.path.join(root, cand)
                 if os.path.isfile(p):
                     return p
+        # Isaac Sim이 자체 번들하는 예제 RMPflow 설정 (Thor 실측으로 확인된 경로)
+        bundled = self._locate_bundled_motion_policy_dir()
+        if bundled:
+            p = os.path.join(bundled, "franka", "rmpflow",
+                              "franka_rmpflow_common.yaml")
+            if os.path.isfile(p):
+                return p
         return None
 
     def _locate_urdf(self) -> Optional[str]:
@@ -539,13 +575,45 @@ class RMPflowController:
                 p = os.path.join(root, fname)
                 if os.path.isfile(p):
                     return p
+        # Isaac Sim이 자체 번들하는 Lula URDF (Thor 실측으로 확인된 경로)
+        bundled = self._locate_bundled_motion_policy_dir()
+        if bundled:
+            p = os.path.join(bundled, "franka", "lula_franka_gen.urdf")
+            if os.path.isfile(p):
+                return p
         return None
 
-    def _locate_robot_description(self) -> Optional[str]:
+    def _locate_robot_description(self, hint_dir: Optional[str] = None) -> Optional[str]:
+        """Lula robot description(kinematics 제약 정의) yaml을 찾는다.
+
+        NVIDIA 배포본마다 파일명이 다를 수 있다 (Thor 실측: `robot_descriptor.yaml`
+        — 예전 코드는 이걸 `franka_rmpflow_common.yaml`에서 문자열 치환으로
+        `franka_robot_description.yaml`을 추측했는데 실제 이름과 달라 항상
+        실패했었다). 여러 흔한 이름 후보를 hint_dir(보통 rmpflow yaml이 있는
+        디렉토리) 및 번들 경로에서 직접 찾는다.
+        """
         import os
         env = os.environ.get("FDW_FRANKA_ROBOT_DESCRIPTION")
         if env and os.path.isfile(env):
             return env
+
+        candidate_names = (
+            "robot_descriptor.yaml",
+            "robot_description.yaml",
+            "franka_robot_description.yaml",
+        )
+        search_dirs = []
+        if hint_dir:
+            search_dirs.append(hint_dir)
+        bundled = self._locate_bundled_motion_policy_dir()
+        if bundled:
+            search_dirs.append(os.path.join(bundled, "franka", "rmpflow"))
+
+        for d in search_dirs:
+            for name in candidate_names:
+                p = os.path.join(d, name)
+                if os.path.isfile(p):
+                    return p
         return None
 
     # ------------------------------------------------------------------
