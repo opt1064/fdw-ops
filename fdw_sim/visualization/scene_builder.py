@@ -860,17 +860,34 @@ class SceneBuilder:
     def add_part(self, part_id: str,
                  position: Tuple[float, float, float],
                  color: Tuple[float, float, float] = (0.2, 0.6, 1.0),
-                 size: float = 0.15) -> str:
-        """부품 — 작은 컬러 큐브."""
+                 size: float = 0.15,
+                 shape: str = "pipe") -> str:
+        """부품 — 기본은 파이프(원통) 모양 (part_type이 tubular_frame_* 인 것과
+        일치). shape="cube"로 예전 큐브 표현도 여전히 가능.
+
+        파이프는 로컬 Y축을 따라 눕혀서 만든다 — 용접 경로가 정확히 Y축을
+        따라 부품 위를 지나가도록 설계돼 있으므로(_start_welding_motion의
+        start=(bx, by-oy, ..), end=(bx, by+oy, ..)), 토치가 파이프의 길이
+        방향을 따라 이음매를 훑는 것처럼 자연스럽게 보인다.
+        """
         part_path = f"{self.config.root_prim_path}/Parts/{part_id}"
-        cube = self._UsdGeom.Cube.Define(self._stage, part_path)
-        cube.CreateSizeAttr(1.0)
-        self._set_scale(part_path, (size / 2, size / 2, size / 2))
+
+        if shape == "pipe":
+            cyl = self._UsdGeom.Cylinder.Define(self._stage, part_path)
+            cyl.CreateAxisAttr("Y")
+            cyl.CreateRadiusAttr(size * 0.35)
+            cyl.CreateHeightAttr(size * 3.5)
+        else:
+            cube = self._UsdGeom.Cube.Define(self._stage, part_path)
+            cube.CreateSizeAttr(1.0)
+            self._set_scale(part_path, (size / 2, size / 2, size / 2))
+
         self._set_translate(part_path, position)
         self._set_color(part_path, color)
 
         self._part_prims[part_id] = part_path
-        logger.info("[VIS] part %s spawned @ %s", part_id, position)
+        logger.info("[VIS] part %s spawned @ %s (shape=%s)",
+                    part_id, position, shape)
         return part_path
 
     def move_part(self, part_id: str, target: Tuple[float, float, float]) -> None:
