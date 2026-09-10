@@ -316,6 +316,26 @@ download_amr() {
         download_subpath "$s" || true
     done
 
+    # Nova Carter 텍스처 — 메쉬/머티리얼은 붙었지만 PNG가 없어 무광 기본색으로만
+    # 보이던 문제 (2026-09 Thor 실측 runtime warning 기준):
+    #   Could not open asset '@./Textures/logo_NVIDIA/nvlogo_white.png@' ...
+    #   Could not open asset '@./Textures/backtire_m/backtire_m_normal.png@' ...
+    # 이 상대경로는 Materials/Materials.usd 기준이므로 Materials/Textures/...
+    # 가 정확한 subpath일 것으로 추정 (NVIDIA Isaac 자산의 흔한 레이아웃).
+    # inspect_usd_refs.py는 @...@ composition arc만 찾고 셰이더 asset 입력
+    # 파라미터(inputs:diffuse_texture 등)는 못 잡아서 이 파일들은 정적 스캔
+    # 으로 안 나온다 — best-effort로 직접 시도, 없으면 404로 조용히 스킵됨.
+    local nc_textures=(
+        "Isaac/Robots/NVIDIA/NovaCarter/Materials/Textures/logo_NVIDIA/nvlogo_white.png"
+        "Isaac/Robots/NVIDIA/NovaCarter/Materials/Textures/logo_NVIDIA/nvlogo_opacity.png"
+        "Isaac/Robots/NVIDIA/NovaCarter/Materials/Textures/backtire_m/backtire_m_basecolor.png"
+        "Isaac/Robots/NVIDIA/NovaCarter/Materials/Textures/backtire_m/backtire_m_normal.png"
+        "Isaac/Robots/NVIDIA/NovaCarter/Materials/Textures/backtire_m/backtire_m_roughness.png"
+    )
+    for t in "${nc_textures[@]}"; do
+        download_subpath "$t" || true
+    done
+
     # NVIDIA Jetbot — 컴팩트 2륜 AMR (대부분 self-contained)
     download_subpath "Isaac/Robots/NVIDIA/Jetbot/jetbot.usd" || true
     download_subpath "Isaac/Robots/NVIDIA/Jetbot/Props/jetbot_base.usd" || true
@@ -342,6 +362,17 @@ download_props() {
     download_subpath "Isaac/Props/KLT_Bin/big_KLT_visual_collision.usd" || true
     download_subpath "Isaac/Props/KLT_Bin/big_KLT_visual.usd" || true
     download_subpath "Isaac/Props/KLT_Bin/Materials/Materials.usd" || true
+    # KLT bin 라벨/메쉬 텍스처 — 2026-09 Thor 실측 runtime warning 기준
+    # ('Materials/Textures/FOF_Map_Labels_D.png' 등, KLT_Bin 루트 기준 상대경로,
+    # NovaCarter와 달리 "./" 접두어 없음). best-effort, 없으면 404로 스킵.
+    local klt_textures=(
+        "Isaac/Props/KLT_Bin/Materials/Textures/FOF_Map_Labels_D.png"
+        "Isaac/Props/KLT_Bin/Materials/Textures/FOF_Map_Magenta_Box_D.png"
+        "Isaac/Props/KLT_Bin/Materials/Textures/FOF_Mesh_Labels_D.png"
+    )
+    for t in "${klt_textures[@]}"; do
+        download_subpath "$t" || true
+    done
 
     download_subpath "Isaac/Props/Cardboard_Box/cardboard_box.usd" || true
     # 산업용 카메라 (inspection 셀 대체용 — 기본은 자체 UsdGeom.Camera 사용)
