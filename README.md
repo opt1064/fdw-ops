@@ -1,6 +1,14 @@
 # FDW-OPS Virtual Workshop
 
-> **Isaac Sim 기반 분산지능 셀 시뮬레이터** for AGX Thor / JetPack 7
+> **Isaac Sim 기반 분산지능 셀 시뮬레이터** — AGX Thor / JetPack 7에서 개발·검증 중,
+> Level 2.2 이상은 DGX Spark로 이전을 검토 중
+>
+> AGX Thor는 RT 코어가 없어 Isaac Sim 렌더링이 공식 지원 플랫폼은 아니지만,
+> `--safe-mode` + RDP 원격 데스크톱 조합으로 GUI·실로봇팔·RMPflow까지 실제
+> 동작을 확인했습니다. 다만 비공식 경로라 계속 우회 설정에 의존해야 해서,
+> 렌더링 부하가 큰 다음 단계는 [DGX Spark](docs/DGX_SPARK_SETUP.md)(RT 코어 탑재,
+> Isaac Sim 5.1 공식 지원)로 옮기는 것을 권장합니다. Thor는 실시간 제어/HIL 노드로
+> 계속 활용합니다.
 
 NVIDIA Isaac Sim 5.x 위에서 동작하는 FDW(Flexible Distributed Workshop) 운영 검증 플랫폼입니다.
 공정별 분산지능 셀(소재·이송 / 용접 / 소성가공 / 적층 / 정밀가공 / 검사)을
@@ -100,6 +108,9 @@ ACCEPT_EULA=Y PRIVACY_CONSENT=Y python scripts/run_poc1.py --mode isaac --headle
 ```
 
 > 첫 실행 시 셰이더 컴파일 등으로 1~5분 소요될 수 있습니다.
+>
+> DGX Spark에서 실행하려면 [docs/DGX_SPARK_SETUP.md](docs/DGX_SPARK_SETUP.md) 참고
+> (설치 경로/원격 접속 방식이 Thor와 다릅니다 — 코드/CLI 플래그는 동일).
 
 ### 3. Isaac Sim Level 2 — USD 시각화 (셀·로봇팔·AMR·부품)
 
@@ -187,6 +198,11 @@ PoC-1에서 자동 수집되는 지표:
 * `fault_recovery_time`
 
 ## AGX Thor 권장 부하 한계 (초기 PoC)
+
+RT 코어가 없는 하드웨어 기준 보수적 수치입니다. DGX Spark(RT 코어 탑재)로
+옮기면 이보다 여유가 있을 것으로 예상되며, 초기 권장치는
+[docs/DGX_SPARK_SETUP.md](docs/DGX_SPARK_SETUP.md)의 부하 관리 섹션을 참고하세요
+(실측 벤치마크 전까지는 두 문서 모두 추정치입니다).
 
 | 항목 | 권장 한계 |
 |---|---|
