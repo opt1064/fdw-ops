@@ -57,42 +57,63 @@ git checkout claude/awesome-tesla-vbtpvo   # 현재 활발히 개발 중인 브�
 
 ## 3. Isaac Sim 설치
 
-DGX Spark(aarch64)는 x86_64와 달리 **pip 바이너리 설치가 아직 불안정할 수 있어**,
-소스 빌드가 표준 경로로 권장됩니다. 먼저 pip를 시도해보고, 안 되면 소스 빌드로 전환하세요.
+**실측 결론(2026-09): pip 설치는 쓰지 마세요 — 소스 빌드가 사실상 필수입니다.**
 
-### 3a. pip 설치 시도 (먼저 시도)
+처음엔 이 문서도 "pip 먼저 시도"를 권했지만, 실제로 DGX Spark(Python 3.12,
+`pip install "isaacsim[all]==6.1.0" --extra-index-url https://pypi.nvidia.com`)로
+설치해보니 패키지 자체는 다 받아지고 `SimulationApp()`도 호출까지는 되는데,
+Kit 확장 의존성 해석 단계에서 항상 다음 에러로 죽었습니다:
 
-```bash
-pip install "isaacsim[all]==5.1.0" --extra-index-url https://pypi.nvidia.com
+```
+Failed to resolve extension dependencies. Failure hints:
+  * No versions of isaacsim.anim.robot.schema that satisfies:
+    isaacsim.exp.base-6.1.0 depends on isaacsim.anim.robot.schema version *
+    - Available packages for isaacsim.anim.robot.schema version *:
+      (none found)
 ```
 
-### 3b. 소스 빌드 (pip 실패 시)
+`isaacsim.exp.base.kit`/`isaacsim.exp.base.python.kit`(기본 experience 파일)이
+둘 다 이 extension에 의존하는데, aarch64용 확장 레지스트리에 이 패키지가
+아예 없습니다(재시도해도 동일 — 네트워크 문제 아님). 동일 유형의 DGX Spark
+이슈가 [isaac-sim/IsaacSim#732](https://github.com/isaac-sim/IsaacSim/issues/732)에도
+보고돼 있음 — pip wheel의 aarch64 배포판이 아직 불완전한 것으로 보입니다.
+[NVIDIA 공식 DGX Spark 플레이북](https://github.com/NVIDIA/dgx-spark-playbooks/blob/main/nvidia/isaac/README.md)도
+pip가 아니라 소스 빌드를 표준 경로로 안내합니다. 아래를 바로 따라하세요.
 
 ```bash
-git clone https://github.com/isaac-sim/IsaacSim.git ~/IsaacSim
-cd ~/IsaacSim
-./build.sh   # linux-aarch64용, 10~15분 소요
+cd ~/isaac_workspace   # 또는 원하는 위치, 50GB 이상 여유 공간 필요
+git clone --depth=1 --recursive https://github.com/isaac-sim/IsaacSim
+cd IsaacSim
+git lfs install
+git lfs pull
 
-export ISAACSIM_PATH="$HOME/IsaacSim/_build/linux-aarch64/release"
+# 빌드 (약 30분 소요). "BUILD (RELEASE) SUCCEEDED" 메시지가 뜨면 성공
+./build.sh
+
+export ISAACSIM_PATH="${PWD}/_build/linux-aarch64/release"
 export ISAACSIM_PYTHON_EXE="${ISAACSIM_PATH}/python.sh"
 echo 'export ISAACSIM_PATH="'"$ISAACSIM_PATH"'"' >> ~/.bashrc
 echo 'export ISAACSIM_PYTHON_EXE="'"$ISAACSIM_PYTHON_EXE"'"' >> ~/.bashrc
 
-# CUDA 13용 PyTorch (aarch64 공식 wheel)
-pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu130
-
-# 일부 aarch64 환경은 libgomp preload 필요
+# 일부 aarch64 환경은 libgomp preload 필요 (10.3 참고)
 export LD_PRELOAD="$LD_PRELOAD:/lib/aarch64-linux-gnu/libgomp.so.1"
 "${ISAACSIM_PATH}/isaac-sim.sh"   # 뷰어 창이 뜨면 성공
 ```
 
+소스 빌드는 자체 Python(`python.sh`)을 갖고 있어서, 이 프로젝트 스크립트도
+그 아래 4번부터는 `python` 대신 **`$ISAACSIM_PYTHON_EXE`**로 실행해야 합니다
+(일반 venv의 `python`에는 Isaac Sim 모듈이 없습니다).
+
 ## 4. 프로젝트 의존성 설치
 
 ```bash
-pip install -r requirements.txt    # PyYAML, numpy
+"$ISAACSIM_PYTHON_EXE" -m pip install -r requirements.txt    # PyYAML, numpy
 ```
 
 ## 5. Discrete 모드로 동작 확인 (Isaac Sim 미사용, 어디서든 가능)
+
+Discrete 모드는 Isaac Sim이 전혀 필요 없으므로 일반 `python`(시스템/venv 아무거나)
+으로 돌려도 됩니다:
 
 ```bash
 python scripts/run_poc1.py --mode discrete
@@ -100,10 +121,13 @@ python scripts/run_poc1.py --mode discrete
 
 ## 6. Level 2 실행 (USD 시각화 / 실로봇팔 IK / RMPflow)
 
+Isaac Sim을 쓰는 모드는 전부 `$ISAACSIM_PYTHON_EXE`로 실행하세요:
+
 ```bash
+export LD_PRELOAD="$LD_PRELOAD:/lib/aarch64-linux-gnu/libgomp.so.1"
 ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-    python scripts/run_poc1_level2_2.py --gui --real-robot --motion-mode auto \
-    --realtime --keep-alive
+    "$ISAACSIM_PYTHON_EXE" scripts/run_poc1_level2_2.py --gui --real-robot \
+    --motion-mode auto --realtime --keep-alive
 ```
 
 DGX Spark는 RT 코어가 있어 Thor용 `--safe-mode`(device-lost 크래시 회피)는
@@ -124,7 +148,7 @@ DGX Spark에서 지원되지 않습니다. 즉 이 프로젝트의 `--livestream
 
 **A. 로컬 모니터 직결 GUI** (가장 간단)
 ```bash
-python scripts/run_poc1_level2_2.py --gui --real-robot
+"$ISAACSIM_PYTHON_EXE" scripts/run_poc1_level2_2.py --gui --real-robot
 ```
 
 **B. RDP / 원격 데스크톱** (Thor에서 검증된 우회 경로)
@@ -171,11 +195,21 @@ DGX Spark(RT 코어 + 128GB 통합메모리)는 이보다 여유가 있을 것�
 ## 10. 자주 발생하는 문제
 
 ### 10.1 `ModuleNotFoundError: No module named 'omni.kit.usd'`
-→ Isaac Sim 메타패키지 누락. `pip install "isaacsim[all]==5.1.0" ...`로 보충
-(pip 설치 시). 소스 빌드라면 `ISAACSIM_PATH` 환경변수 설정을 확인하세요.
-(이 프로젝트는 이 에러를 겪을 경우 IsaacLab의 headless experience 파일을
-자동으로 찾아 대신 사용하도록 `SimulationManager._resolve_isaaclab_experience_file()`
-에서 이미 처리합니다 — Thor에서 이 방식으로 해결됨.)
+→ Isaac Sim 메타패키지 누락. 소스 빌드라면 `ISAACSIM_PATH`/`ISAACSIM_PYTHON_EXE`
+환경변수 설정을 확인하세요. (이 프로젝트는 이 에러를 겪을 경우 IsaacLab의
+headless experience 파일을 자동으로 찾아 대신 사용하도록
+`SimulationManager._resolve_isaaclab_experience_file()`에서 이미 처리합니다 —
+Thor에서 이 방식으로 해결됨. 단, isaaclab이 아예 설치 안 되어 있으면 이
+fallback도 못 찾으므로 결국 10.5 문제로 이어질 수 있습니다.)
+
+### 10.5 `Failed to resolve extension dependencies` / `isaacsim.anim.robot.schema` `(none found)`
+→ **pip로 설치한 `isaacsim[all]` wheel을 쓰고 있다는 뜻입니다 — 3번 항목대로
+소스 빌드로 전환하세요.** 실측(2026-09, isaacsim 6.1.0, Python 3.12)으로
+확인된 내용: pip wheel의 기본 experience 파일(`isaacsim.exp.base*.kit`)이
+요구하는 `isaacsim.anim.robot.schema` extension이 aarch64 확장 레지스트리에
+없어서, 재시도해도 항상 exit code 55로 죽습니다. 네트워크 문제가 아니라
+(같은 registry sync 로그가 매번 동일하게 502/379 패키지로 끝남) 이 wheel
+자체의 aarch64 배포 누락으로 보입니다 — 소스 빌드본에는 이 문제가 없습니다.
 
 ### 10.2 `pip install` 시 `externally-managed-environment` 에러
 → 시스템 Python(PEP 668 보호) 대신 conda/venv 환경 안에서 `pip` 사용
