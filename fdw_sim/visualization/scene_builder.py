@@ -23,6 +23,34 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# ============================================================================
+# FDW 유연생산 작업장 배치도 - 1안 좌표계
+# ----------------------------------------------------------------------------
+# 도면 기준(원점 = 건물 좌하단, 단위 m): 전체 36.1 x 12.4.
+# name: (x0, y0, w, d, color, label) — x0,y0은 구역 좌하단, w/d는 폭/깊이.
+# ============================================================================
+WORKSHOP_BOUNDS: Tuple[float, float, float, float] = (0.0, 36.1, 0.0, 12.4)
+
+WORKSHOP_ZONES: Dict[str, Tuple[float, float, float, float,
+                                 Tuple[float, float, float], str]] = {
+    # 6세부 소재관리 존 — 좌측 전체 (서버실/AMR충전 포함하는 큰 사각형이므로
+    # 겹치는 하위 구역보다 z를 낮게 그린다, z-fighting 방지)
+    "material_mgmt":  (0.0, 0.0, 20.6, 12.4, (0.55, 0.62, 0.70), "6-material-mgmt"),
+    "server_room":    (0.0, 9.4, 3.3, 3.0, (0.35, 0.45, 0.60), "1-server-room"),
+    "amr_charge":     (3.3, 9.4, 7.6, 3.0, (0.45, 0.65, 0.50), "amr-charge"),
+    "amr_aisle":      (20.6, 0.0, 3.0, 12.4, (0.85, 0.85, 0.80), "amr-main-aisle"),
+    "welding_cell":   (23.6, 9.1, 3.0, 3.3, (0.80, 0.45, 0.30), "2-welding"),
+    "additive_cell":  (28.6, 9.9, 2.5, 2.5, (0.35, 0.60, 0.55), "4-additive"),
+    "machining_cell": (33.1, 8.4, 3.0, 4.0, (0.50, 0.50, 0.60), "5-machining"),
+    "forming_cell":   (25.1, 0.0, 11.0, 4.5, (0.75, 0.65, 0.35), "3-forming"),
+}
+# material_mgmt 위에 얹히는 하위 구역들 — 같은 z에 그리면 깜빡임(z-fighting).
+_WORKSHOP_ZONE_NESTED = {"server_room", "amr_charge"}
+
+# 3세부 소성가공 셀 안전펜스 반입구 폭(도면 명기)
+FORMING_GATE_WIDTH_M = 3.8
+FORMING_FENCE_HEIGHT_M = 1.47
+
 
 @dataclass
 class SceneConfig:
@@ -74,18 +102,28 @@ class SceneBuilder:
     # ========================================================================
     # 환경
     # ========================================================================
-    def add_ground_plane(self, size: float = 50.0) -> str:
-        """간단한 그라운드 플레인 (Isaac Lab의 기본 ground와는 별개)."""
+    def add_ground_plane(self, size: float = 50.0,
+                         center: Tuple[float, float, float] = (0.0, 0.0, 0.0)) -> str:
+        """간단한 그라운드 플레인 (Isaac Lab의 기본 ground와는 별개).
+
+        Args:
+            center: 플레인 중심 world 좌표. 기본은 원점이지만, 셀 배치가
+                원점에서 먼 곳(예: 이 프로젝트의 WORKSHOP_BOUNDS처럼
+                x:[0,36.1])에 몰려 있으면 plane 절반이 빈 공간을 덮게
+                되므로 건물 중심으로 옮겨줘야 한다.
+        """
         path = f"{self.config.root_prim_path}/Ground"
         plane = self._UsdGeom.Plane.Define(self._stage, path)
         plane.CreateAxisAttr("Z")
         plane.CreateLengthAttr(size)
         plane.CreateWidthAttr(size)
+        if center != (0.0, 0.0, 0.0):
+            self._set_translate(path, center)
         self._set_color(path, self.config.ground_color)
         return path
 
     def add_factory_walls(self,
-                          bounds: Tuple[float, float, float, float] = (-6.0, 16.0, -8.0, 8.0),
+                          bounds: Tuple[float, float, float, float] = WORKSHOP_BOUNDS,
                           height: float = 4.5,
                           thickness: float = 0.2,
                           color: Tuple[float, float, float] = (0.55, 0.58, 0.62)) -> str:
@@ -136,11 +174,17 @@ class SceneBuilder:
         그대로 두면 천장에서 바닥 쪽(world -Z)을 자연스럽게 비춘다.
 
         Args:
-            positions: 조명을 둘 (x, y, z) 목록. None이면 셀 배치(x=0,5,10)
-                위쪽에 기본 3개를 놓는다.
+            positions: 조명을 둘 (x, y, z) 목록. None이면 작업장 배치도(1안)의
+                주요 구역 중심 위쪽에 기본 5개를 놓는다.
         """
         if positions is None:
-            positions = [(0.0, 0.0, 4.0), (5.0, 0.0, 4.0), (10.0, 0.0, 4.0)]
+            positions = [
+                (10.3, 6.2, 4.0),   # 6세부 소재관리 존
+                (25.1, 10.75, 4.0),  # 2세부 용접 셀
+                (29.85, 11.15, 4.0),  # 4세부 적층 셀
+                (34.6, 10.4, 4.0),   # 5세부 정밀가공 셀
+                (30.6, 2.25, 4.0),   # 3세부 소성가공 셀
+            ]
 
         lights_root = f"{self.config.root_prim_path}/Environment/CeilingLights"
         self._UsdGeom.Xform.Define(self._stage, lights_root)
@@ -165,6 +209,157 @@ class SceneBuilder:
 
         logger.info("[VIS] %d ceiling light fixtures added", len(positions))
         return lights_root
+
+    # ========================================================================
+    # FDW 유연생산 작업장 배치도 - 1안 전체 레이아웃
+    # ========================================================================
+    def add_zone_floor(self, name: str,
+                       x0: float, y0: float, w: float, d: float,
+                       color: Tuple[float, float, float],
+                       z: float = 0.011) -> str:
+        """구역 바닥 표시(색상 타일). z를 살짝 높여 겹치는 상위 구역과의
+        z-fighting을 피할 수 있다 (예: material_mgmt 위에 얹힌
+        server_room/amr_charge)."""
+        path = f"{self.config.root_prim_path}/Zones/{name}"
+        cube = self._UsdGeom.Cube.Define(self._stage, path)
+        cube.CreateSizeAttr(1.0)
+        self._set_scale(path, (w / 2.0, d / 2.0, 0.01))
+        self._set_translate(path, (x0 + w / 2.0, y0 + d / 2.0, z))
+        self._set_color(path, color)
+        return path
+
+    def add_safety_fence(self, root_name: str,
+                         x0: float, y0: float, w: float, d: float,
+                         gate_w: float = FORMING_GATE_WIDTH_M,
+                         height: float = FORMING_FENCE_HEIGHT_M,
+                         color: Tuple[float, float, float] = (0.95, 0.8, 0.1)
+                         ) -> str:
+        """구역 둘레를 감싸는 안전펜스 — 남쪽(y0) 벽 중앙에 폭 gate_w
+        반입구만 비운다 (3세부 소성가공 셀 도면 기준)."""
+        t = 0.05
+        h = height
+        fence_root = f"{self.config.root_prim_path}/Fences/{root_name}"
+        self._UsdGeom.Xform.Define(self._stage, fence_root)
+
+        half_gap = (w - gate_w) / 2.0
+        segments = [
+            ("N", (x0 + w / 2.0, y0 + d - t / 2.0, h / 2.0), (w / 2.0 + t, t, h / 2.0)),
+            ("W", (x0 + t / 2.0, y0 + d / 2.0, h / 2.0), (t, d / 2.0, h / 2.0)),
+            ("E", (x0 + w - t / 2.0, y0 + d / 2.0, h / 2.0), (t, d / 2.0, h / 2.0)),
+            ("S_L", (x0 + half_gap / 2.0, y0 + t / 2.0, h / 2.0), (half_gap / 2.0, t, h / 2.0)),
+            ("S_R", (x0 + w - half_gap / 2.0, y0 + t / 2.0, h / 2.0), (half_gap / 2.0, t, h / 2.0)),
+        ]
+        for seg_name, center, half_extent in segments:
+            if half_extent[0] <= 0 or half_extent[1] <= 0:
+                continue
+            seg_path = f"{fence_root}/{seg_name}"
+            seg = self._UsdGeom.Cube.Define(self._stage, seg_path)
+            seg.CreateSizeAttr(1.0)
+            self._set_scale(seg_path, half_extent)
+            self._set_translate(seg_path, center)
+            self._set_color(seg_path, color)
+
+        logger.info("[VIS] safety fence '%s' added (gate=%.1fm)", root_name, gate_w)
+        return fence_root
+
+    def add_unimplemented_cell_marker(self, zone_name: str,
+                                       x0: float, y0: float, w: float, d: float,
+                                       label: str,
+                                       color: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+                                       ) -> str:
+        """아직 셀 로직(DistributedIntelligenceCell)이 구현되지 않은 구역용
+        시각 placeholder — 반투명하지 않은 무채색 상자 + 경고색 테두리
+        스트립으로 "미구현" 임을 눈에 띄게 표시한다 (적층/정밀가공/소성가공)."""
+        root = f"{self.config.root_prim_path}/UnimplementedCells/{zone_name}"
+        self._UsdGeom.Xform.Define(self._stage, root)
+        cx, cy = x0 + w / 2.0, y0 + d / 2.0
+        h = 1.2
+
+        body_path = f"{root}/Placeholder"
+        body = self._UsdGeom.Cube.Define(self._stage, body_path)
+        body.CreateSizeAttr(1.0)
+        self._set_scale(body_path, (w * 0.35, d * 0.35, h / 2.0))
+        self._set_translate(body_path, (cx, cy, h / 2.0))
+        self._set_color(body_path, color)
+
+        # 경고색 스트라이프 상단 테두리 — "이 셀은 아직 시뮬레이션 로직 없음"
+        stripe_path = f"{root}/WarningStripe"
+        stripe = self._UsdGeom.Cube.Define(self._stage, stripe_path)
+        stripe.CreateSizeAttr(1.0)
+        self._set_scale(stripe_path, (w * 0.35, d * 0.35, 0.03))
+        self._set_translate(stripe_path, (cx, cy, h + 0.03))
+        self._set_color(stripe_path, (0.95, 0.75, 0.1))
+
+        logger.info("[VIS] unimplemented-cell placeholder '%s' (%s) @ (%.1f, %.1f)",
+                    zone_name, label, cx, cy)
+        return root
+
+    def add_workshop_layout(self) -> None:
+        """FDW 유연생산 작업장 배치도 - 1안을 그대로 반영한 정적 배경 요소
+        일괄 생성: 구역 바닥 색상 타일, 소재관리 존 보관 랙 + AMR 충전 도크,
+        서버실 가벽, 소성가공 셀 안전펜스, 그리고 아직 셀 로직이 없는
+        적층/정밀가공/소성가공 구역의 placeholder 마커.
+
+        실제 시뮬레이션 셀(material/welding/inspection)은 이 메서드가 그리지
+        않는다 — 그건 WorkshopVisualizer.build_scene()이 poc1.yaml의
+        cells.*.location 좌표로 add_cell_workbench()를 호출해서 그린다.
+        이 좌표들은 이 배치도의 material_mgmt/welding_cell 구역 중심과
+        일치하도록 poc1.yaml에서 맞춰뒀다.
+        """
+        for name, (x0, y0, w, d, color, _label) in WORKSHOP_ZONES.items():
+            z = 0.013 if name in _WORKSHOP_ZONE_NESTED else 0.011
+            self.add_zone_floor(name, x0, y0, w, d, color, z=z)
+
+        # 소재관리 존 — 보관 랙 3열
+        for i, (x0, y0, w, d, h) in enumerate([
+            (4.0, 3.0, 8.0, 1.0, 2.2),
+            (4.0, 5.0, 8.0, 1.0, 2.2),
+            (4.0, 7.0, 8.0, 1.0, 2.2),
+        ]):
+            rack_path = f"{self.config.root_prim_path}/Layout/MaterialRacks/rack_{i}"
+            rack = self._UsdGeom.Cube.Define(self._stage, rack_path)
+            rack.CreateSizeAttr(1.0)
+            self._set_scale(rack_path, (w / 2.0, d / 2.0, h / 2.0))
+            self._set_translate(rack_path, (x0 + w / 2.0, y0 + d / 2.0, h / 2.0))
+            self._set_color(rack_path, (0.25, 0.45, 0.65))
+
+        # AMR 충전 도크 표시 (충전소 구역 안, 바닥 마커)
+        for i, (x, y) in enumerate([(4.5, 10.9), (6.5, 10.9)]):
+            dock_path = f"{self.config.root_prim_path}/Layout/ChargeDocks/dock_{i}"
+            dock = self._UsdGeom.Cube.Define(self._stage, dock_path)
+            dock.CreateSizeAttr(1.0)
+            self._set_scale(dock_path, (0.6, 0.45, 0.025))
+            self._set_translate(dock_path, (x, y, 0.02))
+            self._set_color(dock_path, (0.3, 0.7, 0.3))
+
+        # 서버실 가벽 (동쪽 + 남쪽 — 복도 쪽으로 열려 있는 나머지 2면은 건물 외벽이 대신함)
+        sx0, sy0, sw, sd, _c, _l = WORKSHOP_ZONES["server_room"]
+        t, h = 0.1, 3.0
+        wall_e = f"{self.config.root_prim_path}/Layout/ServerRoom/wall_e"
+        we = self._UsdGeom.Cube.Define(self._stage, wall_e)
+        we.CreateSizeAttr(1.0)
+        self._set_scale(wall_e, (t / 2.0, sd / 2.0, h / 2.0))
+        self._set_translate(wall_e, (sx0 + sw - t / 2.0, sy0 + sd / 2.0, h / 2.0))
+        self._set_color(wall_e, (0.7, 0.7, 0.72))
+
+        wall_s = f"{self.config.root_prim_path}/Layout/ServerRoom/wall_s"
+        ws = self._UsdGeom.Cube.Define(self._stage, wall_s)
+        ws.CreateSizeAttr(1.0)
+        self._set_scale(wall_s, (sw / 2.0, t / 2.0, h / 2.0))
+        self._set_translate(wall_s, (sx0 + sw / 2.0, sy0 + t / 2.0, h / 2.0))
+        self._set_color(wall_s, (0.7, 0.7, 0.72))
+
+        # 3세부 소성가공 셀 — 안전펜스 (반입구 3.8m)
+        fx0, fy0, fw, fd, _c, _l = WORKSHOP_ZONES["forming_cell"]
+        self.add_safety_fence("forming_cell", fx0, fy0, fw, fd)
+
+        # 아직 셀 로직이 없는 구역 — 눈에 띄는 placeholder만 배치
+        for zone_name in ("additive_cell", "machining_cell", "forming_cell"):
+            zx0, zy0, zw, zd, _c, label = WORKSHOP_ZONES[zone_name]
+            self.add_unimplemented_cell_marker(zone_name, zx0, zy0, zw, zd, label)
+
+        logger.info("[VIS] FDW workshop layout (1안) applied — %d zones",
+                    len(WORKSHOP_ZONES))
 
     def _add_default_lighting(self) -> None:
         light_path = f"{self.config.root_prim_path}/Lighting/Distant"

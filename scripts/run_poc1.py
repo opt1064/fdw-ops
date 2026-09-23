@@ -65,12 +65,14 @@ def _builtin_defaults() -> Dict[str, Any]:
             },
         },
         "cells": {
-            "material": {"cell_id": "MATERIAL_CELL_01", "location": [0.0, 0.0],
+            # 좌표계: FDW 유연생산 작업장 배치도 - 1안 (fdw_sim/config/poc1.yaml 참고,
+            # 이 dict는 yaml 모듈이 없을 때만 쓰이는 fallback — 위치는 동기화해둘 것)
+            "material": {"cell_id": "MATERIAL_CELL_01", "location": [10.3, 6.2],
                          "num_amrs": 2, "input_capacity": 8, "output_capacity": 8},
-            "welding": {"cell_id": "WELDING_CELL_01", "location": [5.0, 0.0],
+            "welding": {"cell_id": "WELDING_CELL_01", "location": [25.1, 10.75],
                         "default_cycle_time": 18.0,
                         "input_capacity": 1, "output_capacity": 1},
-            "inspection": {"cell_id": "INSPECTION_CELL_01", "location": [10.0, 0.0],
+            "inspection": {"cell_id": "INSPECTION_CELL_01", "location": [34.6, 6.45],
                            "default_cycle_time": 6.0,
                            "input_capacity": 1, "output_capacity": 1},
         },

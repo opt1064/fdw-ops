@@ -163,6 +163,66 @@ def test_scene_builder_has_environment_methods() -> None:
     print("[OK] SceneBuilder exposes factory-wall/ceiling-light methods")
 
 
+def test_scene_builder_has_workshop_layout_methods() -> None:
+    """SceneBuilder가 FDW 배치도(1안) 관련 메서드를 노출해야 한다."""
+    from fdw_sim.visualization.scene_builder import SceneBuilder
+
+    layout_methods = ["add_zone_floor", "add_safety_fence",
+                       "add_unimplemented_cell_marker", "add_workshop_layout"]
+    missing = [m for m in layout_methods if not hasattr(SceneBuilder, m)]
+    assert not missing, f"SceneBuilder missing methods: {missing}"
+    for m in layout_methods:
+        assert callable(getattr(SceneBuilder, m)), \
+            f"SceneBuilder.{m} is not callable"
+    print("[OK] SceneBuilder exposes workshop-layout (1안) methods")
+
+
+def test_workshop_zones_are_sane() -> None:
+    """WORKSHOP_ZONES의 각 구역이 WORKSHOP_BOUNDS 안에 있고, 의도된
+    중첩(material_mgmt 위의 server_room/amr_charge) 외에는 겹치지 않아야
+    한다."""
+    from fdw_sim.visualization.scene_builder import (
+        WORKSHOP_BOUNDS, WORKSHOP_ZONES, FORMING_GATE_WIDTH_M,
+    )
+
+    x_min, x_max, y_min, y_max = WORKSHOP_BOUNDS
+    assert x_max > x_min and y_max > y_min
+
+    def _rect(name):
+        x0, y0, w, d, _color, _label = WORKSHOP_ZONES[name]
+        return x0, y0, x0 + w, y0 + d
+
+    for name, (x0, y0, w, d, color, label) in WORKSHOP_ZONES.items():
+        assert w > 0 and d > 0, f"zone {name} has non-positive extent"
+        assert x0 >= x_min - 1e-6 and x0 + w <= x_max + 1e-6, \
+            f"zone {name} exceeds building x bounds"
+        assert y0 >= y_min - 1e-6 and y0 + d <= y_max + 1e-6, \
+            f"zone {name} exceeds building y bounds"
+        assert len(color) == 3 and all(0.0 <= c <= 1.0 for c in color)
+
+    # forming_cell의 반입구는 셀 폭보다 작아야 안전펜스 게이트 계산이 유효하다
+    _fx0, _fy0, fw, _fd, _c, _l = WORKSHOP_ZONES["forming_cell"]
+    assert FORMING_GATE_WIDTH_M < fw
+
+    # 의도한 중첩(material_mgmt 안에 server_room/amr_charge) 외 다른 쌍은
+    # 겹치면 안 된다 — 아니면 바닥 타일이 z-fighting 난다.
+    def _overlaps(a, b):
+        ax0, ay0, ax1, ay1 = a
+        bx0, by0, bx1, by1 = b
+        return ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1
+
+    expected_nested = {frozenset({"material_mgmt", "server_room"}),
+                        frozenset({"material_mgmt", "amr_charge"})}
+    names = list(WORKSHOP_ZONES.keys())
+    for i, a_name in enumerate(names):
+        for b_name in names[i + 1:]:
+            if _overlaps(_rect(a_name), _rect(b_name)):
+                pair = frozenset({a_name, b_name})
+                assert pair in expected_nested, \
+                    f"unexpected overlap between zones {a_name} and {b_name}"
+    print("[OK] WORKSHOP_ZONES fit within bounds with only the expected nesting")
+
+
 # -----------------------------------------------------------------------------
 # 4. WorkshopVizConfig — Level 2.3 필드
 # -----------------------------------------------------------------------------
@@ -265,6 +325,8 @@ if __name__ == "__main__":
         test_diagnose_catalog_returns_dict,
         test_scene_builder_has_new_usd_methods,
         test_scene_builder_has_environment_methods,
+        test_scene_builder_has_workshop_layout_methods,
+        test_workshop_zones_are_sane,
         test_workshop_viz_config_has_level23_fields,
         test_workshop_viz_config_level23_overridable,
         test_workshop_visualizer_with_level23_options,

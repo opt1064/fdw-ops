@@ -111,6 +111,7 @@ class SimulationConfig:
     # 환경/배경 디테일 — 순수 시각 요소(물리/충돌 없음)
     show_factory_walls: bool = True           # 작업장을 감싸는 4면 벽
     show_ceiling_lights: bool = True          # 셀 위 천장 조명 피팅
+    show_workshop_layout: bool = True         # FDW 배치도(1안) 구역/랙/펜스/placeholder
 
 
 # =============================================================================
@@ -700,6 +701,7 @@ class SimulationManager:
             forming_robot_name=self.config.forming_robot_name,
             show_factory_walls=self.config.show_factory_walls,
             show_ceiling_lights=self.config.show_ceiling_lights,
+            show_workshop_layout=self.config.show_workshop_layout,
         )
         self.visualizer = WorkshopVisualizer(bus=self.bus, config=viz_cfg)
 

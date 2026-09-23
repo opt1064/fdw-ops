@@ -116,6 +116,7 @@ class WorkshopVizConfig:
     # 환경/배경 디테일 — 순수 시각 요소(물리/충돌 없음), 실패해도 씬 빌드는 계속됨
     show_factory_walls: bool = True          # 작업장을 감싸는 4면 벽
     show_ceiling_lights: bool = True         # 셀 위 천장 조명 피팅
+    show_workshop_layout: bool = True        # FDW 배치도(1안) 구역/랙/펜스/placeholder
 
 
 class WorkshopVisualizer:
@@ -329,7 +330,13 @@ class WorkshopVisualizer:
         반드시 SimulationApp 인스턴스화 이후에 호출되어야 한다.
         """
         self.scene = SceneBuilder(self.scene_config)
-        self.scene.add_ground_plane(size=30.0)
+        # WORKSHOP_BOUNDS(0~36.1, 0~12.4)는 원점에서 멀리 떨어져 있어
+        # 원점 중심 plane으로는 절반이 빈 공간을 덮게 된다 — 건물 중심으로 이동.
+        from fdw_sim.visualization.scene_builder import WORKSHOP_BOUNDS
+        x_min, x_max, y_min, y_max = WORKSHOP_BOUNDS
+        ground_center = ((x_min + x_max) / 2.0, (y_min + y_max) / 2.0, 0.0)
+        ground_size = max(x_max - x_min, y_max - y_min) + 8.0
+        self.scene.add_ground_plane(size=ground_size, center=ground_center)
 
         if self.config.show_factory_walls:
             try:
@@ -342,6 +349,12 @@ class WorkshopVisualizer:
                 self.scene.add_ceiling_lights()
             except Exception:
                 logger.exception("[VIS] add_ceiling_lights failed — continuing without them")
+
+        if self.config.show_workshop_layout:
+            try:
+                self.scene.add_workshop_layout()
+            except Exception:
+                logger.exception("[VIS] add_workshop_layout failed — continuing without it")
 
         # 셀 배치
         for c in self._pending_cells:

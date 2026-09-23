@@ -17,24 +17,30 @@ orchestrator:
     welding:    WELDING_CELL_01
     inspection: INSPECTION_CELL_01
 
+# 좌표계: FDW 유연생산 작업장 배치도 - 1안 (36.1m x 12.4m, 원점=건물 좌하단).
+# material/welding 위치는 각각 도면의 6세부 소재관리 존 / 2세부 용접 셀 중심과
+# 일치시켰다 (fdw_sim/visualization/scene_builder.py의 WORKSHOP_ZONES 참고).
+# 도면에는 검사(inspection) 전용 구역이 없어서 — 소성가공(y 0~4.5)과
+# 정밀가공(y 8.4~12.4) 사이 빈 공간(x 33.1~36.1, y 4.5~8.4)에 임시 배치했다.
+# 실제 도면이 검사 위치를 지정하면 이 location만 바꾸면 된다.
 cells:
   material:
     cell_id: MATERIAL_CELL_01
-    location: [0.0, 0.0]
+    location: [10.3, 6.2]   # 6세부 소재관리 존 중심
     num_amrs: 2
     input_capacity: 8
     output_capacity: 8
 
   welding:
     cell_id: WELDING_CELL_01
-    location: [5.0, 0.0]
+    location: [25.1, 10.75]   # 2세부 용접 셀 중심
     default_cycle_time: 18.0
     input_capacity: 1
     output_capacity: 1
 
   inspection:
     cell_id: INSPECTION_CELL_01
-    location: [10.0, 0.0]
+    location: [34.6, 6.45]   # 도면 미지정 — 소성가공/정밀가공 사이 여유 공간
     default_cycle_time: 6.0
     input_capacity: 1
     output_capacity: 1
