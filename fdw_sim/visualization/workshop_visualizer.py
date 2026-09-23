@@ -341,8 +341,9 @@ class WorkshopVisualizer:
         if self.config.show_factory_walls:
             try:
                 self.scene.add_factory_walls()
+                self.scene.add_roof()
             except Exception:
-                logger.exception("[VIS] add_factory_walls failed — continuing without walls")
+                logger.exception("[VIS] add_factory_walls/add_roof failed — continuing without them")
 
         if self.config.show_ceiling_lights:
             try:

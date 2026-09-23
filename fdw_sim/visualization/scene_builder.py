@@ -165,6 +165,28 @@ class SceneBuilder:
                     bounds, height)
         return walls_root
 
+    def add_roof(self,
+                bounds: Tuple[float, float, float, float] = WORKSHOP_BOUNDS,
+                height: float = 4.5,
+                color: Tuple[float, float, float] = (0.45, 0.47, 0.5)) -> str:
+        """벽 위에 얹는 평지붕 — 이게 없으면 천장 조명(add_ceiling_lights,
+        z=4.0)이 허공에 떠 있는 것처럼 보인다. 벽 두께만큼 살짝 걸치도록
+        bounds보다 약간 크게 그린다."""
+        x_min, x_max, y_min, y_max = bounds
+        roof_path = f"{self.config.root_prim_path}/Environment/Roof"
+        roof = self._UsdGeom.Cube.Define(self._stage, roof_path)
+        roof.CreateSizeAttr(1.0)
+        margin = 0.3
+        half_x = (x_max - x_min) / 2.0 + margin
+        half_y = (y_max - y_min) / 2.0 + margin
+        thickness = 0.15
+        self._set_scale(roof_path, (half_x, half_y, thickness / 2.0))
+        self._set_translate(roof_path, ((x_min + x_max) / 2.0, (y_min + y_max) / 2.0,
+                                          height + thickness / 2.0))
+        self._set_color(roof_path, color)
+        logger.info("[VIS] roof added @ z=%.2fm", height)
+        return roof_path
+
     def add_ceiling_lights(self,
                            positions: Optional[list] = None,
                            intensity: float = 8000.0) -> str:
@@ -324,12 +346,14 @@ class SceneBuilder:
             self._set_color(rack_path, (0.25, 0.45, 0.65))
 
         # AMR 충전 도크 표시 (충전소 구역 안, 바닥 마커)
+        # half-height=0.025이므로 바닥에 딱 붙으려면 중심 z도 0.025 —
+        # 이전에 0.02를 써서 바닥 아래로 0.005m 파묻혀 있었다.
         for i, (x, y) in enumerate([(4.5, 10.9), (6.5, 10.9)]):
             dock_path = f"{self.config.root_prim_path}/Layout/ChargeDocks/dock_{i}"
             dock = self._UsdGeom.Cube.Define(self._stage, dock_path)
             dock.CreateSizeAttr(1.0)
             self._set_scale(dock_path, (0.6, 0.45, 0.025))
-            self._set_translate(dock_path, (x, y, 0.02))
+            self._set_translate(dock_path, (x, y, 0.025))
             self._set_color(dock_path, (0.3, 0.7, 0.3))
 
         # 서버실 가벽 (동쪽 + 남쪽 — 복도 쪽으로 열려 있는 나머지 2면은 건물 외벽이 대신함)
