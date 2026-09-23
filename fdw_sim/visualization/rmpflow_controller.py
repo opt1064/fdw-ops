@@ -330,7 +330,7 @@ class _RmpFlowBackend(_MotionBackendBase):
                 return None
             return list(np.asarray(joint_positions).flatten())
         except Exception as e:
-            logger.debug("[RMP] step failed: %s", e)
+            logger.debug("[RMP] step failed: %s", e, exc_info=True)
             return None
 
     def _get_next_articulation_action(self, dt: float):
