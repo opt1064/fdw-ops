@@ -568,28 +568,63 @@ class RMPflowController:
 
     def _locate_bundled_motion_policy_dir(self) -> Optional[str]:
         """isaacsim.robot_motion.motion_generation 확장이 함께 배포하는
-        motion_policy_configs 디렉토리를 찾는다 (Isaac Sim 5.1 pip wheel 설치 기준
-        — Thor 실측: .../site-packages/isaacsim/exts/isaacsim.robot_motion.
-        motion_generation/motion_policy_configs/franka/{lula_franka_gen.urdf,
-        rmpflow/franka_rmpflow_common.yaml, rmpflow/robot_descriptor.yaml}).
+        motion_policy_configs 디렉토리를 찾는다.
 
-        conda 환경/사용자 홈 경로를 하드코딩하지 않도록 `isaacsim` 패키지 자체의
-        설치 위치를 기준으로 상대 경로를 계산한다.
+        설치 방식에 따라 위치가 완전히 다르다:
+          1) pip wheel (Thor 실측): .../site-packages/isaacsim/exts/
+             isaacsim.robot_motion.motion_generation/motion_policy_configs/
+          2) 소스 빌드 (DGX Spark 실측, 2026-09): _build/.../extsDeprecated/
+             isaacsim.robot_motion.motion_generation/motion_policy_configs/ 는
+             존재하지만 **비어 있고**(빌드 스테이징 시 데이터 파일이 안 복사됨),
+             실제 franka URDF/RMPflow yaml은 저장소 소스 트리의
+             source/deprecated/isaacsim.robot_motion.motion_generation/
+             motion_policy_configs/ 아래에 있다 — 이건 ISAACSIM_PATH
+             (.../<repo>/_build/linux-aarch64/release)에서 3단계 위가 repo root.
+
+        각 후보는 franka urdf 실존 여부까지 확인한다 — 디렉토리만 있고 비어
+        있는 케이스(위 2번의 extsDeprecated)를 "찾음"으로 잘못 판단하지 않기 위해.
         """
+        import os
+
+        def _has_franka_urdf(d: str) -> bool:
+            return os.path.isfile(os.path.join(d, "franka", "lula_franka_gen.urdf"))
+
+        candidates = []
+
         try:
             import importlib.util
             spec = importlib.util.find_spec("isaacsim")
         except Exception:
-            return None
-        if spec is None or not spec.submodule_search_locations:
-            return None
-        import os
-        isaacsim_root = list(spec.submodule_search_locations)[0]
-        candidate = os.path.join(
-            isaacsim_root, "exts", "isaacsim.robot_motion.motion_generation",
-            "motion_policy_configs",
-        )
-        return candidate if os.path.isdir(candidate) else None
+            spec = None
+        if spec is not None and spec.submodule_search_locations:
+            isaacsim_root = list(spec.submodule_search_locations)[0]
+            candidates.append(os.path.join(
+                isaacsim_root, "exts", "isaacsim.robot_motion.motion_generation",
+                "motion_policy_configs",
+            ))
+            candidates.append(os.path.join(
+                isaacsim_root, "extsDeprecated", "isaacsim.robot_motion.motion_generation",
+                "motion_policy_configs",
+            ))
+
+        isaacsim_path = os.environ.get("ISAACSIM_PATH")
+        if isaacsim_path:
+            # ISAACSIM_PATH = <repo>/_build/linux-aarch64/release
+            repo_root = os.path.abspath(
+                os.path.join(isaacsim_path, os.pardir, os.pardir, os.pardir))
+            candidates.append(os.path.join(
+                repo_root, "source", "deprecated",
+                "isaacsim.robot_motion.motion_generation", "motion_policy_configs",
+            ))
+            candidates.append(os.path.join(
+                isaacsim_path, "extsDeprecated", "isaacsim.robot_motion.motion_generation",
+                "motion_policy_configs",
+            ))
+
+        for candidate in candidates:
+            if os.path.isdir(candidate) and _has_franka_urdf(candidate):
+                return candidate
+        return None
 
     def _locate_rmp_config(self) -> Optional[str]:
         import os
