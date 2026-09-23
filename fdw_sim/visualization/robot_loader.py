@@ -400,11 +400,22 @@ class RobotLoader:
 
     # ------------------------------------------------------------------
     def _wrap_articulation(self, prim_path: str, robot_name: str) -> Optional[object]:
-        """Articulation 래퍼 객체 반환 (Isaac Sim 5.x 우선)."""
+        """Articulation 래퍼 객체 반환 (Isaac Sim 5.x 우선).
+
+        생성만으로는 부족하다 — Articulation/SingleArticulation은
+        world.scene에 등록해 world.reset()이 대신 초기화해주는 경로를 쓰지
+        않는 한(여기서는 안 씀) 반드시 initialize()를 직접 호출해야
+        PhysX 뷰가 연결되어 get_joint_positions() 등이 동작한다. 이걸
+        빼먹으면 RMPflow의 ArticulationMotionPolicy가 "Attempted to
+        compute an action, but the robot Articulation has not been
+        initialized" 에러를 내며 매 step마다 조용히 실패한다 (DGX Spark
+        실측: 'NoneType' object has no attribute 'astype').
+        """
         # Isaac Sim 5.x 경로
         try:
             from isaacsim.core.prims import SingleArticulation  # type: ignore
             art = SingleArticulation(prim_path=prim_path, name=robot_name)
+            self._initialize_articulation(art, robot_name)
             return art
         except Exception as e:
             logger.debug("[RobotLoader] SingleArticulation failed: %s", e)
@@ -413,6 +424,7 @@ class RobotLoader:
         try:
             from omni.isaac.core.articulations import Articulation  # type: ignore
             art = Articulation(prim_path=prim_path, name=robot_name)
+            self._initialize_articulation(art, robot_name)
             return art
         except Exception as e:
             logger.debug("[RobotLoader] Articulation (4.x) failed: %s", e)
@@ -420,6 +432,15 @@ class RobotLoader:
         logger.warning("[RobotLoader] no articulation API available; "
                        "robot %s loaded as visual-only", robot_name)
         return None
+
+    @staticmethod
+    def _initialize_articulation(art: object, robot_name: str) -> None:
+        try:
+            art.initialize()
+        except Exception as e:
+            logger.warning("[RobotLoader] %s articulation.initialize() failed "
+                           "(joint control may not work): %s: %s",
+                           robot_name, type(e).__name__, e)
 
     # ------------------------------------------------------------------
     def get_spec(self, prim_path: str) -> Optional[RobotSpec]:
