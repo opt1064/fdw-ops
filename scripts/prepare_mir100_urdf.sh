@@ -18,6 +18,11 @@
 #     bash scripts/prepare_mir100_urdf.sh
 #     DEST=/custom/path bash scripts/prepare_mir100_urdf.sh
 #
+#     # DGX Spark처럼 GitHub 아웃바운드가 막혀 있으면 zip을 미리 받아서:
+#     MIR_ROBOT_ZIP=~/Downloads/mir_robot-noetic.zip bash scripts/prepare_mir100_urdf.sh
+#     # 또는 이미 압축 해제된 디렉토리가 있으면:
+#     MIR_ROBOT_SRC=~/mir_robot bash scripts/prepare_mir100_urdf.sh
+#
 # 출력:
 #     $DEST/mir100.urdf         — 전개 완료된 최종 URDF (mesh 경로는 로컬 절대경로)
 #     $DEST/meshes/...          — mir100.urdf가 참조하는 STL 메시들
@@ -55,22 +60,57 @@ if ! command -v xacro >/dev/null 2>&1; then
 fi
 ok "xacro: $(command -v xacro)"
 
-if ! command -v git >/dev/null 2>&1; then
-    err "git이 필요합니다."
-    exit 1
-fi
+SRC_DIR="$DEST/mir_robot_src"
 
 # ---------------------------------------------------------------------
-# 1) mir_robot 저장소 clone (mir_description 패키지만 있으면 충분하지만
-#    저장소 자체가 작아서 그냥 shallow clone)
+# 1) mir_robot 소스 확보 — 3가지 방법 지원 (우선순위 순):
+#      a) MIR_ROBOT_ZIP=/path/to/mir_robot-noetic.zip  — 로컬 zip 압축 해제
+#         (DGX Spark처럼 GitHub 아웃바운드가 막힌 오프라인 환경용.
+#         DFKI-NI/mir_robot의 노에틱/기본 브랜치 zip이면 그대로 동작함 —
+#         2026-09-28에 두 소스를 diff -rq로 대조해 mir_description이
+#         바이트 단위로 동일함을 확인함)
+#      b) MIR_ROBOT_SRC=/path/to/already/extracted/mir_robot — 이미 풀린
+#         디렉토리(mir_description을 포함하는 상위 폴더) 재사용
+#      c) 위 둘 다 없으면 git clone (인터넷 필요)
 # ---------------------------------------------------------------------
-SRC_DIR="$DEST/mir_robot_src"
-if [ -d "$SRC_DIR/.git" ]; then
+mkdir -p "$DEST"
+
+if [ -n "${MIR_ROBOT_ZIP:-}" ]; then
+    if [ ! -f "$MIR_ROBOT_ZIP" ]; then
+        err "MIR_ROBOT_ZIP 파일을 찾을 수 없음: $MIR_ROBOT_ZIP"
+        exit 1
+    fi
+    info "로컬 zip 사용: $MIR_ROBOT_ZIP"
+    rm -rf "$SRC_DIR"
+    mkdir -p "$SRC_DIR.unzip_tmp"
+    unzip -q "$MIR_ROBOT_ZIP" -d "$SRC_DIR.unzip_tmp"
+    # GitHub zip은 보통 <repo>-<branch>/ 한 겹으로 감싸져 있음 — 그 안에서
+    # mir_description을 가진 디렉토리를 찾아 SRC_DIR로 삼는다.
+    FOUND_DIR=$(find "$SRC_DIR.unzip_tmp" -maxdepth 3 -type d -name mir_description \
+        -exec dirname {} \; | head -1)
+    if [ -z "$FOUND_DIR" ]; then
+        err "압축 안에서 mir_description 디렉토리를 못 찾음 — zip 내용 확인 필요"
+        exit 1
+    fi
+    mv "$FOUND_DIR" "$SRC_DIR"
+    rm -rf "$SRC_DIR.unzip_tmp"
+    ok "압축 해제 완료: $SRC_DIR"
+elif [ -n "${MIR_ROBOT_SRC:-}" ]; then
+    if [ ! -f "$MIR_ROBOT_SRC/mir_description/package.xml" ]; then
+        err "MIR_ROBOT_SRC/mir_description/package.xml 을 찾을 수 없음: $MIR_ROBOT_SRC"
+        exit 1
+    fi
+    info "기존 디렉토리 재사용: $MIR_ROBOT_SRC"
+    SRC_DIR="$MIR_ROBOT_SRC"
+elif [ -d "$SRC_DIR/.git" ]; then
     info "이미 clone되어 있음 — 재사용: $SRC_DIR"
 else
+    if ! command -v git >/dev/null 2>&1; then
+        err "git이 필요합니다 (또는 MIR_ROBOT_ZIP/MIR_ROBOT_SRC로 오프라인 소스 지정)."
+        exit 1
+    fi
     info "clone: $MIR_REPO_URL"
     rm -rf "$SRC_DIR"
-    mkdir -p "$DEST"
     GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 "$MIR_REPO_URL" "$SRC_DIR"
 fi
 
