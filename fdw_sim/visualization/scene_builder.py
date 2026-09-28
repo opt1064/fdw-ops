@@ -31,18 +31,37 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 WORKSHOP_BOUNDS: Tuple[float, float, float, float] = (0.0, 36.1, 0.0, 12.4)
 
+
+# 실사 공장 바닥(밝은 회색 에폭시) 레퍼런스에 맞춘 균일한 라이트그레이 팔레트.
+# 예전엔 구역별로 채도 높은 색(파랑/빨강/노랑 등)을 칠해 용도를 구분했지만,
+# 2026-09-28 사용자 피드백으로 "바닥은 밝은 회색 + 라인마킹, 구역 구분은
+# 경광등 색으로" 방향으로 바뀌었다 — 그래서 여기 색은 전부 옅은 회색 계열로
+# 통일하고, 구역별 아주 미세한 명도 차이만 남겨 바닥 이음매/섹션이 티 나게
+# 했다(add_floor_lane_markings의 초록/노랑 라인이 실제 구역 구분 역할을 함).
+_FLOOR_LIGHT_GRAY = (0.80, 0.80, 0.81)
 WORKSHOP_ZONES: Dict[str, Tuple[float, float, float, float,
                                  Tuple[float, float, float], str]] = {
     # 6세부 소재관리 존 — 좌측 전체 (서버실/AMR충전 포함하는 큰 사각형이므로
     # 겹치는 하위 구역보다 z를 낮게 그린다, z-fighting 방지)
-    "material_mgmt":  (0.0, 0.0, 20.6, 12.4, (0.55, 0.62, 0.70), "6-material-mgmt"),
-    "server_room":    (0.0, 9.4, 3.3, 3.0, (0.35, 0.45, 0.60), "1-server-room"),
-    "amr_charge":     (3.3, 9.4, 7.6, 3.0, (0.45, 0.65, 0.50), "amr-charge"),
-    "amr_aisle":      (20.6, 0.0, 3.0, 12.4, (0.85, 0.85, 0.80), "amr-main-aisle"),
-    "welding_cell":   (23.6, 9.1, 3.0, 3.3, (0.80, 0.45, 0.30), "2-welding"),
-    "additive_cell":  (28.6, 9.9, 2.5, 2.5, (0.35, 0.60, 0.55), "4-additive"),
-    "machining_cell": (33.1, 8.4, 3.0, 4.0, (0.50, 0.50, 0.60), "5-machining"),
-    "forming_cell":   (25.1, 0.0, 11.0, 4.5, (0.75, 0.65, 0.35), "3-forming"),
+    "material_mgmt":  (0.0, 0.0, 20.6, 12.4, _FLOOR_LIGHT_GRAY, "6-material-mgmt"),
+    "server_room":    (0.0, 9.4, 3.3, 3.0, (0.76, 0.76, 0.78), "1-server-room"),
+    "amr_charge":     (3.3, 9.4, 7.6, 3.0, (0.79, 0.80, 0.79), "amr-charge"),
+    "amr_aisle":      (20.6, 0.0, 3.0, 12.4, (0.83, 0.83, 0.82), "amr-main-aisle"),
+    "welding_cell":   (23.6, 9.1, 3.0, 3.3, _FLOOR_LIGHT_GRAY, "2-welding"),
+    "additive_cell":  (28.6, 9.9, 2.5, 2.5, _FLOOR_LIGHT_GRAY, "4-additive"),
+    "machining_cell": (33.1, 8.4, 3.0, 4.0, _FLOOR_LIGHT_GRAY, "5-machining"),
+    "forming_cell":   (25.1, 0.0, 11.0, 4.5, _FLOOR_LIGHT_GRAY, "3-forming"),
+}
+
+# 셀 종류별 경광등(signal tower) 색 — 예전엔 작업대 몸체 색으로 구역을
+# 구분했지만, 지금은 몸체를 전부 흰색/회색 기계 외형으로 통일했으므로
+# 이 경광등 색이 그 역할을 대신한다 (사진 속 적층식 시그널 타워 참고).
+CELL_SIGNAL_COLORS: Dict[str, Tuple[float, float, float]] = {
+    "material":   (0.15, 0.45, 0.95),   # 파랑
+    "welding":    (0.90, 0.15, 0.10),   # 빨강
+    "inspection": (0.15, 0.80, 0.25),   # 초록
+    "forming":    (0.95, 0.70, 0.05),   # 노랑/호박
+    "default":    (0.7, 0.7, 0.7),
 }
 # material_mgmt 위에 얹히는 하위 구역들 — 같은 z에 그리면 깜빡임(z-fighting).
 _WORKSHOP_ZONE_NESTED = {"server_room", "amr_charge"}
@@ -56,7 +75,9 @@ FORMING_FENCE_HEIGHT_M = 1.47
 class SceneConfig:
     """SceneBuilder 동작 옵션."""
     root_prim_path: str = "/World/FDW"
-    ground_color: Tuple[float, float, float] = (0.25, 0.25, 0.28)
+    # 실사 공장 사진(밝은 회색 에폭시 바닥) 레퍼런스에 맞춘 기본값 —
+    # 예전 어두운 회색(0.25)은 콘크리트 맨바닥에 가까웠음(2026-09-28 변경).
+    ground_color: Tuple[float, float, float] = (0.80, 0.80, 0.81)
     add_default_lighting: bool = True
     cell_label_above: bool = True
 
@@ -270,6 +291,116 @@ class SceneBuilder:
         self._apply_material(path, mat)
         return path
 
+    def add_floor_lane_markings(self) -> str:
+        """실사 공장 사진 레퍼런스의 바닥 라인마킹 — 초록 보행/AMR 통로
+        중앙선 + 노랑/검정 위험구역 경계 스트라이프.
+
+        예전엔 WORKSHOP_ZONES의 구역별 채도 높은 바닥색이 구역 경계를
+        표시했지만, 바닥을 전부 밝은 회색으로 통일한 뒤로는 이 라인들이
+        그 역할을 대신한다."""
+        root = f"{self.config.root_prim_path}/Layout/LaneMarkings"
+        self._UsdGeom.Xform.Define(self._stage, root)
+        z = 0.014  # 구역 바닥(0.011~0.013)보다 살짝 위 — z-fighting 방지
+        stripe_w = 0.12
+
+        green = (0.15, 0.65, 0.25)
+        green_mat = self._get_or_create_material("LaneGreen", green,
+                                                   roughness=0.5, metallic=0.0)
+        yellow = (0.95, 0.75, 0.05)
+        yellow_mat = self._get_or_create_material("LaneYellow", yellow,
+                                                    roughness=0.5, metallic=0.0)
+
+        def _stripe(name: str, cx: float, cy: float,
+                   half_w: float, half_d: float,
+                   color: Tuple[float, float, float], mat) -> None:
+            p = f"{root}/{name}"
+            cube = self._UsdGeom.Cube.Define(self._stage, p)
+            cube.CreateSizeAttr(2.0)
+            self._set_scale(p, (half_w, half_d, 0.002))
+            self._set_translate(p, (cx, cy, z))
+            self._set_color(p, color)
+            self._apply_material(p, mat)
+
+        # AMR 메인 통로(amr_aisle, x:[20.6,23.6]) 중앙선 — 초록 실선
+        aisle_x0, _y0, aisle_w, aisle_d, _c, _l = WORKSHOP_ZONES["amr_aisle"]
+        _stripe("aisle_centerline", aisle_x0 + aisle_w / 2.0, aisle_d / 2.0,
+                stripe_w / 2.0, aisle_d / 2.0, green, green_mat)
+
+        # 소재관리 존 보행 통로(랙 사이 개방 구간) — 초록 라인 2줄
+        for i, y in enumerate((4.0, 6.0)):
+            _stripe(f"walkway_{i}", 8.0, y, 4.0, stripe_w / 2.0, green, green_mat)
+
+        # 용접/성형/가공/적층 셀 진입부 — 노랑/검정 해저드 경계 스트라이프
+        # (사진 속 기계 주변 대각선 황색 테이프 참고 — 여기선 단순 경계선으로 표현)
+        for zone_name in ("welding_cell", "forming_cell",
+                          "additive_cell", "machining_cell"):
+            zx0, zy0, zw, zd, _c, _l = WORKSHOP_ZONES[zone_name]
+            # 남쪽(진입) 경계선
+            _stripe(f"hazard_{zone_name}", zx0 + zw / 2.0, zy0 + stripe_w / 2.0,
+                    zw / 2.0, stripe_w / 2.0, yellow, yellow_mat)
+
+        logger.info("[VIS] floor lane markings added (aisle + walkway + hazard stripes)")
+        return root
+
+    def add_signal_tower(self, cell_id: str,
+                         color: Tuple[float, float, float],
+                         height_above_workbench: float = 0.9) -> str:
+        """셀 작업대 위에 적층식 경광등(signal tower) — 실사 공장 사진 속
+        기계마다 달린 색상 신호등 참고. 작업대 몸체를 흰색/회색 계열로
+        통일하면서 사라진 "구역별 색 구분"을 이 등 색으로 대신한다.
+
+        cell_id는 add_cell_workbench로 이미 등록돼 있어야 한다(그 Xform
+        아래 상대 좌표로 붙인다)."""
+        cell_root = self._cell_prims.get(cell_id)
+        if cell_root is None:
+            raise ValueError(f"cell {cell_id} not registered; call add_cell_workbench first")
+
+        tower_root = f"{cell_root}/SignalTower"
+        self._UsdGeom.Xform.Define(self._stage, tower_root)
+
+        # 지지 폴 — 어두운 회색 금속
+        pole_path = f"{tower_root}/Pole"
+        pole = self._UsdGeom.Cylinder.Define(self._stage, pole_path)
+        pole.CreateRadiusAttr(0.02)
+        pole.CreateHeightAttr(height_above_workbench)
+        pole.CreateAxisAttr("Z")
+        self._set_translate(pole_path, (0.0, 0.0, height_above_workbench / 2.0))
+        pole_color = (0.25, 0.25, 0.27)
+        self._set_color(pole_path, pole_color)
+        pole_mat = self._get_or_create_material("SignalTowerPole", pole_color,
+                                                 roughness=0.35, metallic=0.6)
+        self._apply_material(pole_path, pole_mat)
+
+        # 발광 렌즈 — 지정된 셀 색으로 켜짐(emissive) + 위에 여분 2개는
+        # 꺼진 회색으로 두어 "3단 적층 시그널 타워"의 실루엣만 재현
+        lens_specs = [
+            ("Lens_Active", color, True),
+            ("Lens_Off1", (0.6, 0.6, 0.6), False),
+            ("Lens_Off2", (0.6, 0.6, 0.6), False),
+        ]
+        lens_h = 0.09
+        for i, (name, lens_color, lit) in enumerate(lens_specs):
+            lens_path = f"{tower_root}/{name}"
+            lens = self._UsdGeom.Cylinder.Define(self._stage, lens_path)
+            lens.CreateRadiusAttr(0.045)
+            lens.CreateHeightAttr(lens_h)
+            lens.CreateAxisAttr("Z")
+            lz = height_above_workbench - i * (lens_h + 0.01)
+            self._set_translate(lens_path, (0.0, 0.0, lz))
+            self._set_color(lens_path, lens_color)
+            # 재질 캐시가 이름으로만 구분되므로, 색을 이름에 넣어야 셀마다
+            # 다른 active 색을 요청해도 서로 다른 재질로 캐싱된다(안 그러면
+            # 먼저 생성된 셀의 색이 캐시에 남아 나중 셀에도 재사용돼버림).
+            color_key = "_".join(f"{c:.2f}" for c in lens_color)
+            mat = self._get_or_create_material(
+                f"SignalLens_{color_key}", lens_color,
+                roughness=0.25, metallic=0.0,
+                emissive_color=lens_color if lit else None,
+                emissive_intensity=6.0 if lit else 0.0)
+            self._apply_material(lens_path, mat)
+
+        return tower_root
+
     def add_safety_fence(self, root_name: str,
                          x0: float, y0: float, w: float, d: float,
                          gate_w: float = FORMING_GATE_WIDTH_M,
@@ -361,6 +492,8 @@ class SceneBuilder:
         for name, (x0, y0, w, d, color, _label) in WORKSHOP_ZONES.items():
             z = 0.013 if name in _WORKSHOP_ZONE_NESTED else 0.011
             self.add_zone_floor(name, x0, y0, w, d, color, z=z)
+
+        self.add_floor_lane_markings()
 
         # 소재관리 존 — 보관 랙 3열
         for i, (x0, y0, w, d, h) in enumerate([
@@ -570,6 +703,12 @@ class SceneBuilder:
         self._set_scale(bench_path, (sx / 2.0, sy / 2.0, sz / 2.0))
         self._set_translate(bench_path, (0.0, 0.0, sz / 2.0))
         self._set_color(bench_path, color)
+        # 흰색/회색 도장 기계 외형 — 실사 CNC 설비 레퍼런스처럼 옅은 광택
+        # (roughness 낮을수록 반짝임, metallic=0으로 도장 느낌 유지)
+        color_key = "_".join(f"{c:.2f}" for c in color)
+        bench_mat = self._get_or_create_material(
+            f"MachineEnamel_{color_key}", color, roughness=0.35, metallic=0.05)
+        self._apply_material(bench_path, bench_mat)
 
         # 입력 버퍼 표시 (앞쪽)
         in_path = f"{cell_root}/InputBuffer"
@@ -1480,8 +1619,14 @@ class SceneBuilder:
     def _get_or_create_material(self, name: str,
                                 color: Tuple[float, float, float],
                                 roughness: float = 0.6,
-                                metallic: float = 0.0) -> object:
-        """이름으로 캐싱되는 UsdPreviewSurface 재질을 반환 (없으면 생성)."""
+                                metallic: float = 0.0,
+                                emissive_color: Optional[Tuple[float, float, float]] = None,
+                                emissive_intensity: float = 1.0) -> object:
+        """이름으로 캐싱되는 UsdPreviewSurface 재질을 반환 (없으면 생성).
+
+        emissive_color를 주면 자체발광(예: 경광등 렌즈)을 내며,
+        emissive_intensity로 밝기를 조절한다(1.0보다 큰 값도 허용 — RTX
+        렌더러의 bloom 효과를 살리는 용도)."""
         if name in self._material_cache:
             return self._material_cache[name]
 
@@ -1497,6 +1642,10 @@ class SceneBuilder:
             float(roughness))
         shader.CreateInput("metallic", self._Sdf.ValueTypeNames.Float).Set(
             float(metallic))
+        if emissive_color is not None:
+            glow = tuple(c * emissive_intensity for c in emissive_color)
+            shader.CreateInput("emissiveColor", self._Sdf.ValueTypeNames.Color3f).Set(
+                Gf.Vec3f(*glow))
         material.CreateSurfaceOutput().ConnectToSource(
             shader.ConnectableAPI(), "surface")
 

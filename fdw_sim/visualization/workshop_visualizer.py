@@ -17,19 +17,24 @@ import logging
 from fdw_sim.cells.base.cell_base import DistributedIntelligenceCell
 from fdw_sim.cells.material.material_cell import MaterialCell
 from fdw_sim.messaging.bus import MessageBus, Topics
-from fdw_sim.visualization.scene_builder import SceneBuilder, SceneConfig
+from fdw_sim.visualization.scene_builder import (
+    CELL_SIGNAL_COLORS, SceneBuilder, SceneConfig,
+)
 # IK 컨트롤러는 lazy import (Isaac Sim 없을 때 부담 줄이기 위함)
 
 logger = logging.getLogger(__name__)
 
 
-# 셀 종류별 기본 색상
+# 셀 종류별 기본 색상 — 실사 공장 사진(흰색/회색 CNC 설비) 레퍼런스에 맞춰
+# 전부 흰색/밝은 회색 계열로 통일(2026-09-28). 예전엔 이 색으로 구역을
+# 구분했지만, 그 역할은 이제 scene_builder.add_signal_tower()의 경광등
+# 색(CELL_SIGNAL_COLORS)이 대신한다.
 CELL_COLORS = {
-    "material":   (0.50, 0.55, 0.65),
-    "welding":    (0.75, 0.40, 0.35),
-    "inspection": (0.40, 0.70, 0.50),
-    "forming":    (0.65, 0.55, 0.30),
-    "default":    (0.55, 0.55, 0.60),
+    "material":   (0.88, 0.88, 0.89),
+    "welding":    (0.85, 0.85, 0.87),
+    "inspection": (0.90, 0.90, 0.91),
+    "forming":    (0.85, 0.85, 0.86),
+    "default":    (0.86, 0.86, 0.87),
 }
 
 # 부품 타입별 색상
@@ -210,7 +215,7 @@ class WorkshopVisualizer:
     # 로봇팔 spawn (placeholder vs 실 모델)
     # ========================================================================
     def _spawn_robot_arm(self, cell_id: str,
-                          color: Tuple[float, float, float] = (1.0, 0.45, 0.1)) -> None:
+                          color: Tuple[float, float, float] = (0.85, 0.85, 0.86)) -> None:
         """use_real_robot 설정에 따라 placeholder 또는 실 USD 로봇팔을 생성.
 
         실 로봇팔이 성공적으로 로드되면 IKController를 함께 등록한다.
@@ -367,6 +372,11 @@ class WorkshopVisualizer:
             self.scene.add_cell_workbench(cid, position=pos,
                                            size=self.config.cell_size,
                                            color=color)
+            try:
+                signal_color = CELL_SIGNAL_COLORS.get(ctype, CELL_SIGNAL_COLORS["default"])
+                self.scene.add_signal_tower(cid, color=signal_color)
+            except Exception:
+                logger.exception("[VIS] add_signal_tower failed for %s", cid)
 
             # 셀 종류별 부속 시각요소
             if ctype == "material" and self.config.show_smart_rack:
@@ -385,7 +395,7 @@ class WorkshopVisualizer:
                     # placeholder fallback (cube rack)
                     self.scene.add_smart_rack(cid, capacity=8)
             elif ctype == "welding" and self.config.show_robot_arm:
-                self._spawn_robot_arm(cid, color=(1.0, 0.45, 0.1))
+                self._spawn_robot_arm(cid, color=(0.88, 0.88, 0.89))
             elif ctype == "inspection" and self.config.show_camera:
                 placed = None
                 if self.config.use_real_inspection_cam:
@@ -408,7 +418,7 @@ class WorkshopVisualizer:
                         self.config.robot_name = self.config.forming_robot_name
                         self.config.use_real_robot = True
                         try:
-                            self._spawn_robot_arm(cid, color=(0.7, 0.5, 0.1))
+                            self._spawn_robot_arm(cid, color=(0.85, 0.85, 0.86))
                             spawned = cid in self._robots
                         finally:
                             self.config.robot_name = saved_name
@@ -417,7 +427,7 @@ class WorkshopVisualizer:
                         logger.exception("[VIS] forming arm USD load failed for %s", cid)
                         spawned = False
                 if not spawned:
-                    self.scene.add_robot_arm_placeholder(cid, color=(0.7, 0.5, 0.1))
+                    self.scene.add_robot_arm_placeholder(cid, color=(0.85, 0.85, 0.86))
 
         # AMR 배치 — 실 USD(NovaCarter 등) 우선, 실패 시 cube placeholder
         for a in self._pending_amrs:
