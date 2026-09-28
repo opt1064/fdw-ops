@@ -391,7 +391,7 @@ class SceneBuilder:
             # 재질 캐시가 이름으로만 구분되므로, 색을 이름에 넣어야 셀마다
             # 다른 active 색을 요청해도 서로 다른 재질로 캐싱된다(안 그러면
             # 먼저 생성된 셀의 색이 캐시에 남아 나중 셀에도 재사용돼버림).
-            color_key = "_".join(f"{c:.2f}" for c in lens_color)
+            color_key = self._color_key(lens_color)
             mat = self._get_or_create_material(
                 f"SignalLens_{color_key}", lens_color,
                 roughness=0.25, metallic=0.0,
@@ -705,7 +705,7 @@ class SceneBuilder:
         self._set_color(bench_path, color)
         # 흰색/회색 도장 기계 외형 — 실사 CNC 설비 레퍼런스처럼 옅은 광택
         # (roughness 낮을수록 반짝임, metallic=0으로 도장 느낌 유지)
-        color_key = "_".join(f"{c:.2f}" for c in color)
+        color_key = self._color_key(color)
         bench_mat = self._get_or_create_material(
             f"MachineEnamel_{color_key}", color, roughness=0.35, metallic=0.05)
         self._apply_material(bench_path, bench_mat)
@@ -1598,6 +1598,17 @@ class SceneBuilder:
             # 새로 추가한 경우 표준 순서 강제
             self._enforce_xform_order(xformable)
         scale_op.Set(self._Gf.Vec3f(*scale))
+
+    def _color_key(self, color: Tuple[float, float, float]) -> str:
+        """색 튜플을 USD prim/재질 이름에 안전하게 쓸 수 있는 문자열로 변환.
+
+        USD prim path 세그먼트는 식별자 규칙(문자/숫자/밑줄만 허용)을
+        따라야 해서 소수점("."), 마이너스 부호 등을 쓰면
+        '_IsValidPathForCreatingPrim' 에러로 그 자리에서 죽는다(2026-09-29
+        DGX Spark 실측 — f"{c:.2f}"로 만든 "0.88_0.88_0.89" 같은 이름을
+        재질 경로에 그대로 썼다가 시작하자마자 크래시). 0~1 색값을
+        1000배 정수로 반올림해 점 없는 이름을 만든다."""
+        return "_".join(str(int(round(c * 1000))) for c in color)
 
     def _set_color(self, prim_path: str,
                    color: Tuple[float, float, float]) -> None:
