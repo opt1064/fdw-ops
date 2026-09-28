@@ -474,6 +474,11 @@ class RMPflowController:
         self._warned_no_apply_method: bool = False
         self._warned_apply_exception: bool = False
         self._warned_backend_none_q: bool = False
+        # 2026-09-28 DGX Spark: joint 명령이 API 레벨에선 에러 없이 "성공"하는데
+        # 실제 렌더된 로봇은 프레임 처음부터 끝까지 그대로인 사례가 실측됨 —
+        # 커맨드된 값과 articulation에서 되읽은 실제 값을 비교해 명령이
+        # 물리 시뮬레이션에 실제로 반영되는지 첫 몇 번만 INFO로 확인한다.
+        self._apply_diag_count: int = 0
 
     # ------------------------------------------------------------------
     # backend 선택 — 처음 update 호출 시 결정
@@ -1143,6 +1148,20 @@ class RMPflowController:
                     "set_joint_position_targets/apply_action/set_joint_positions"
                     "이 전부 없어 joint 명령이 전혀 적용되지 않고 있음",
                     type(self.articulation).__name__)
+
+            # 커맨드가 실제로 물리 시뮬레이션에 반영되는지 첫 5회만 readback해서
+            # 확인 — API 호출은 성공("applied=True")했는데 실제 articulation이
+            # 그대로인 경우(예: initialize()는 됐지만 physics view가 아직 이
+            # 인스턴스에 안 붙어있는 경우)를 구분하기 위함.
+            if applied and self._apply_diag_count < 5:
+                self._apply_diag_count += 1
+                try:
+                    getter = getattr(self.articulation, "get_joint_positions", None)
+                    actual = getter() if callable(getter) else None
+                except Exception as e:
+                    actual = f"<readback failed: {type(e).__name__}: {e}>"
+                logger.info("[RMP] _apply_joints diag #%d: commanded=%s actual(readback)=%s",
+                           self._apply_diag_count, list(np.round(arr, 3)), actual)
         except Exception as e:
             if not self._warned_apply_exception:
                 self._warned_apply_exception = True
