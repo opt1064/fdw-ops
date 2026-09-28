@@ -156,7 +156,7 @@ class SceneBuilder:
         for name, center, half_extent in specs:
             wall_path = f"{walls_root}/{name}"
             wall = self._UsdGeom.Cube.Define(self._stage, wall_path)
-            wall.CreateSizeAttr(1.0)
+            wall.CreateSizeAttr(2.0)
             self._set_scale(wall_path, half_extent)
             self._set_translate(wall_path, center)
             self._set_color(wall_path, color)
@@ -175,7 +175,7 @@ class SceneBuilder:
         x_min, x_max, y_min, y_max = bounds
         roof_path = f"{self.config.root_prim_path}/Environment/Roof"
         roof = self._UsdGeom.Cube.Define(self._stage, roof_path)
-        roof.CreateSizeAttr(1.0)
+        roof.CreateSizeAttr(2.0)
         margin = 0.3
         half_x = (x_max - x_min) / 2.0 + margin
         half_y = (y_max - y_min) / 2.0 + margin
@@ -215,7 +215,7 @@ class SceneBuilder:
             # 조명 피팅(박스) — 발광체 자체는 안 보여도 시각적 앵커 역할
             fixture_path = f"{lights_root}/Fixture_{i:02d}"
             fixture = self._UsdGeom.Cube.Define(self._stage, fixture_path)
-            fixture.CreateSizeAttr(1.0)
+            fixture.CreateSizeAttr(2.0)
             self._set_scale(fixture_path, (0.6, 0.15, 0.05))
             self._set_translate(fixture_path, pos)
             self._set_color(fixture_path, (0.85, 0.85, 0.8))
@@ -244,7 +244,7 @@ class SceneBuilder:
         server_room/amr_charge)."""
         path = f"{self.config.root_prim_path}/Zones/{name}"
         cube = self._UsdGeom.Cube.Define(self._stage, path)
-        cube.CreateSizeAttr(1.0)
+        cube.CreateSizeAttr(2.0)
         self._set_scale(path, (w / 2.0, d / 2.0, 0.01))
         self._set_translate(path, (x0 + w / 2.0, y0 + d / 2.0, z))
         self._set_color(path, color)
@@ -276,7 +276,7 @@ class SceneBuilder:
                 continue
             seg_path = f"{fence_root}/{seg_name}"
             seg = self._UsdGeom.Cube.Define(self._stage, seg_path)
-            seg.CreateSizeAttr(1.0)
+            seg.CreateSizeAttr(2.0)
             self._set_scale(seg_path, half_extent)
             self._set_translate(seg_path, center)
             self._set_color(seg_path, color)
@@ -299,7 +299,7 @@ class SceneBuilder:
 
         body_path = f"{root}/Placeholder"
         body = self._UsdGeom.Cube.Define(self._stage, body_path)
-        body.CreateSizeAttr(1.0)
+        body.CreateSizeAttr(2.0)
         self._set_scale(body_path, (w * 0.35, d * 0.35, h / 2.0))
         self._set_translate(body_path, (cx, cy, h / 2.0))
         self._set_color(body_path, color)
@@ -307,7 +307,7 @@ class SceneBuilder:
         # 경고색 스트라이프 상단 테두리 — "이 셀은 아직 시뮬레이션 로직 없음"
         stripe_path = f"{root}/WarningStripe"
         stripe = self._UsdGeom.Cube.Define(self._stage, stripe_path)
-        stripe.CreateSizeAttr(1.0)
+        stripe.CreateSizeAttr(2.0)
         self._set_scale(stripe_path, (w * 0.35, d * 0.35, 0.03))
         self._set_translate(stripe_path, (cx, cy, h + 0.03))
         self._set_color(stripe_path, (0.95, 0.75, 0.1))
@@ -340,7 +340,7 @@ class SceneBuilder:
         ]):
             rack_path = f"{self.config.root_prim_path}/Layout/MaterialRacks/rack_{i}"
             rack = self._UsdGeom.Cube.Define(self._stage, rack_path)
-            rack.CreateSizeAttr(1.0)
+            rack.CreateSizeAttr(2.0)
             self._set_scale(rack_path, (w / 2.0, d / 2.0, h / 2.0))
             self._set_translate(rack_path, (x0 + w / 2.0, y0 + d / 2.0, h / 2.0))
             self._set_color(rack_path, (0.25, 0.45, 0.65))
@@ -351,7 +351,7 @@ class SceneBuilder:
         for i, (x, y) in enumerate([(4.5, 10.9), (6.5, 10.9)]):
             dock_path = f"{self.config.root_prim_path}/Layout/ChargeDocks/dock_{i}"
             dock = self._UsdGeom.Cube.Define(self._stage, dock_path)
-            dock.CreateSizeAttr(1.0)
+            dock.CreateSizeAttr(2.0)
             self._set_scale(dock_path, (0.6, 0.45, 0.025))
             self._set_translate(dock_path, (x, y, 0.025))
             self._set_color(dock_path, (0.3, 0.7, 0.3))
@@ -361,14 +361,14 @@ class SceneBuilder:
         t, h = 0.1, 3.0
         wall_e = f"{self.config.root_prim_path}/Layout/ServerRoom/wall_e"
         we = self._UsdGeom.Cube.Define(self._stage, wall_e)
-        we.CreateSizeAttr(1.0)
+        we.CreateSizeAttr(2.0)
         self._set_scale(wall_e, (t / 2.0, sd / 2.0, h / 2.0))
         self._set_translate(wall_e, (sx0 + sw - t / 2.0, sy0 + sd / 2.0, h / 2.0))
         self._set_color(wall_e, (0.7, 0.7, 0.72))
 
         wall_s = f"{self.config.root_prim_path}/Layout/ServerRoom/wall_s"
         ws = self._UsdGeom.Cube.Define(self._stage, wall_s)
-        ws.CreateSizeAttr(1.0)
+        ws.CreateSizeAttr(2.0)
         self._set_scale(wall_s, (sw / 2.0, t / 2.0, h / 2.0))
         self._set_translate(wall_s, (sx0 + sw / 2.0, sy0 + t / 2.0, h / 2.0))
         self._set_color(wall_s, (0.7, 0.7, 0.72))
@@ -522,7 +522,7 @@ class SceneBuilder:
         # workbench
         bench_path = f"{cell_root}/Workbench"
         bench = self._UsdGeom.Cube.Define(self._stage, bench_path)
-        bench.CreateSizeAttr(1.0)
+        bench.CreateSizeAttr(2.0)
         # scale + half-height translate
         sx, sy, sz = size
         self._set_scale(bench_path, (sx / 2.0, sy / 2.0, sz / 2.0))
@@ -532,7 +532,7 @@ class SceneBuilder:
         # 입력 버퍼 표시 (앞쪽)
         in_path = f"{cell_root}/InputBuffer"
         in_buf = self._UsdGeom.Cube.Define(self._stage, in_path)
-        in_buf.CreateSizeAttr(1.0)
+        in_buf.CreateSizeAttr(2.0)
         self._set_scale(in_path, (0.3, 0.3, 0.05))
         self._set_translate(in_path, (-sx * 0.35, 0.0, sz + 0.05))
         self._set_color(in_path, (0.2, 0.5, 0.9))   # 파랑
@@ -540,7 +540,7 @@ class SceneBuilder:
         # 출력 버퍼 표시 (뒤쪽)
         out_path = f"{cell_root}/OutputBuffer"
         out_buf = self._UsdGeom.Cube.Define(self._stage, out_path)
-        out_buf.CreateSizeAttr(1.0)
+        out_buf.CreateSizeAttr(2.0)
         self._set_scale(out_path, (0.3, 0.3, 0.05))
         self._set_translate(out_path, (sx * 0.35, 0.0, sz + 0.05))
         self._set_color(out_path, (0.9, 0.5, 0.2))  # 주황
@@ -572,7 +572,7 @@ class SceneBuilder:
             c = i % cols
             slot = f"{rack_path}/Slot_{i:02d}"
             cube = self._UsdGeom.Cube.Define(self._stage, slot)
-            cube.CreateSizeAttr(1.0)
+            cube.CreateSizeAttr(2.0)
             self._set_scale(slot, (slot_size / 2, slot_size / 2, slot_size / 4))
             self._set_translate(slot, (
                 (c - cols / 2 + 0.5) * (slot_size + 0.05),
@@ -594,7 +594,7 @@ class SceneBuilder:
 
         body = f"{amr_path}/Body"
         cube = self._UsdGeom.Cube.Define(self._stage, body)
-        cube.CreateSizeAttr(1.0)
+        cube.CreateSizeAttr(2.0)
         self._set_scale(body, (0.4, 0.3, 0.1))   # 0.8 x 0.6 x 0.2 m
         self._set_translate(body, (0.0, 0.0, 0.1))
         self._set_color(body, color)
@@ -708,7 +708,7 @@ class SceneBuilder:
         # Base
         base = f"{arm_root}/Base"
         cube = self._UsdGeom.Cube.Define(self._stage, base)
-        cube.CreateSizeAttr(1.0)
+        cube.CreateSizeAttr(2.0)
         self._set_scale(base, (0.2, 0.2, 0.1))
         self._set_translate(base, (0.0, 0.0, 0.1))
         self._set_color(base, (0.3, 0.3, 0.35))
@@ -755,7 +755,7 @@ class SceneBuilder:
 
         body = f"{cam_root}/Body"
         cube = self._UsdGeom.Cube.Define(self._stage, body)
-        cube.CreateSizeAttr(1.0)
+        cube.CreateSizeAttr(2.0)
         self._set_scale(body, (0.08, 0.05, 0.05))
         self._set_translate(body, (0.0, 0.0, 0.0))
         self._set_color(body, color)
@@ -959,7 +959,7 @@ class SceneBuilder:
         # housing
         housing = f"{cam_root}/Housing"
         cube = self._UsdGeom.Cube.Define(self._stage, housing)
-        cube.CreateSizeAttr(1.0)
+        cube.CreateSizeAttr(2.0)
         self._set_scale(housing, (0.06, 0.08, 0.06))
         self._set_translate(housing, (0.0, 0.0, 0.0))
         self._set_color(housing, (0.15, 0.15, 0.2))
@@ -1098,7 +1098,7 @@ class SceneBuilder:
             cyl.CreateHeightAttr(size * 3.5)
         else:
             cube = self._UsdGeom.Cube.Define(self._stage, part_path)
-            cube.CreateSizeAttr(1.0)
+            cube.CreateSizeAttr(2.0)
             self._set_scale(part_path, (size / 2, size / 2, size / 2))
 
         self._set_translate(part_path, position)
@@ -1346,6 +1346,17 @@ class SceneBuilder:
 
     def _set_scale(self, prim_path: str,
                    scale: Tuple[float, float, float]) -> None:
+        """주의: 이 프로젝트의 모든 Cube 기반 지오메트리는
+        ``cube.CreateSizeAttr(2.0)``(로컬 extent ±1.0, USD 기본값)로 만든다.
+        그래서 여기 넘기는 scale 값이 곧 half-extent와 정확히 일치한다
+        (half-extent = scale * 1.0). 이전엔 실수로 CreateSizeAttr(1.0)
+        (extent ±0.5)을 쓴 채로 모든 호출부가 scale=half_extent를 넘겨서,
+        실제 렌더링 크기가 의도의 절반이 되고 translate=half_extent로
+        바닥에 붙이려던 물체들이 half_extent/2 만큼 공중에 뜨는 버그가
+        있었다 (DGX Spark 실측: 4.5m 벽 위 지붕이 크게 떠 보임 — 작은
+        오브젝트에서는 오차가 작아 안 보였을 뿐 전역적으로 있던 문제).
+        새 Cube를 추가할 때도 반드시 CreateSizeAttr(2.0)을 쓸 것.
+        """
         prim = self._stage.GetPrimAtPath(prim_path)
         if not prim:
             return
