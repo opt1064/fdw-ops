@@ -469,6 +469,12 @@ class RMPflowController:
         self._last_tcp: Optional[Tuple[float, float, float]] = None
         self._last_phase: str = "idle"
 
+        # _apply_joints 실패/무동작 케이스 최초 1회 경고용 플래그
+        self._warned_no_articulation: bool = False
+        self._warned_no_apply_method: bool = False
+        self._warned_apply_exception: bool = False
+        self._warned_backend_none_q: bool = False
+
     # ------------------------------------------------------------------
     # backend 선택 — 처음 update 호출 시 결정
     # ------------------------------------------------------------------
@@ -1069,9 +1075,14 @@ class RMPflowController:
             warm_start_q=self._current_q,
             obstacles=self._obstacles,
         )
-        if q is not None:
-            self._set_target_joints(q,
-                                     blend_time=self.config.waypoint_blend_time)
+        if q is None:
+            if not self._warned_backend_none_q:
+                self._warned_backend_none_q = True
+                logger.warning("[RMP] backend(%s).set_target()이 None 반환 — "
+                               "joint 명령이 계산조차 안 되고 있음(최초 1회만 경고)",
+                               getattr(self._backend, "name", type(self._backend).__name__))
+            return
+        self._set_target_joints(q, blend_time=self.config.waypoint_blend_time)
 
     def _set_target_joints(self, q: List[float], blend_time: float) -> None:
         self._target_q = list(q)
@@ -1081,8 +1092,20 @@ class RMPflowController:
             self._current_q = list(q)
 
     def _apply_joints(self, q: List[float]) -> None:
-        """Articulation에 joint 적용 — IKController와 동일 로직."""
+        """Articulation에 joint 적용 — IKController와 동일 로직.
+
+        이전엔 실패를 logger.debug로만 남겨서, pick-and-place의 phase/타이머는
+        정상 완주하는데(started/finished 로그) 실제 articulation은 전혀 안
+        움직이는 경우를 구분할 방법이 없었다(2026-09-28 DGX Spark 실측 —
+        영상으로 로봇이 AMR 도킹 내내 한 프레임도 안 움직이는 걸 확인했는데
+        로그는 정상이었음). 원인 규명을 위해 실패/무동작 케이스를 최초 1회만
+        WARNING으로 남긴다(매 프레임 스팸 방지).
+        """
         if self.articulation is None:
+            if not self._warned_no_articulation:
+                self._warned_no_articulation = True
+                logger.warning("[RMP] _apply_joints: self.articulation is None — "
+                               "joint 명령이 전혀 적용되지 않고 있음")
             return
         try:
             import numpy as np  # type: ignore
@@ -1093,7 +1116,20 @@ class RMPflowController:
                 from omni.isaac.core.utils.types import ArticulationAction  # type: ignore
                 self.articulation.apply_action(
                     ArticulationAction(joint_positions=arr))
+            else:
+                if not self._warned_no_apply_method:
+                    self._warned_no_apply_method = True
+                    logger.warning(
+                        "[RMP] _apply_joints: articulation(%s)에 "
+                        "set_joint_positions/apply_action이 둘 다 없어 "
+                        "joint 명령이 전혀 적용되지 않고 있음",
+                        type(self.articulation).__name__)
         except Exception as e:
+            if not self._warned_apply_exception:
+                self._warned_apply_exception = True
+                logger.warning("[RMP] _apply_joints: joint 적용 실패(최초 1회만 "
+                               "경고, 이후는 debug로만) — %s: %s",
+                               type(e).__name__, e)
             logger.debug("[RMP] joint apply failed: %s", e)
 
     # ------------------------------------------------------------------
