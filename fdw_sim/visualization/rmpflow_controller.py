@@ -1128,7 +1128,7 @@ class RMPflowController:
                 self.articulation.set_joint_position_targets(arr)
                 applied = True
             elif hasattr(self.articulation, "apply_action"):
-                from omni.isaac.core.utils.types import ArticulationAction  # type: ignore
+                from isaacsim.core.utils.types import ArticulationAction  # type: ignore
                 self.articulation.apply_action(
                     ArticulationAction(joint_positions=arr))
                 applied = True
