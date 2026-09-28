@@ -140,13 +140,19 @@ ROBOT_CATALOG: Dict[str, RobotSpec] = {
         name="fanuc_crx10ia",
         usd_subpath="Isaac/Robots/Fanuc/crx10ia/crx10ia.usd",
         end_effector_frame="tool0",
-        # UR10과 유사한 앤트로포모픽 6축 구조 — 실측 전까지 UR10 elbow-up
-        # 자세를 재사용 (all-zero 자세는 팔이 완전히 펴져 IK 특이점에 가까움).
-        home_joint_positions=[0.0, -1.57, 1.57, -1.57, -1.57, 0.0],
+        # ❌ UR10 elbow-up 자세[0,-1.57,1.57,-1.57,-1.57,0]를 재사용했었으나
+        # 2026-09-28 DGX Spark 실측 스크린샷에서 팔이 가느다란 수직 막대처럼
+        # 접혀버리는 것을 확인 — CRX-10iA의 joint zero 기준이 UR10과 달라
+        # 이 값이 그대로 적용되면 안 됨. 실제 관절값을 로드된 USD/URDF에서
+        # 직접 확인하기 전까지는 home 자세를 강제하지 않는다(빈 리스트 —
+        # go_home()이 no-op) — 로봇 자체 USD가 갖고 있는 기본 rest pose를
+        # 그대로 사용하는 편이 임의의 잘못된 추정치보다 안전하다.
+        home_joint_positions=[],
         base_offset_z=0.0,
         description="FANUC CRX-10iA 6-DOF collaborative arm (welding cell) "
-                    "— USD 경로 확인됨(2026-09-28), end_effector_frame은 "
-                    "여전히 추정치. FDW_FANUC_CRX10IA_USD로 override 가능",
+                    "— USD 경로 확인됨(2026-09-28), end_effector_frame과 "
+                    "home_joint_positions은 여전히 미검증(현재는 강제 안 함). "
+                    "FDW_FANUC_CRX10IA_USD로 override 가능",
     ),
 }
 
