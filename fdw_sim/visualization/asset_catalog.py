@@ -138,19 +138,27 @@ ASSET_CATALOG: Dict[str, UsdAssetSpec] = {
         #    MiR/MobileIndustrialRobots 항목 자체가 존재하지 않는다. 즉 아래
         #    usd_subpath는 항상 404이며, "혹시 없을 수도" 단계가 아니라 확정된
         #    사실이다.
-        #    실사용하려면 다음 중 하나가 필요하다:
-        #      1) FDW_MIR100_USD=/path/to/mir100.usd — 커뮤니티 ROS 패키지
-        #         DFKI-NI/mir_robot(BSD-3-Clause)의 URDF를
-        #         isaacsim.asset.importer.urdf 확장으로 USD 변환해 로컬
-        #         경로로 지정. 변환 파이프라인은 2026-09-28에 두 단계로
-        #         준비해뒀다 (1단계는 GPU 불필요, 이 컨테이너에서 실제로
-        #         돌려서 19링크/20조인트 URDF 생성까지 검증 완료):
-        #           scripts/prepare_mir100_urdf.sh          (1단계: URDF 준비)
-        #           scripts/import_mir100_usd.py            (2단계: USD 변환,
-        #                                                     $ISAACSIM_PYTHON_EXE
-        #                                                     로 실행, 미검증)
-        #      2) 그때까지는 --amr-asset nova_carter 등 실존하는 카탈로그
-        #         항목으로 되돌리기
+        #    ✅ 2026-09-28 DGX Spark에서 FDW_MIR100_USD 로컬 경로로 완전히
+        #       해결·검증 완료. 커뮤니티 ROS 패키지 DFKI-NI/mir_robot
+        #       (BSD-3-Clause)의 URDF를 isaacsim.asset.importer.urdf
+        #       (URDFImporter/URDFImporterConfig 클래스 API, Isaac 6.1
+        #       기준 — 레거시 omni.importer.urdf._urdf 방식은 이 버전엔
+        #       없음)로 USD 변환해서 실사용 중. 로그로 확인됨:
+        #         [VIS] AMR AMR_01 placed via USD (mir100) @ (23.6, 9.25, 0.0)
+        #         [VIS] AMR AMR_02 placed via USD (mir100) @ (24.3, 9.25, 0.0)
+        #       (reference attach failed 없음 — placeholder 폴백 아니고 실
+        #       메쉬 로드됨)
+        #       재현 방법(새 환경에서 처음 설정할 때):
+        #         scripts/prepare_mir100_urdf.sh   (1단계, GPU 불필요 —
+        #             mir_robot 클론/xacro 전개/메시 경로 로컬화)
+        #         scripts/import_mir100_usd.py     (2단계, $ISAACSIM_PYTHON_EXE
+        #             로 실행 — URDF -> USD 변환)
+        #         export FDW_MIR100_USD=<2단계 출력 usd 경로>
+        #       그 경로가 없으면 find_local_asset()/resolve_asset_usd_path()가
+        #       (실존하지 않는) 위 usd_subpath로 remote fallback하고,
+        #       add_usd_reference()가 재확인 로직으로 placeholder 박스로
+        #       정상 대체한다 — 즉 FDW_MIR100_USD 미설정이어도 크래시는
+        #       안 나고 조용히 placeholder로 돌아간다.
         #    404 시 find_local_asset()/resolve_asset_usd_path()가 remote로
         #    fallback하고, SceneBuilder는 add_usd_reference()의 재확인
         #    로직(2026-09-28 수정)으로 placeholder 박스로 정상 대체된다.

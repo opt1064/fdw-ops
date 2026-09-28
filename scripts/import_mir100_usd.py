@@ -10,7 +10,10 @@
 
 API 확인 이력:
     2026-09-28 DGX Spark(Isaac Sim 6.1, isaacsim.asset.importer.urdf 3.11.10)
-    에서 help()로 직접 확인한 클래스 기반 API를 사용한다:
+    에서 help()로 직접 확인한 클래스 기반 API를 사용한다. 같은 날 실제
+    MiR100 URDF로 이 스크립트를 끝까지 돌려서 USD 생성 및 fdw-ops
+    시뮬레이션에서의 로드(placed via USD (mir100), reference attach
+    failed 없음)까지 확인 완료:
 
         from isaacsim.asset.importer.urdf import URDFImporter, URDFImporterConfig
         config = URDFImporterConfig(urdf_path=..., usd_path=<dest DIRECTORY>, ...)
