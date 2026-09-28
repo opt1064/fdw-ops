@@ -883,8 +883,15 @@ class SceneBuilder:
             s = xformable.AddScaleOp()
             s.Set(Gf.Vec3f(*scale))
 
-        # 3) 진단 — children, prim type, reference 목록을 명시적으로 로그
-        child_count = len(list(prim.GetChildren()))
+        # 3) children==0인 경우 — 진짜 실패(원격 fetch 404 등)인지, 아니면
+        #    비동기 compose가 아직 안 끝난 것뿐인지 stage update를 몇 번 돌려
+        #    직접 확인한다 (RobotLoader._verify_reference_loaded와 동일 전략).
+        #    예전엔 ref_count>0이면 무조건 "곧 될 것"으로 가정하고 성공
+        #    취급했는데, mir100 원격 fetch가 실제로 실패한 케이스에서
+        #    ref는 붙었지만 children이 끝까지 0으로 남아 placeholder로
+        #    fallback되지 않고 빈 투명 오브젝트만 남는 버그로 드러났다
+        #    (2026-09-28 DGX Spark 실측).
+        child_count = self._wait_for_reference_children(prim)
         try:
             ref_list = prim.GetMetadata("references")
             ref_count = (len(ref_list.prependedItems) + len(ref_list.appendedItems)
@@ -898,14 +905,45 @@ class SceneBuilder:
                     ref_count if ref_count >= 0 else "n/a",
                     prim.GetTypeName())
 
-        if child_count == 0 and ref_count <= 0:
-            # 진짜로 reference가 안 붙은 경우만 실패 신호.
-            # children=0 이지만 ref_count>0 이면 USD compose가 다음 frame에 일어나는
-            # 정상 케이스 — None 반환하지 않는다.
+        if child_count == 0:
+            # stage update를 몇 번 돌려도 자식이 안 생기면 reference target이
+            # 실제로 resolve되지 않은 것 — ref_count>0이어도 마찬가지다
+            # (reference "의도"는 기록됐지만 fetch가 실패한 경우 정확히 이 모양).
             logger.warning("[VIS] add_usd_reference: %s — reference attach FAILED "
-                           "(no children, no refs, usd=%s)", prim_path, usd_path)
+                           "(0 children after retry, refs=%s, usd=%s)",
+                           prim_path, ref_count if ref_count >= 0 else "n/a", usd_path)
             return None
         return prim
+
+    def _wait_for_reference_children(self, prim, max_updates: int = 3) -> int:
+        """AddReference 후 자식 prim이 채워지는지 stage update를 몇 번 돌려 확인.
+
+        RobotLoader._verify_reference_loaded와 동일한 전략 — Omniverse USD
+        payload가 비동기로 resolve될 수 있으므로 즉시 판정하지 않는다.
+        """
+        def _count() -> int:
+            try:
+                return len(list(prim.GetChildren()))
+            except Exception:
+                return 0
+
+        n = _count()
+        if n > 0:
+            return n
+
+        try:
+            import omni.kit.app  # type: ignore
+            app = omni.kit.app.get_app()
+            for _ in range(max_updates):
+                app.update()
+                n = _count()
+                if n > 0:
+                    return n
+        except Exception:
+            # omni.kit.app가 없는 환경(테스트 등)에서는 현재 값 그대로 반환
+            pass
+
+        return n
 
     def add_amr_usd(self, amr_id: str,
                     asset_name: str = "mir100",
