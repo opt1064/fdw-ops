@@ -862,6 +862,20 @@ class SimulationManager:
             raise RuntimeError("material cell not registered")
         # 부품을 smart rack에 입고
         self.material_cell.stock_part(job.part_id, job.part_type)
+        # USD 상에 즉시 스폰 — WorkshopVisualizer.update()의 smart_rack 폴링
+        # 루프(spawn_part)에만 맡기면, 여러 job이 한꺼번에 투입되고 오케스트
+        # 레이터/MaterialCell이 같은 tick 안에서 바로 AMR에 배차해 랙에서
+        # 꺼내가 버리는 경우 폴링 루프가 그 part_id를 단 한 번도 못 보고
+        # 놓칠 수 있다(2026-09-28 DGX Spark 실측 — "[VIS] move_part: unknown
+        # part PART_A_002"가 계속 찍히면서 AMR/로봇이 존재하지도 않는 부품을
+        # 나르는 좌표 계산만 하고 실제 메쉬는 영영 안 보였음). spawn_part는
+        # idempotent라 폴링 루프가 나중에 같은 part_id를 봐도 안전하다.
+        if self.visualizer is not None:
+            try:
+                self.visualizer.spawn_part(job.part_id, job.part_type,
+                                            self.material_cell.cell_id)
+            except Exception:
+                logger.exception("[SIM] eager spawn_part failed for %s", job.part_id)
         # 오케스트레이터에 Job 등록
         self.orchestrator.submit_job(job)
 

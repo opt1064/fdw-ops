@@ -515,14 +515,23 @@ class WorkshopVisualizer:
     # 부품 시각화 API (외부에서 호출 가능)
     # ========================================================================
     def spawn_part(self, part_id: str, part_type: str, cell_id: str) -> None:
-        """부품을 특정 셀의 input buffer 위치에 시각적으로 생성."""
+        """부품을 특정 셀의 input buffer 위치에 시각적으로 생성.
+
+        이미 스폰된 part_id면 아무것도 하지 않는다(idempotent) — SimulationManager
+        .submit_job()이 재고 등록 시점에 이 메서드를 직접 호출해 즉시 스폰하고,
+        MaterialCell 랙 폴링 루프(update())도 동일한 part_id를 나중에 다시 볼 수
+        있으므로 두 경로 모두에서 안전하게 호출 가능해야 한다.
+        """
         if self.scene is None:
+            return
+        if part_id in self._part_types:
             return
         color = PART_COLORS.get(part_type, PART_COLORS["default"])
         pos = self._input_buffer_pos(cell_id)
         self.scene.add_part(part_id, position=pos, color=color)
         self._part_locations[part_id] = cell_id
         self._part_types[part_id] = part_type
+        self._known_rack_parts.add(part_id)
 
     def remove_part(self, part_id: str) -> None:
         if self.scene is None:
