@@ -712,10 +712,14 @@ class SceneBuilder:
 
         loader = RobotLoader()
         prim_path = f"{cell_root}/RobotArm"
+        # RobotArm은 cell_root의 자식 prim이라 부모(cell_root)의 world
+        # translate가 이미 적용된다 — 여기서 world_pos(=cell_pos+offset)를
+        # 다시 로컬 translate로 주면 cell_pos가 이중으로 더해져 로봇이
+        # 작업장 밖 허공으로 튕겨나간다. 로컬 offset만 넘긴다.
         articulation = loader.load_robot(
             robot_name=robot_name,
             prim_path=prim_path,
-            position=world_pos,
+            position=offset,
         )
 
         # 로드 결과 진단 — prim이 실제로 생성됐고 자식 prim이 있는지 확인
