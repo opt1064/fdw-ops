@@ -77,8 +77,8 @@ class WorkshopVizConfig:
     show_camera: bool = True
 
     # Level 2.1: 실 로봇팔 사용 옵션
-    use_real_robot: bool = False             # True면 Franka Panda USD 로드
-    robot_name: str = "franka_panda"         # "franka_panda" | "ur10"
+    use_real_robot: bool = False             # True면 CRX-10iA USD 로드
+    robot_name: str = "fanuc_crx10ia"        # "fanuc_crx10ia" | "franka_panda" | "ur10"
     enable_ik: bool = True                   # 용접 시 IK로 토치가 부품 추적
     weld_path_offset_y: float = 0.25         # 용접 경로의 y 방향 범위 (±)
     weld_path_height: float = 0.05           # 용접 경로의 부품 표면 위 높이
@@ -106,8 +106,8 @@ class WorkshopVizConfig:
     # ---------------------------------------------------------------- Level 2.3
     # 셀별 실 USD 자산 사용 옵션 (placeholder fallback 자동)
     use_real_inspection_cam: bool = True     # inspection 셀에 실 카메라 prim
-    use_real_amr: bool = True                # AMR을 USD(NovaCarter 등)로 로드
-    amr_asset_name: str = "nova_carter"      # asset_catalog 엔트리 이름
+    use_real_amr: bool = True                # AMR을 USD(MiR100 등)로 로드
+    amr_asset_name: str = "mir100"           # asset_catalog 엔트리 이름
     use_real_smart_rack: bool = True         # material 셀에 KLT bin USD rack
     smart_rack_asset_name: str = "klt_bin"   # asset_catalog 엔트리 이름
     use_real_forming_arm: bool = True        # forming 셀에 실 UR 로봇팔

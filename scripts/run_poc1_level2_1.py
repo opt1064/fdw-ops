@@ -43,7 +43,7 @@ from scripts.run_poc1 import (
 from fdw_sim.utils.logging_setup import setup_logging
 
 
-VALID_ROBOTS = ["franka_panda", "ur10", "franka_alt"]
+VALID_ROBOTS = ["fanuc_crx10ia", "franka_panda", "ur10", "franka_alt"]
 
 
 def main() -> int:
@@ -69,9 +69,9 @@ def main() -> int:
 
     # Level 2.1 전용 플래그
     p.add_argument("--real-robot", action="store_true",
-                   help="실 로봇팔 USD 로드 (Franka/UR10). 미지정 시 placeholder 박스")
-    p.add_argument("--robot", choices=VALID_ROBOTS, default="franka_panda",
-                   help="로봇 모델 선택")
+                   help="실 로봇팔 USD 로드 (CRX-10iA/Franka/UR10). 미지정 시 placeholder 박스")
+    p.add_argument("--robot", choices=VALID_ROBOTS, default="fanuc_crx10ia",
+                   help="로봇 모델 선택 (기본: fanuc_crx10ia)")
     p.add_argument("--no-ik", action="store_true",
                    help="IK 컨트롤러 비활성 (홈 자세 고정)")
     p.add_argument("--weld-offset", type=float, default=0.25,

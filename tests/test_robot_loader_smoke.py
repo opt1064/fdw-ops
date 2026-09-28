@@ -35,6 +35,14 @@ class TestRobotLoaderImport(unittest.TestCase):
         self.assertIn("factory_franka", ROBOT_CATALOG)
         # 레거시 4.x 경로도 로컬 fallback용으로 유지
         self.assertIn("franka_panda_legacy", ROBOT_CATALOG)
+        # 용접 셀 실 기체 (Franka -> CRX-10iA 교체)
+        self.assertIn("fanuc_crx10ia", ROBOT_CATALOG)
+
+        crx = ROBOT_CATALOG["fanuc_crx10ia"]
+        self.assertIsInstance(crx, RobotSpec)
+        self.assertEqual(crx.end_effector_frame, "tool0")
+        self.assertEqual(len(crx.home_joint_positions), 6)
+        self.assertTrue(crx.usd_subpath.endswith(".usd"))
 
         franka = ROBOT_CATALOG["franka_panda"]
         self.assertIsInstance(franka, RobotSpec)
@@ -187,7 +195,7 @@ class TestWorkshopVisualizerImport(unittest.TestCase):
         cfg = WorkshopVizConfig()
         # Level 2.1 필드들이 존재해야 함
         self.assertFalse(cfg.use_real_robot)
-        self.assertEqual(cfg.robot_name, "franka_panda")
+        self.assertEqual(cfg.robot_name, "fanuc_crx10ia")
         self.assertTrue(cfg.enable_ik)
         self.assertAlmostEqual(cfg.weld_path_offset_y, 0.25)
         self.assertAlmostEqual(cfg.weld_path_height, 0.05)
@@ -213,7 +221,7 @@ class TestSimulationConfigLevel21(unittest.TestCase):
 
         cfg = SimulationConfig()
         self.assertFalse(cfg.use_real_robot)
-        self.assertEqual(cfg.robot_name, "franka_panda")
+        self.assertEqual(cfg.robot_name, "fanuc_crx10ia")
         self.assertTrue(cfg.enable_ik)
         self.assertAlmostEqual(cfg.weld_path_offset_y, 0.25)
         self.assertAlmostEqual(cfg.weld_path_height, 0.05)

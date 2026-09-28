@@ -656,7 +656,7 @@ class SceneBuilder:
         return amr_path
 
     def add_real_robot_arm(self, cell_id: str,
-                            robot_name: str = "franka_panda",
+                            robot_name: str = "fanuc_crx10ia",
                             offset: Tuple[float, float, float] = (0.0, -0.3, 0.85),
                             ) -> Optional[object]:
         """Isaac Sim 기본 제공 USD 로봇팔(Franka Panda 등)을 셀 위에 로드.
@@ -908,7 +908,7 @@ class SceneBuilder:
         return prim
 
     def add_amr_usd(self, amr_id: str,
-                    asset_name: str = "nova_carter",
+                    asset_name: str = "mir100",
                     position: Tuple[float, float, float] = (0.0, 0.0, 0.0),
                     rotate_z_deg: float = 0.0,
                     ) -> Optional[str]:

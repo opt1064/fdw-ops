@@ -70,8 +70,8 @@ class SimulationConfig:
     transfer_anim_duration_sec: float = 2.0
 
     # Level 2.1: 실 로봇팔 옵션
-    use_real_robot: bool = False        # True면 Franka/UR10 USD 로드, False면 placeholder 박스
-    robot_name: str = "franka_panda"    # "franka_panda" | "ur10" | "franka_alt"
+    use_real_robot: bool = False        # True면 CRX-10iA/Franka/UR10 USD 로드, False면 placeholder 박스
+    robot_name: str = "fanuc_crx10ia"   # "fanuc_crx10ia" | "franka_panda" | "ur10" | "franka_alt"
     enable_ik: bool = True              # IK 컨트롤러 활성화 (Lula 우선, 실패 시 휴리스틱 fallback)
     weld_path_offset_y: float = 0.25    # 용접 경로 길이 (m), 입력 버퍼 중심 ±offset
     weld_path_height: float = 0.05      # 부품 위 용접 높이 (m)
@@ -99,10 +99,10 @@ class SimulationConfig:
 
     # Level 2.3: 셀별 실 USD 자산 사용 옵션 (placeholder fallback 자동)
     use_real_inspection_cam: bool = True      # inspection 셀에 실 카메라 prim
-    use_real_amr: bool = True                 # AMR을 USD(NovaCarter 등)로 로드
-    amr_asset_name: str = "nova_carter"       # asset_catalog 엔트리 이름
-                                               # nova_carter | jetbot | iw_hub | iw_hub_static
-                                               # nova_carter Props/* 404 이슈 시 jetbot/iw_hub_static 권장
+    use_real_amr: bool = True                 # AMR을 USD(MiR100 등)로 로드
+    amr_asset_name: str = "mir100"            # asset_catalog 엔트리 이름
+                                               # mir100 | nova_carter | jetbot | iw_hub | iw_hub_static
+                                               # mir100 USD 미확보/404 시 nova_carter/iw_hub_static 권장
     use_real_smart_rack: bool = True          # material 셀에 KLT bin USD rack
     smart_rack_asset_name: str = "klt_bin"    # asset_catalog 엔트리 이름
     use_real_forming_arm: bool = True         # forming 셀에 실 UR 로봇팔

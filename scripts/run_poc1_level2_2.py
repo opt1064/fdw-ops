@@ -13,9 +13,9 @@ PROCESSING 단계에서 TCP(엔드 이펙터) 위치에 PointInstancer 기반 �
 
 실행 예시:
 
-    # GUI에서 Franka Panda + RMPflow + 스파크
+    # GUI에서 FANUC CRX-10iA(기본) + RMPflow + 스파크
     ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-        python scripts/run_poc1_level2_2.py --gui --real-robot --robot franka_panda
+        python scripts/run_poc1_level2_2.py --gui --real-robot
 
     # WebRTC 스트리밍 + RMPflow 강제 (실패시 RMPflowController 내부에서 fallback)
     ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
@@ -48,8 +48,12 @@ PROCESSING 단계에서 TCP(엔드 이펙터) 위치에 PointInstancer 기반 �
 
 전제:
     * Isaac Sim 5.1.0 + Nucleus 접속 가능 (or 환경변수 ISAAC_ASSETS_ROOT 지정)
-    * Franka USD : Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd (Isaac 5.1 경로)
-    * RMPflow config는 isaacsim.robot_motion.motion_generation의 표준 위치에서 자동 탐색
+    * CRX-10iA USD 경로는 미검증 추정치 (fdw_sim/visualization/robot_loader.py의
+      ROBOT_CATALOG["fanuc_crx10ia"] 주석 참고) — 404 시 FDW_FANUC_CRX10IA_USD로
+      로컬 경로 override 하거나 --robot franka_panda로 되돌릴 것
+    * RMPflow config는 franka 전용 번들만 Isaac 배포본에 포함되어 있어,
+      --robot fanuc_crx10ia 사용 시 RMPflow/IK 백엔드를 못 찾으면 자동으로
+      heuristic 모션으로 fallback한다 (크래시 아님 — 의도된 동작)
 """
 from __future__ import annotations
 
@@ -67,11 +71,11 @@ from scripts.run_poc1 import (
 from fdw_sim.utils.logging_setup import setup_logging
 
 
-VALID_ROBOTS = ["franka_panda", "ur10", "franka_alt"]
+VALID_ROBOTS = ["fanuc_crx10ia", "franka_panda", "ur10", "franka_alt"]
 VALID_MOTION_MODES = ["auto", "rmpflow", "ik", "heuristic"]
 
 # Level 2.3 USD 자산 카탈로그 선택지
-VALID_AMR_ASSETS = ["nova_carter", "jetbot", "iw_hub", "iw_hub_static"]
+VALID_AMR_ASSETS = ["mir100", "nova_carter", "jetbot", "iw_hub", "iw_hub_static"]
 VALID_SMART_RACKS = ["klt_bin", "cardboard_box"]
 VALID_FORMING_ROBOTS = ["ur10", "ur10e", "ur5e", "ur16e"]
 
@@ -102,9 +106,9 @@ def main() -> int:
 
     # Level 2.1 플래그 (재사용)
     p.add_argument("--real-robot", action="store_true",
-                   help="실 로봇팔 USD 로드 (Franka/UR10). 미지정 시 placeholder 박스")
-    p.add_argument("--robot", choices=VALID_ROBOTS, default="franka_panda",
-                   help="로봇 모델 선택")
+                   help="실 로봇팔 USD 로드 (CRX-10iA/Franka/UR10). 미지정 시 placeholder 박스")
+    p.add_argument("--robot", choices=VALID_ROBOTS, default="fanuc_crx10ia",
+                   help="로봇 모델 선택 (기본: fanuc_crx10ia — 용접 셀 실 기체)")
     p.add_argument("--no-ik", action="store_true",
                    help="모션 컨트롤러 전체 비활성 (홈 자세 고정)")
     p.add_argument("--weld-offset", type=float, default=0.25,
@@ -128,13 +132,12 @@ def main() -> int:
                    help="RMPflow에 작업대/부품 장애물 등록 비활성")
 
     # ----------------------------------------------------- Level 2.3 신규 플래그
-    # 셀별 실 USD 자산 선택. NovaCarter Props/* 404 이슈 우회를 위해
-    # --amr-asset jetbot 또는 iw_hub_static 으로 즉시 스왑 가능.
-    p.add_argument("--amr-asset", choices=VALID_AMR_ASSETS, default="nova_carter",
-                   help="AMR USD 자산: nova_carter(기본) | jetbot | "
+    # 셀별 실 USD 자산 선택. MiR100 USD 미확보/404 시 nova_carter/jetbot/
+    # iw_hub_static 으로 즉시 스왑 가능.
+    p.add_argument("--amr-asset", choices=VALID_AMR_ASSETS, default="mir100",
+                   help="AMR USD 자산: mir100(기본) | nova_carter | jetbot | "
                         "iw_hub | iw_hub_static. "
-                        "NovaCarter joint body 누락 경고 발생 시 "
-                        "jetbot/iw_hub_static 권장 (self-contained)")
+                        "mir100 USD 미확보 시 nova_carter/iw_hub_static 권장")
     p.add_argument("--no-real-amr", dest="use_real_amr",
                    action="store_false", default=True,
                    help="AMR을 USD 대신 placeholder 박스로 그림")

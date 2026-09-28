@@ -627,8 +627,23 @@ class RMPflowController:
         return None
 
     def _locate_rmp_config(self) -> Optional[str]:
+        """RMPflow common-config YAML 탐색.
+
+        franka 전용으로 하드코딩되어 있던 것을 spec.name 기반으로 일반화 —
+        franka가 아닌 로봇(예: fanuc_crx10ia)은 Isaac 배포본에 매칭되는
+        motion_policy_configs가 없을 가능성이 높으므로, 못 찾으면 그냥
+        None을 반환해 _try_init_rmpflow가 IK/heuristic으로 자연스럽게
+        fallback하도록 한다 (신규 로봇 추가 시 크래시 없이 항상 동작).
+        """
         import os
-        # 환경변수 우선
+        robot_key = (self.spec.name.upper() if self.spec and self.spec.name
+                     else "")
+        # 환경변수 우선 (로봇별 override)
+        if robot_key:
+            env = os.environ.get(f"FDW_{robot_key}_RMPFLOW_YAML")
+            if env and os.path.isfile(env):
+                return env
+        # 하위호환: robot 무관 전역 env var
         env = os.environ.get("FDW_RMPFLOW_YAML")
         if env and os.path.isfile(env):
             return env
@@ -644,8 +659,16 @@ class RMPflowController:
                 if os.path.isfile(p):
                     return p
         # Isaac Sim이 자체 번들하는 예제 RMPflow 설정 (Thor 실측으로 확인된 경로)
+        # — 번들 자체는 franka 존재 여부로 검증하지만, 실제 대상 로봇의
+        # 하위 디렉토리가 있으면 그쪽을 우선 시도한다.
         bundled = self._locate_bundled_motion_policy_dir()
         if bundled:
+            if robot_key:
+                robot_name = self.spec.name
+                p = os.path.join(bundled, robot_name, "rmpflow",
+                                  f"{robot_name}_rmpflow_common.yaml")
+                if os.path.isfile(p):
+                    return p
             p = os.path.join(bundled, "franka", "rmpflow",
                               "franka_rmpflow_common.yaml")
             if os.path.isfile(p):
@@ -653,7 +676,18 @@ class RMPflowController:
         return None
 
     def _locate_urdf(self) -> Optional[str]:
+        """로봇 URDF 탐색 (franka 하드코딩 → spec 기반 일반화).
+
+        찾지 못하면 None — 호출자가 heuristic backend로 fallback한다.
+        """
         import os
+        robot_key = (self.spec.name.upper() if self.spec and self.spec.name
+                     else "")
+        if robot_key:
+            env = os.environ.get(f"FDW_{robot_key}_URDF")
+            if env and os.path.isfile(env):
+                return env
+        # 하위호환: 기존 franka 전용 env var
         env = os.environ.get("FDW_FRANKA_URDF")
         if env and os.path.isfile(env):
             return env
@@ -668,6 +702,11 @@ class RMPflowController:
         # Isaac Sim이 자체 번들하는 Lula URDF (Thor 실측으로 확인된 경로)
         bundled = self._locate_bundled_motion_policy_dir()
         if bundled:
+            if robot_key:
+                robot_name = self.spec.name
+                p = os.path.join(bundled, robot_name, f"lula_{robot_name}_gen.urdf")
+                if os.path.isfile(p):
+                    return p
             p = os.path.join(bundled, "franka", "lula_franka_gen.urdf")
             if os.path.isfile(p):
                 return p
@@ -681,8 +720,17 @@ class RMPflowController:
         `franka_robot_description.yaml`을 추측했는데 실제 이름과 달라 항상
         실패했었다). 여러 흔한 이름 후보를 hint_dir(보통 rmpflow yaml이 있는
         디렉토리) 및 번들 경로에서 직접 찾는다.
+
+        franka 전용으로 하드코딩되어 있던 env var / 번들 하위경로도
+        spec.name 기반으로 일반화했다 (하위호환 유지).
         """
         import os
+        robot_key = (self.spec.name.upper() if self.spec and self.spec.name
+                     else "")
+        if robot_key:
+            env = os.environ.get(f"FDW_{robot_key}_ROBOT_DESCRIPTION")
+            if env and os.path.isfile(env):
+                return env
         env = os.environ.get("FDW_FRANKA_ROBOT_DESCRIPTION")
         if env and os.path.isfile(env):
             return env
@@ -697,6 +745,8 @@ class RMPflowController:
             search_dirs.append(hint_dir)
         bundled = self._locate_bundled_motion_policy_dir()
         if bundled:
+            if robot_key:
+                search_dirs.append(os.path.join(bundled, self.spec.name, "rmpflow"))
             search_dirs.append(os.path.join(bundled, "franka", "rmpflow"))
 
         for d in search_dirs:

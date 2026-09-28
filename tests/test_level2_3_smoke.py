@@ -43,7 +43,7 @@ def test_asset_catalog_required_entries() -> None:
 
     expected = [
         # AMRs
-        "nova_carter", "jetbot", "iw_hub", "iw_hub_static",
+        "mir100", "nova_carter", "jetbot", "iw_hub", "iw_hub_static",
         # Manipulators
         "ur10e", "ur5e", "ur16e",
         # Props
@@ -247,7 +247,7 @@ def test_workshop_viz_config_has_level23_fields() -> None:
             f"{name}: expected {typ.__name__}, got {type(val).__name__}"
 
     # 기본값 의미 검증
-    assert cfg.amr_asset_name == "nova_carter"
+    assert cfg.amr_asset_name == "mir100"
     assert cfg.smart_rack_asset_name == "klt_bin"
     assert cfg.forming_robot_name == "ur10"
     # Level 2.1 호환 필드도 보존됐는지

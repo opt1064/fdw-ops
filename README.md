@@ -36,7 +36,7 @@ ROS 2 / DDS 등 미들웨어를 통해 전체 공정을 운영하는 구조를 �
 |-------|------|--------|----------|
 | **1. Discrete Event** | FDW-OPS 운영체계 검증 (라우팅/버퍼/병목) | Pure Python | ✅ PoC-1 완료 |
 | **2. USD 시각화 (Level 2.0)** | 셀 / 로봇팔 / AMR / 부품 USD 표현 + transfer 애니메이션 | Isaac Sim 5.x | ✅ 구현 완료 |
-| **2.1. 실 로봇팔 + IK** | Franka Panda / UR10 USD 모델 + IK로 토치가 부품 추적 | Isaac Sim 5.x | ✅ 구현 완료 |
+| **2.1. 실 로봇팔 + IK** | FANUC CRX-10iA(기본) / Franka Panda / UR10 USD 모델 + IK로 토치가 부품 추적 | Isaac Sim 5.x | ✅ 구현 완료 |
 | **2.x Robot-in-the-loop** | RMPflow 충돌회피 / 스파크 파티클 / 비전 시뮬레이션 | Isaac Sim 5.x | 🔧 다음 단계 |
 | **3. AI / Learning-in-the-loop** | RL 라우팅 / 합성데이터 / 자율복구 | Isaac Lab + SDG | 🔭 다음 단계 |
 
@@ -124,10 +124,14 @@ ACCEPT_EULA=Y PRIVACY_CONSENT=Y python scripts/run_poc1_level2.py --livestream 2
 
 자세한 시각화 가이드: [docs/LEVEL2_VISUALIZATION.md](docs/LEVEL2_VISUALIZATION.md)
 
-### 4. Isaac Sim Level 2.1 — 실 로봇팔(Franka / UR10) + IK
+### 4. Isaac Sim Level 2.1 — 실 로봇팔(CRX-10iA / Franka / UR10) + IK
 
 ```bash
-# Franka Panda + IK (기본)
+# FANUC CRX-10iA + IK (기본, 용접 셀 실 기체)
+ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
+    python scripts/run_poc1_level2_1.py --gui --real-robot
+
+# Franka Panda로 되돌리기 (CRX-10iA USD 미확보 시)
 ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
     python scripts/run_poc1_level2_1.py --gui --real-robot --robot franka_panda
 
@@ -135,6 +139,15 @@ ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
 ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
     python scripts/run_poc1_level2_1.py --livestream 2 --real-robot --robot ur10
 ```
+
+> ⚠️ CRX-10iA USD 경로는 NVIDIA 공식 카탈로그 명명 규칙을 따른 추정치이며
+> 이 개발 환경에서 실제 Nucleus/S3 서버로 검증하지 못했습니다. 404가 나면
+> `FDW_FANUC_CRX10IA_USD=/path/to/crx10ia.usd`로 로컬 경로를 지정하거나
+> `--robot franka_panda`로 되돌리세요. 자세한 내용은
+> [fdw_sim/visualization/robot_loader.py](fdw_sim/visualization/robot_loader.py)의
+> `ROBOT_CATALOG["fanuc_crx10ia"]` 주석 참고. AMR 기본값도 MiR100으로
+> 바뀌었으며 동일한 이유로 `FDW_MIR100_USD` override를 지원합니다
+> (`--amr-asset nova_carter`로 되돌리기 가능).
 
 자세한 가이드: [docs/LEVEL2_1_REAL_ROBOT.md](docs/LEVEL2_1_REAL_ROBOT.md)
 

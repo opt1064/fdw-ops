@@ -120,6 +120,28 @@ ROBOT_CATALOG: Dict[str, RobotSpec] = {
         home_joint_positions=[0.012, -0.57, 0.0, -2.81, 0.0, 3.04, 0.741, 0.04, 0.04],
         description="[LEGACY 4.x] only resolves if locally present",
     ),
+    # === FANUC CRX-10iA — 용접 셀 실제 기체 ===
+    # ⚠️ usd_subpath는 NVIDIA 공식 카탈로그 명명 규칙(Isaac/Robots/<Vendor>/<Model>/...)을
+    #    따른 추정 경로이며, 이 개발 환경에서 살아있는 Nucleus/S3 서버로 직접
+    #    확인하지 못했다 (검색 결과 Isaac Sim Content Browser의 "Robots/Fanuc"
+    #    폴더에 CRX 시리즈가 다수 포함되어 있다는 정황만 확인됨). 경로가 404이면
+    #    RobotLoader가 그대로 RuntimeError를 던지고 호출자가 placeholder 박스로
+    #    fallback한다 (다른 모든 로봇과 동일한 동작). 실제 경로를 확인했다면 아래
+    #    usd_subpath를 갱신하거나, 코드를 건드리지 않고
+    #    FDW_FANUC_CRX10IA_USD=/path/to/crx10ia.usd 환경변수로 override 가능.
+    # end_effector_frame="tool0"은 ROS-Industrial FANUC URDF의 표준 플랜지 프레임
+    #    이름 — 실제 USD의 프레임 이름이 다르면 이 값도 함께 수정해야 한다.
+    "fanuc_crx10ia": RobotSpec(
+        name="fanuc_crx10ia",
+        usd_subpath="Isaac/Robots/Fanuc/CRX10IA/crx10ia.usd",
+        end_effector_frame="tool0",
+        # UR10과 유사한 앤트로포모픽 6축 구조 — 실측 전까지 UR10 elbow-up
+        # 자세를 재사용 (all-zero 자세는 팔이 완전히 펴져 IK 특이점에 가까움).
+        home_joint_positions=[0.0, -1.57, 1.57, -1.57, -1.57, 0.0],
+        base_offset_z=0.0,
+        description="FANUC CRX-10iA 6-DOF collaborative arm (welding cell) "
+                    "— USD 경로 미검증, 필요 시 FDW_FANUC_CRX10IA_USD로 override",
+    ),
 }
 
 

@@ -129,6 +129,24 @@ ASSET_CATALOG: Dict[str, UsdAssetSpec] = {
         description="Idealworks iw.hub (static / no actuation)",
         is_articulation=False,
     ),
+    "mir100": UsdAssetSpec(
+        name="mir100",
+        # ⚠️ Mobile Industrial Robots MiR100은 NVIDIA Isaac Sim 공식 카탈로그
+        #    포함 여부를 이 개발 환경에서 확인하지 못했다 (nova_carter/jetbot/
+        #    iw_hub와 달리 NVIDIA가 직접 배포하는 자산이 아닐 가능성이 높음 —
+        #    커뮤니티에서는 보통 ROS 패키지 `mir_robot`의 URDF를 USD로 변환해
+        #    사용한다). 아래 경로는 다른 벤더 항목과 동일한 명명 규칙을 따른
+        #    추정치이며, 404 시 find_local_asset()/resolve_asset_usd_path()가
+        #    자동으로 remote fallback 후 SceneBuilder가 placeholder 박스로
+        #    대체한다 (다른 AMR과 동일 동작).
+        #    실제 USD를 확보했다면 FDW_MIR100_USD=/path/to/mir100.usd 환경변수로
+        #    이 카탈로그를 건드리지 않고 override 가능.
+        usd_subpath="Isaac/Robots/MobileIndustrialRobots/mir100/mir100.usd",
+        category="amr",
+        description="Mobile Industrial Robots MiR100 — Isaac 공식 카탈로그 "
+                    "포함 미확인, 필요 시 FDW_MIR100_USD로 로컬 경로 지정 권장",
+        is_articulation=True,
+    ),
 
     # ========================================================================
     # Inspection — manipulators light (UR series for forming/inspection)
