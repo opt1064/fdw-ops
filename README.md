@@ -140,14 +140,19 @@ ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
     python scripts/run_poc1_level2_1.py --livestream 2 --real-robot --robot ur10
 ```
 
-> ⚠️ CRX-10iA USD 경로는 NVIDIA 공식 카탈로그 명명 규칙을 따른 추정치이며
-> 이 개발 환경에서 실제 Nucleus/S3 서버로 검증하지 못했습니다. 404가 나면
-> `FDW_FANUC_CRX10IA_USD=/path/to/crx10ia.usd`로 로컬 경로를 지정하거나
-> `--robot franka_panda`로 되돌리세요. 자세한 내용은
+> ✅ CRX-10iA USD 경로는 2026-09-28 DGX Spark 실측(S3 버킷 직접 리스팅)으로
+> 확인됐습니다 (`Isaac/Robots/Fanuc/crx10ia/crx10ia.usd`). 다만
+> `end_effector_frame` 프레임 이름은 여전히 추정치이므로 IK/RMPflow 정확도에
+> 영향이 있을 수 있습니다 (렌더링 자체는 무관).
+>
+> ❌ MiR100은 같은 방식으로 확인한 결과 **Isaac Sim 6.1 공식 카탈로그에 실제로
+> 없습니다** (제조사 목록 자체에 MiR/MobileIndustrialRobots 항목이 없음).
+> `FDW_MIR100_USD=/path/to/mir100.usd`로 직접 변환한 USD를 지정하거나,
+> `--amr-asset nova_carter`로 되돌리세요. 자세한 내용은
 > [fdw_sim/visualization/robot_loader.py](fdw_sim/visualization/robot_loader.py)의
-> `ROBOT_CATALOG["fanuc_crx10ia"]` 주석 참고. AMR 기본값도 MiR100으로
-> 바뀌었으며 동일한 이유로 `FDW_MIR100_USD` override를 지원합니다
-> (`--amr-asset nova_carter`로 되돌리기 가능).
+> `ROBOT_CATALOG["fanuc_crx10ia"]`와
+> [fdw_sim/visualization/asset_catalog.py](fdw_sim/visualization/asset_catalog.py)의
+> `ASSET_CATALOG["mir100"]` 주석 참고.
 
 자세한 가이드: [docs/LEVEL2_1_REAL_ROBOT.md](docs/LEVEL2_1_REAL_ROBOT.md)
 

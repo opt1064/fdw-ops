@@ -131,20 +131,28 @@ ASSET_CATALOG: Dict[str, UsdAssetSpec] = {
     ),
     "mir100": UsdAssetSpec(
         name="mir100",
-        # ⚠️ Mobile Industrial Robots MiR100은 NVIDIA Isaac Sim 공식 카탈로그
-        #    포함 여부를 이 개발 환경에서 확인하지 못했다 (nova_carter/jetbot/
-        #    iw_hub와 달리 NVIDIA가 직접 배포하는 자산이 아닐 가능성이 높음 —
-        #    커뮤니티에서는 보통 ROS 패키지 `mir_robot`의 URDF를 USD로 변환해
-        #    사용한다). 아래 경로는 다른 벤더 항목과 동일한 명명 규칙을 따른
-        #    추정치이며, 404 시 find_local_asset()/resolve_asset_usd_path()가
-        #    자동으로 remote fallback 후 SceneBuilder가 placeholder 박스로
-        #    대체한다 (다른 AMR과 동일 동작).
-        #    실제 USD를 확보했다면 FDW_MIR100_USD=/path/to/mir100.usd 환경변수로
-        #    이 카탈로그를 건드리지 않고 override 가능.
+        # ❌ Mobile Industrial Robots MiR100은 NVIDIA Isaac Sim 6.1 공식
+        #    카탈로그에 없음을 2026-09-28 확인했다 — omniverse-content-production
+        #    S3 버킷(us-west-2)의 Isaac/6.1/Isaac/Robots/ 최상위 제조사 목록을
+        #    직접 리스팅해봤고 (ANYbotics/Clearpath/Idealworks 등은 있지만)
+        #    MiR/MobileIndustrialRobots 항목 자체가 존재하지 않는다. 즉 아래
+        #    usd_subpath는 항상 404이며, "혹시 없을 수도" 단계가 아니라 확정된
+        #    사실이다.
+        #    실사용하려면 다음 중 하나가 필요하다:
+        #      1) FDW_MIR100_USD=/path/to/mir100.usd — 커뮤니티 ROS 패키지
+        #         `mir_robot`의 URDF를 isaacsim.asset.importer.urdf 확장으로
+        #         USD 변환해 로컬 경로로 지정 (아직 이 프로젝트엔 URDF import
+        #         파이프라인 자체가 구현돼 있지 않음 — 별도 작업 필요)
+        #      2) 그때까지는 --amr-asset nova_carter 등 실존하는 카탈로그
+        #         항목으로 되돌리기
+        #    404 시 find_local_asset()/resolve_asset_usd_path()가 remote로
+        #    fallback하고, SceneBuilder는 add_usd_reference()의 재확인
+        #    로직(2026-09-28 수정)으로 placeholder 박스로 정상 대체된다.
         usd_subpath="Isaac/Robots/MobileIndustrialRobots/mir100/mir100.usd",
         category="amr",
-        description="Mobile Industrial Robots MiR100 — Isaac 공식 카탈로그 "
-                    "포함 미확인, 필요 시 FDW_MIR100_USD로 로컬 경로 지정 권장",
+        description="Mobile Industrial Robots MiR100 — Isaac 6.1 공식 카탈로그에 "
+                    "없음을 확인(2026-09-28). FDW_MIR100_USD로 로컬 USD 지정 "
+                    "필요, 또는 --amr-asset nova_carter로 대체",
         is_articulation=True,
     ),
 
