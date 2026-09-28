@@ -8,12 +8,24 @@
     asset_catalog.py의 "mir100" 항목 주석 참고) — 이 스크립트가 그 갭을
     커뮤니티 URDF(DFKI-NI/mir_robot, BSD-3-Clause)로부터 직접 메운다.
 
-⚠️ 이 스크립트는 Isaac Sim 런타임(omni.kit.commands, URDF importer
-   익스텐션)이 필요해서 GPU 없는 환경에서는 동작 확인을 못 했다.
-   isaacsim.asset.importer.urdf(신규 네임스페이스, Isaac 4.5+)와
-   omni.importer.urdf(레거시)를 둘 다 시도하도록 짰지만, 두 경로 모두
-   미검증 상태 — 실행 중 ImportError/AttributeError가 나면 그 시점의
-   실제 에러 메시지를 보고 API를 맞춰야 한다.
+API 확인 이력:
+    2026-09-28 DGX Spark(Isaac Sim 6.1, isaacsim.asset.importer.urdf 3.11.10)
+    에서 help()로 직접 확인한 클래스 기반 API를 사용한다:
+
+        from isaacsim.asset.importer.urdf import URDFImporter, URDFImporterConfig
+        config = URDFImporterConfig(urdf_path=..., usd_path=<dest DIRECTORY>, ...)
+        importer = URDFImporter(config)
+        output_usd_path = importer.import_urdf()   # 실제 생성된 usd 경로를 반환
+
+    (예전 omni.importer.urdf._urdf.ImportConfig 방식은 이 Isaac Sim
+    설치에는 존재하지 않음 — extension registry에 아예 없음이 확인됨.)
+
+    ⚠️ URDFImporterConfig.usd_path는 "파일 경로"가 아니라 "USD를 저장할
+    디렉토리" 다. 생성되는 파일명은 importer가 정하므로(보통 URDF의
+    robot name 기반), --out으로 지정한 정확한 파일명이 그대로 나온다는
+    보장이 없다 — 그래서 import 후 필요하면 그 디렉토리로 지정하고
+    import_urdf()가 반환한 실제 경로를 최종적으로 --out 이름으로
+    복사/링크한다.
 
 사용법:
     "$ISAACSIM_PYTHON_EXE" scripts/import_mir100_usd.py \\
@@ -28,6 +40,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -37,9 +50,12 @@ def main() -> int:
     p.add_argument("--urdf", type=Path, required=True,
                    help="prepare_mir100_urdf.sh가 만든 mir100.urdf 경로")
     p.add_argument("--out", type=Path, required=True,
-                   help="출력 USD 경로 (예: ~/isaac_assets/Robots/MiR/mir100/mir100.usd)")
+                   help="최종적으로 이 경로에 USD 파일을 두고 싶다 (예: "
+                        "~/isaac_assets/Robots/MiR/mir100/mir100.usd) — 실제 "
+                        "변환은 이 파일의 디렉토리에서 이뤄지고, importer가 "
+                        "정한 파일명이 --out 이름과 다르면 복사해서 맞춘다.")
     p.add_argument("--fix-base", action="store_true",
-                   help="베이스를 월드에 고정(바닥 이동 로봇에는 보통 off)")
+                   help="베이스를 월드에 고정 (MiR100처럼 바닥 이동 로봇에는 지정하지 말 것)")
     p.add_argument("--headless", action="store_true", default=True,
                    help="헤드리스로 SimulationApp 실행 (기본 on — 변환만 하면 되므로)")
     args = p.parse_args()
@@ -50,74 +66,62 @@ def main() -> int:
         print(f"[FAIL] URDF not found: {urdf_path}", file=sys.stderr)
         print("       먼저 scripts/prepare_mir100_urdf.sh 를 실행하세요.", file=sys.stderr)
         return 1
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_dir = out_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # SimulationApp은 다른 omni.* import보다 먼저 인스턴스화해야 한다.
     from isaacsim import SimulationApp  # type: ignore
     simulation_app = SimulationApp({"headless": args.headless})
 
     try:
-        import omni.kit.commands  # type: ignore
-        import omni.usd  # type: ignore
+        import omni.kit.app  # type: ignore
+        ext_mgr = omni.kit.app.get_app().get_extension_manager()
+        ext_mgr.set_extension_enabled_immediate("isaacsim.asset.importer.urdf", True)
 
-        # 신규(isaacsim.asset.importer.urdf, Isaac 4.5+) 우선, 안 되면
-        # 레거시(omni.importer.urdf)로 폴백 — robot_loader.py의 3-tier
-        # 폴백 스타일과 동일한 이유(Isaac 버전마다 익스텐션 네임스페이스가
-        # 다름).
-        _urdf = None
-        for ext_name, mod_path in [
-            ("isaacsim.asset.importer.urdf", "isaacsim.asset.importer.urdf"),
-            ("omni.importer.urdf", "omni.importer.urdf"),
-        ]:
-            try:
-                import omni.kit.app  # type: ignore
-                ext_mgr = omni.kit.app.get_app().get_extension_manager()
-                ext_mgr.set_extension_enabled_immediate(ext_name, True)
-                _urdf = __import__(mod_path, fromlist=["_urdf"])._urdf
-                print(f"[INFO] using URDF importer extension: {ext_name}")
-                break
-            except Exception as e:  # noqa: BLE001
-                print(f"[WARN] extension {ext_name} unavailable ({e}) — trying next")
-                continue
+        from isaacsim.asset.importer.urdf import URDFImporter, URDFImporterConfig  # type: ignore
 
-        if _urdf is None:
-            print("[FAIL] no URDF importer extension available "
-                  "(tried isaacsim.asset.importer.urdf, omni.importer.urdf). "
-                  "Isaac Sim 설치에 URDF importer 익스텐션이 포함돼 있는지 "
-                  "확인하세요.", file=sys.stderr)
-            return 1
-
-        import_config = _urdf.ImportConfig()
-        import_config.merge_fixed_joints = True   # IMU/라이다 마운트 등 순수 센서 프레임 정리
-        import_config.convex_decomp = False
-        import_config.import_inertia_tensor = True
-        import_config.fix_base = args.fix_base    # MiR100은 바닥 이동 로봇 — 기본 False
-        import_config.make_default_prim = True
-        import_config.self_collision = False
-        import_config.create_physics_scene = False  # 씬 자체는 fdw-ops가 따로 만듦
-        import_config.distance_scale = 1.0
-        import_config.density = 0.0
-
-        print(f"[INFO] importing {urdf_path} -> {out_path}")
-        status, robot_prim_path = omni.kit.commands.execute(
-            "URDFParseAndImportFile",
+        config = URDFImporterConfig(
             urdf_path=str(urdf_path),
-            import_config=import_config,
-            dest_path=str(out_path),
+            usd_path=str(out_dir),
+            merge_fixed_joints=True,   # IMU/라이다 마운트 등 순수 센서 프레임 정리
+            merge_mesh=False,
+            collision_from_visuals=False,
+            fix_base=args.fix_base,   # MiR100은 바닥 이동 로봇 — 기본 False(floating-base)
         )
 
-        if not status:
-            print(f"[FAIL] URDFParseAndImportFile returned status={status}",
+        print(f"[INFO] importing {urdf_path}")
+        print(f"[INFO]   output dir: {out_dir}")
+        importer = URDFImporter(config)
+        generated_path = importer.import_urdf()
+
+        if not generated_path:
+            print("[FAIL] import_urdf() returned empty path", file=sys.stderr)
+            return 1
+
+        generated_path = Path(generated_path)
+        if not generated_path.is_file():
+            print(f"[FAIL] importer reported {generated_path} but it doesn't exist",
                   file=sys.stderr)
             return 1
 
-        if not out_path.is_file():
-            print(f"[FAIL] import reported success but {out_path} does not exist",
-                  file=sys.stderr)
-            return 1
+        ok(f"USD generated: {generated_path}")
 
-        print(f"[ OK ] USD written: {out_path}")
-        print(f"[ OK ] robot prim path in imported stage: {robot_prim_path}")
+        if generated_path != out_path:
+            print(f"[INFO] importer가 정한 파일명이 --out과 달라서 복사: "
+                  f"{generated_path} -> {out_path}")
+            shutil.copy2(generated_path, out_path)
+            # USD가 상대경로로 sub-asset(mesh 등)을 참조하는 경우가 많으므로
+            # 같은 디렉토리에 생성된 나머지 파일들도 함께 복사한다.
+            if generated_path.parent != out_path.parent:
+                for item in generated_path.parent.iterdir():
+                    if item == generated_path:
+                        continue
+                    dest = out_path.parent / item.name
+                    if item.is_dir():
+                        shutil.copytree(item, dest, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(item, dest)
+
         print()
         print("=" * 70)
         print(f" export FDW_MIR100_USD={out_path}")
@@ -125,6 +129,10 @@ def main() -> int:
         return 0
     finally:
         simulation_app.close()
+
+
+def ok(msg: str) -> None:
+    print(f"[ OK ] {msg}")
 
 
 if __name__ == "__main__":
