@@ -157,6 +157,9 @@ class WorkshopVisualizer:
         # cell_id -> 그 셀 로봇이 지금 나르고 있는 part_id (carry 단계에서
         # 매 프레임 TCP 위치로 부품을 따라가게 함)
         self._active_pick_place: Dict[str, str] = {}
+        # cell_id -> 그 part를 배송한 amr_id — pick-and-place가 끝나면
+        # material_cell.confirm_pickup(amr_id)으로 AMR을 재배차 가능하게 푼다
+        self._active_pick_place_amr: Dict[str, str] = {}
         # PROCESSING 이벤트가 pick-and-place 도중에 도착해 용접 모션을
         # 바로 시작 못 한 셀들 — pick-and-place 끝나는 대로 시작해준다
         self._pending_weld_after_pick: set = set()
@@ -193,8 +196,15 @@ class WorkshopVisualizer:
         })
 
     def attach_material_cell(self, cell: MaterialCell) -> None:
-        """MaterialCell 참조 — 랙 부품 자동 spawn에 사용."""
+        """MaterialCell 참조 — 랙 부품 자동 spawn에 사용.
+
+        시각화가 붙는 순간부터는 AMR이 도착 즉시 재배차되지 않고, 이
+        visualizer가 pick-and-place(또는 그 폴백)를 끝내고 confirm_pickup()을
+        호출할 때까지 도크에서 대기하도록 MaterialCell에 알린다 — 로봇이
+        집어가기도 전에 AMR이 다음 배송으로 가버리던 문제(2026-09-28 DGX
+        Spark 실측) 수정."""
         self._material_cell = cell
+        cell.require_pickup_confirmation = True
 
     # ========================================================================
     # 로봇팔 spawn (placeholder vs 실 모델)
@@ -628,6 +638,9 @@ class WorkshopVisualizer:
                     del self._active_pick_place[cell_id]
                     logger.info("[VIS] pick-and-place finished @ %s: %s placed on bench",
                                 cell_id, part_id)
+                    amr_id = self._active_pick_place_amr.pop(cell_id, None)
+                    if amr_id and self._material_cell is not None:
+                        self._material_cell.confirm_pickup(amr_id)
                     if cell_id in self._pending_weld_after_pick:
                         self._pending_weld_after_pick.discard(cell_id)
                         self._start_welding_motion(cell_id)
@@ -806,7 +819,7 @@ class WorkshopVisualizer:
                 if amr.last_delivered_part_id and amr.last_delivered_to and dock is not None:
                     self._on_amr_delivered(
                         amr.last_delivered_part_id, amr.last_delivered_to,
-                        (dock[0], dock[1], 0.0),
+                        (dock[0], dock[1], 0.0), amr.amr_id,
                     )
 
             if not amr.busy:
@@ -827,21 +840,47 @@ class WorkshopVisualizer:
                                       amr.payload_part_id)
 
     def _on_amr_delivered(self, part_id: str, to_cell: str,
-                          amr_pos: Tuple[float, float, float]) -> None:
+                          amr_pos: Tuple[float, float, float],
+                          amr_id: str) -> None:
         """AMR이 부품을 셀에 배송한 순간 — 그 셀에 로봇팔이 있으면
-        pick-and-place(AMR -> 작업대) 모션을 시작하고, 없으면(또는 로봇이
-        이미 다른 동작 중이면) 예전처럼 바로 입력 버퍼 위치로 스냅한다."""
+        pick-and-place(AMR -> 작업대) 모션을 시작한다. 로봇이 이미 다른
+        동작 중이라 pick-and-place를 못 시작했을 때만 예전처럼 바로 입력
+        버퍼 위치로 스냅한다(로봇이 있는데 안 집어가면 부품이 AMR 위에
+        영원히 남아있는 것도 이상하므로).
+
+        그 셀에 로봇팔 자체가 없는 경우(--real-robot 미지정 등, 2026-09-28
+        AMR 단독 검증 시나리오)는 스냅하지 않는다 — 넘겨줄 로봇이 없는데
+        입력 버퍼로 순간이동시키면 "AMR이 실어나른다"는 걸 확인하려는
+        목적과 반대로 부품이 AMR과 무관하게 텔레포트하는 것처럼 보인다.
+        이 경우 부품은 _update_amr_positions()가 마지막으로 놓아둔 위치
+        (AMR 적재함, 도착 지점)에 그대로 남는다.
+
+        MaterialCell.require_pickup_confirmation이 켜져 있으면(=이
+        visualizer가 attach_material_cell로 붙어있으면 항상 켜짐) 이 AMR은
+        도착 시점에 이미 도크에서 대기 상태(awaiting_pickup)다 —
+        pick-and-place가 실제로 시작된 경우에만 나중에(update() 루프에서
+        모션이 끝날 때) confirm_pickup을 호출해 풀어주고, 그 외의 모든
+        경우(로봇 없음/경합으로 시작 실패)는 기다릴 대상이 없으므로 여기서
+        바로 풀어준다 — 안 그러면 max_pickup_wait_sec 타임아웃까지
+        불필요하게 도크를 막아버린다."""
         started = False
         if to_cell in self._robots:
-            started = self._start_pick_and_place(to_cell, part_id, amr_pos)
-        if not started and self.scene is not None:
+            started = self._start_pick_and_place(to_cell, part_id, amr_pos, amr_id)
+        if started:
+            return
+        if self._material_cell is not None:
+            self._material_cell.confirm_pickup(amr_id)
+        if to_cell not in self._robots:
+            return
+        if self.scene is not None:
             try:
                 self.scene.move_part(part_id, self._input_buffer_pos(to_cell))
             except Exception:
                 logger.exception("[VIS] fallback move_part failed for %s", part_id)
 
     def _start_pick_and_place(self, cell_id: str, part_id: str,
-                              amr_pos: Tuple[float, float, float]) -> bool:
+                              amr_pos: Tuple[float, float, float],
+                              amr_id: str) -> bool:
         """AMR 위 부품을 로봇팔로 집어 작업대(입력 버퍼)로 옮기는 모션 시작.
 
         기존 _start_welding_motion과 동일한 3단계 경로(approach/weld/retreat)
@@ -888,6 +927,7 @@ class WorkshopVisualizer:
             return False
 
         self._active_pick_place[cell_id] = part_id
+        self._active_pick_place_amr[cell_id] = amr_id
         logger.info("[VIS] pick-and-place started @ %s: %s (%s -> %s)",
                     cell_id, part_id, start, end)
         return True

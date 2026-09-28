@@ -145,10 +145,123 @@ def test_amr_current_world_pos_none_when_cells_unset() -> None:
     print("[OK] _amr_current_world_pos returns None for an unassigned AMR")
 
 
+class _Sink:
+    """receive_part을 항상 성공시키는 더미 타겟 셀."""
+    cell_id = "WELDING_CELL_01"
+
+    def receive_part(self, part_id):
+        return True
+
+
+def test_amr_waits_at_dock_until_pickup_confirmed() -> None:
+    """require_pickup_confirmation=True면 도착해도 busy가 안 풀리고,
+    confirm_pickup()을 호출해야 비로소 재배차 가능해진다 — 로봇이 집어가기도
+    전에 AMR이 다음 배송으로 가버리던 문제(2026-09-28 DGX Spark 실측) 수정."""
+    from fdw_sim.messaging.schemas import MaterialTransferCommand
+
+    mat, _bus = _make_material_cell()
+    mat.require_pickup_confirmation = True
+    mat.stock_part("PART_X", "tubular_frame_A")
+    mat.cell_registry["WELDING_CELL_01"] = _Sink()
+
+    cmd = MaterialTransferCommand(
+        from_cell="MATERIAL_CELL_01", to_cell="WELDING_CELL_01",
+        part_id="PART_X", carrier="AMR_01",
+    )
+    mat._on_transfer_command(cmd)
+    mat._dispatch_amrs()
+    amr = mat.amrs[0]
+    mat._step_amr(amr, dt=11.0)
+
+    # 도착은 했지만 로봇이 아직 안 집어갔으므로 재배차되면 안 된다
+    assert amr.busy is True
+    assert amr.awaiting_pickup is True
+    assert amr.last_delivered_part_id == "PART_X"
+
+    # 대기 중에는 dispatch가 이 AMR을 건드리지 않는다(재고가 있어도)
+    mat.stock_part("PART_Y", "tubular_frame_A")
+    cmd2 = MaterialTransferCommand(
+        from_cell="MATERIAL_CELL_01", to_cell="WELDING_CELL_01",
+        part_id="PART_Y", carrier="AMR_01",
+    )
+    mat._on_transfer_command(cmd2)
+    mat._dispatch_amrs()
+    assert amr.busy is True and amr.awaiting_pickup is True
+    assert amr.payload_part_id is None  # 재배차 안 됐음
+
+    # 로봇의 pick-and-place가 끝나면 visualizer가 confirm_pickup을 호출
+    mat.confirm_pickup("AMR_01")
+    assert amr.busy is False
+    assert amr.awaiting_pickup is False
+
+    # 이제서야 재배차 가능
+    mat._dispatch_amrs()
+    assert amr.busy is True
+    assert amr.payload_part_id == "PART_Y"
+    print("[OK] AMR stays parked at dock until confirm_pickup() releases it")
+
+
+def test_amr_pickup_wait_times_out_if_never_confirmed() -> None:
+    """visualizer가 confirm_pickup을 깜빡해도(로봇 로딩 실패 등) 영구히
+    묶이지 않고 max_pickup_wait_sec 뒤에 자동으로 풀린다."""
+    from fdw_sim.messaging.schemas import MaterialTransferCommand
+
+    mat, _bus = _make_material_cell()
+    mat.require_pickup_confirmation = True
+    mat.max_pickup_wait_sec = 5.0
+    mat.stock_part("PART_X", "tubular_frame_A")
+    mat.cell_registry["WELDING_CELL_01"] = _Sink()
+
+    cmd = MaterialTransferCommand(
+        from_cell="MATERIAL_CELL_01", to_cell="WELDING_CELL_01",
+        part_id="PART_X", carrier="AMR_01",
+    )
+    mat._on_transfer_command(cmd)
+    mat._dispatch_amrs()
+    amr = mat.amrs[0]
+    mat._step_amr(amr, dt=11.0)
+    assert amr.awaiting_pickup is True
+
+    mat._step_awaiting_pickup(amr, dt=3.0)
+    assert amr.awaiting_pickup is True  # 아직 타임아웃 전
+
+    mat._step_awaiting_pickup(amr, dt=3.0)
+    assert amr.awaiting_pickup is False
+    assert amr.busy is False
+    print("[OK] awaiting_pickup force-releases after max_pickup_wait_sec")
+
+
+def test_default_require_pickup_confirmation_is_false() -> None:
+    """discrete 모드/테스트 등 시각화가 안 붙은 MaterialCell은 예전처럼
+    도착 즉시 AMR이 풀려야 한다(회귀 방지)."""
+    mat, _bus = _make_material_cell()
+    assert mat.require_pickup_confirmation is False
+    print("[OK] require_pickup_confirmation defaults to False")
+
+
+def test_attach_material_cell_enables_pickup_confirmation() -> None:
+    from fdw_sim.visualization.workshop_visualizer import (
+        WorkshopVisualizer, WorkshopVizConfig,
+    )
+    from fdw_sim.messaging.bus import InMemoryBus
+
+    mat, _bus_mat = _make_material_cell()
+    assert mat.require_pickup_confirmation is False
+
+    viz = WorkshopVisualizer(bus=InMemoryBus(), config=WorkshopVizConfig())
+    viz.attach_material_cell(mat)
+    assert mat.require_pickup_confirmation is True
+    print("[OK] attach_material_cell turns on require_pickup_confirmation")
+
+
 if __name__ == "__main__":
     test_amr_records_total_distance_and_from_cell()
     test_amr_delivery_leaves_snapshot_for_visualizer()
     test_amr_dock_pos_applies_offset()
     test_amr_current_world_pos_interpolates_linearly()
     test_amr_current_world_pos_none_when_cells_unset()
+    test_amr_waits_at_dock_until_pickup_confirmed()
+    test_amr_pickup_wait_times_out_if_never_confirmed()
+    test_default_require_pickup_confirmation_is_false()
+    test_attach_material_cell_enables_pickup_confirmation()
     print("\nAll Level 2.4 AMR pick-and-place tests passed!")

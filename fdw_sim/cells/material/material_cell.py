@@ -50,6 +50,12 @@ class AMR:
     last_delivered_part_id: Optional[str] = None
     last_delivered_to: Optional[str] = None
     last_delivered_command_id: Optional[str] = None
+    # require_pickup_confirmation=True일 때, 도착은 했지만 로봇의
+    # pick-and-place가 끝날 때까지(WorkshopVisualizer.confirm_pickup 호출
+    # 전까지) 재배차되지 않고 도크에서 대기 중임을 표시. busy는 True로
+    # 유지되어 _dispatch_amrs()가 이 AMR을 건드리지 않는다.
+    awaiting_pickup: bool = False
+    pickup_wait_elapsed: float = 0.0
 
 
 @dataclass
@@ -78,6 +84,14 @@ class MaterialCell(DistributedIntelligenceCell):
             for i in range(num_amrs)
         ]
         self.transfer_queue: List[MaterialTransferCommand] = []
+
+        # WorkshopVisualizer.attach_material_cell()이 로봇이 있는 시각화
+        # 환경에서만 True로 켠다 — 켜지면 도착한 AMR이 confirm_pickup()
+        # 호출(또는 max_pickup_wait_sec 타임아웃) 전까지 재배차되지 않는다.
+        # 기본 False: discrete 모드/테스트/시각화 없는 headless 실행은
+        # 예전처럼 도착 즉시 AMR이 자유로워진다.
+        self.require_pickup_confirmation: bool = False
+        self.max_pickup_wait_sec: float = 15.0
 
         # 이송 중인 부품: part_id -> 현재 보유 AMR
         self.in_transit: Dict[str, AMR] = {}
@@ -122,6 +136,8 @@ class MaterialCell(DistributedIntelligenceCell):
                 amr.payload_part_id = None
                 amr.from_cell = None
                 amr.target_cell = None
+                amr.awaiting_pickup = False
+                amr.pickup_wait_elapsed = 0.0
             return True
         return False
 
@@ -141,7 +157,9 @@ class MaterialCell(DistributedIntelligenceCell):
 
         # 각 AMR 진행
         for amr in self.amrs:
-            if amr.busy:
+            if amr.awaiting_pickup:
+                self._step_awaiting_pickup(amr, dt)
+            elif amr.busy:
                 self._step_amr(amr, dt)
 
         # 부모 step (상태 발행 등)
@@ -220,13 +238,49 @@ class MaterialCell(DistributedIntelligenceCell):
         amr.last_delivered_part_id = delivered_part
         amr.last_delivered_to = delivered_to
         amr.last_delivered_command_id = amr.transfer_command_id
-        amr.busy = False
         amr.payload_part_id = None
         amr.from_cell = None
         amr.target_cell = None
         amr.transfer_command_id = None
+        if self.require_pickup_confirmation:
+            # busy=True 유지 — WorkshopVisualizer가 pick-and-place를 끝내고
+            # confirm_pickup()을 호출할 때까지(또는 타임아웃까지) 도크에서
+            # 대기, _dispatch_amrs()의 재배차 대상에서 제외된다.
+            amr.awaiting_pickup = True
+            amr.pickup_wait_elapsed = 0.0
+        else:
+            amr.busy = False
         logger.info("[%s] %s delivered %s to %s",
                     self.cell_id, amr.amr_id, delivered_part, delivered_to)
+
+    def _step_awaiting_pickup(self, amr: AMR, dt: float) -> None:
+        """도착 후 로봇의 pick-and-place 완료(confirm_pickup) 대기.
+
+        WorkshopVisualizer가 pick-and-place를 시작조차 못 했거나(로봇 없음/
+        busy 경합) 알림을 깜빡 누락하는 경우에도 AMR이 영구히 묶이지 않도록
+        max_pickup_wait_sec 타임아웃 시 강제로 풀어준다.
+        """
+        amr.pickup_wait_elapsed += dt
+        if amr.pickup_wait_elapsed >= self.max_pickup_wait_sec:
+            logger.warning(
+                "[%s] %s pickup confirmation timeout (%.1fs) — force-releasing "
+                "(WorkshopVisualizer가 confirm_pickup()을 호출 안 했을 가능성)",
+                self.cell_id, amr.amr_id, amr.pickup_wait_elapsed)
+            amr.awaiting_pickup = False
+            amr.busy = False
+            amr.pickup_wait_elapsed = 0.0
+
+    def confirm_pickup(self, amr_id: str) -> None:
+        """WorkshopVisualizer가 pick-and-place(또는 그 폴백)를 끝낸 뒤 호출 —
+        도크에서 대기 중이던 AMR을 재배차 가능 상태로 풀어준다."""
+        for amr in self.amrs:
+            if amr.amr_id == amr_id and amr.awaiting_pickup:
+                amr.awaiting_pickup = False
+                amr.busy = False
+                amr.pickup_wait_elapsed = 0.0
+                logger.info("[%s] %s released (pickup confirmed)",
+                            self.cell_id, amr.amr_id)
+                return
 
     # MaterialCell은 자체 PROCESSING 작업이 없음
     def step_processing(self, dt: float) -> None:  # pragma: no cover
