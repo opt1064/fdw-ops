@@ -140,9 +140,15 @@ ASSET_CATALOG: Dict[str, UsdAssetSpec] = {
         #    사실이다.
         #    실사용하려면 다음 중 하나가 필요하다:
         #      1) FDW_MIR100_USD=/path/to/mir100.usd — 커뮤니티 ROS 패키지
-        #         `mir_robot`의 URDF를 isaacsim.asset.importer.urdf 확장으로
-        #         USD 변환해 로컬 경로로 지정 (아직 이 프로젝트엔 URDF import
-        #         파이프라인 자체가 구현돼 있지 않음 — 별도 작업 필요)
+        #         DFKI-NI/mir_robot(BSD-3-Clause)의 URDF를
+        #         isaacsim.asset.importer.urdf 확장으로 USD 변환해 로컬
+        #         경로로 지정. 변환 파이프라인은 2026-09-28에 두 단계로
+        #         준비해뒀다 (1단계는 GPU 불필요, 이 컨테이너에서 실제로
+        #         돌려서 19링크/20조인트 URDF 생성까지 검증 완료):
+        #           scripts/prepare_mir100_urdf.sh          (1단계: URDF 준비)
+        #           scripts/import_mir100_usd.py            (2단계: USD 변환,
+        #                                                     $ISAACSIM_PYTHON_EXE
+        #                                                     로 실행, 미검증)
         #      2) 그때까지는 --amr-asset nova_carter 등 실존하는 카탈로그
         #         항목으로 되돌리기
         #    404 시 find_local_asset()/resolve_asset_usd_path()가 remote로
