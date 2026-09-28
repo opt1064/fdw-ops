@@ -1057,10 +1057,14 @@ class SceneBuilder:
                              ) -> Optional[str]:
         """Material Cell — 실 KLT bin USD를 격자로 배치.
 
-        prop_asset이 로컬에 없으면 None → 호출자가 add_smart_rack() 큐브로 fallback.
+        로컬에 없으면 add_amr_usd/add_real_robot_arm과 동일하게 원격(S3/Nucleus)
+        경로로 재시도한다 (이전엔 로컬에만 없어도 바로 포기하고 큐브로
+        fallback했는데, 정작 로봇팔/AMR은 원격 fetch가 이 네트워크에서 정상
+        동작하는 것으로 실측 확인됨 — 스마트랙만 그 경로가 빠져 있었다).
+        정말 reference attach 자체가 실패해야만 None → add_smart_rack() 큐브 fallback.
         """
         from fdw_sim.visualization.asset_catalog import (
-            ASSET_CATALOG, find_local_asset,
+            ASSET_CATALOG, find_local_asset, resolve_asset_usd_path,
         )
 
         spec = ASSET_CATALOG.get(prop_asset)
@@ -1072,11 +1076,10 @@ class SceneBuilder:
             return None
 
         local = find_local_asset(spec)
+        usd_path = local if local is not None else resolve_asset_usd_path(spec)
         if local is None:
-            logger.info("[VIS] add_smart_rack_real: %s not local — fallback",
-                        prop_asset)
-            return None
-        usd_path = local
+            logger.info("[VIS] add_smart_rack_real: %s not local — "
+                        "trying remote %s", prop_asset, usd_path)
 
         rack_path = f"{cell_root}/SmartRack_USD"
         self._UsdGeom.Xform.Define(self._stage, rack_path)
