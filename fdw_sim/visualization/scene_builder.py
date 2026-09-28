@@ -72,12 +72,13 @@ class SceneBuilder:
         self.config = config or SceneConfig()
 
         # lazy import: Isaac Sim이 시작된 뒤에만 가능
-        from pxr import Usd, UsdGeom, UsdLux, Gf, Sdf  # type: ignore
+        from pxr import Usd, UsdGeom, UsdLux, UsdShade, Gf, Sdf  # type: ignore
         import omni.usd  # type: ignore
 
         self._Usd = Usd
         self._UsdGeom = UsdGeom
         self._UsdLux = UsdLux
+        self._UsdShade = UsdShade
         self._Gf = Gf
         self._Sdf = Sdf
         self._omni_usd = omni.usd
@@ -88,6 +89,9 @@ class SceneBuilder:
 
         # 루트 Xform 생성
         UsdGeom.Xform.Define(self._stage, self.config.root_prim_path)
+
+        # 재질 캐시 — 이름별로 한 번만 생성 (_get_or_create_material)
+        self._material_cache: Dict[str, object] = {}
 
         # prim 추적
         self._cell_prims: Dict[str, str] = {}     # cell_id -> prim path
@@ -120,6 +124,9 @@ class SceneBuilder:
         if center != (0.0, 0.0, 0.0):
             self._set_translate(path, center)
         self._set_color(path, self.config.ground_color)
+        mat = self._get_or_create_material("Concrete", self.config.ground_color,
+                                           roughness=0.85, metallic=0.0)
+        self._apply_material(path, mat)
         return path
 
     def add_factory_walls(self,
@@ -160,6 +167,9 @@ class SceneBuilder:
             self._set_scale(wall_path, half_extent)
             self._set_translate(wall_path, center)
             self._set_color(wall_path, color)
+            mat = self._get_or_create_material("PaintedMetalWall", color,
+                                               roughness=0.5, metallic=0.15)
+            self._apply_material(wall_path, mat)
 
         logger.info("[VIS] factory walls added (bounds=%s, height=%.1fm)",
                     bounds, height)
@@ -184,6 +194,9 @@ class SceneBuilder:
         self._set_translate(roof_path, ((x_min + x_max) / 2.0, (y_min + y_max) / 2.0,
                                           height + thickness / 2.0))
         self._set_color(roof_path, color)
+        mat = self._get_or_create_material("RoofPanel", color,
+                                           roughness=0.6, metallic=0.1)
+        self._apply_material(roof_path, mat)
         logger.info("[VIS] roof added @ z=%.2fm", height)
         return roof_path
 
@@ -219,6 +232,9 @@ class SceneBuilder:
             self._set_scale(fixture_path, (0.6, 0.15, 0.05))
             self._set_translate(fixture_path, pos)
             self._set_color(fixture_path, (0.85, 0.85, 0.8))
+            fixture_mat = self._get_or_create_material(
+                "LightFixtureHousing", (0.85, 0.85, 0.8), roughness=0.3, metallic=0.2)
+            self._apply_material(fixture_path, fixture_mat)
 
             # 실제 발광 — RectLight (피팅보다 살짝 아래, 천장 쪽에서 아래를 향해 발광)
             light_path = f"{lights_root}/Fixture_{i:02d}_Light"
@@ -248,6 +264,10 @@ class SceneBuilder:
         self._set_scale(path, (w / 2.0, d / 2.0, 0.01))
         self._set_translate(path, (x0 + w / 2.0, y0 + d / 2.0, z))
         self._set_color(path, color)
+        # 에폭시 바닥 코팅 느낌 — 반광택, 비금속
+        mat = self._get_or_create_material(f"ZoneFloor_{name}", color,
+                                           roughness=0.65, metallic=0.0)
+        self._apply_material(path, mat)
         return path
 
     def add_safety_fence(self, root_name: str,
@@ -280,6 +300,9 @@ class SceneBuilder:
             self._set_scale(seg_path, half_extent)
             self._set_translate(seg_path, center)
             self._set_color(seg_path, color)
+            mat = self._get_or_create_material("SafetyYellow", color,
+                                               roughness=0.4, metallic=0.1)
+            self._apply_material(seg_path, mat)
 
         logger.info("[VIS] safety fence '%s' added (gate=%.1fm)", root_name, gate_w)
         return fence_root
@@ -303,14 +326,21 @@ class SceneBuilder:
         self._set_scale(body_path, (w * 0.35, d * 0.35, h / 2.0))
         self._set_translate(body_path, (cx, cy, h / 2.0))
         self._set_color(body_path, color)
+        body_mat = self._get_or_create_material("UnimplementedBody", color,
+                                                 roughness=0.55, metallic=0.05)
+        self._apply_material(body_path, body_mat)
 
         # 경고색 스트라이프 상단 테두리 — "이 셀은 아직 시뮬레이션 로직 없음"
+        stripe_color = (0.95, 0.75, 0.1)
         stripe_path = f"{root}/WarningStripe"
         stripe = self._UsdGeom.Cube.Define(self._stage, stripe_path)
         stripe.CreateSizeAttr(2.0)
         self._set_scale(stripe_path, (w * 0.35, d * 0.35, 0.03))
         self._set_translate(stripe_path, (cx, cy, h + 0.03))
-        self._set_color(stripe_path, (0.95, 0.75, 0.1))
+        self._set_color(stripe_path, stripe_color)
+        stripe_mat = self._get_or_create_material("SafetyYellow", stripe_color,
+                                                   roughness=0.4, metallic=0.1)
+        self._apply_material(stripe_path, stripe_mat)
 
         logger.info("[VIS] unimplemented-cell placeholder '%s' (%s) @ (%.1f, %.1f)",
                     zone_name, label, cx, cy)
@@ -344,6 +374,9 @@ class SceneBuilder:
             self._set_scale(rack_path, (w / 2.0, d / 2.0, h / 2.0))
             self._set_translate(rack_path, (x0 + w / 2.0, y0 + d / 2.0, h / 2.0))
             self._set_color(rack_path, (0.25, 0.45, 0.65))
+            rack_mat = self._get_or_create_material("SteelRack", (0.25, 0.45, 0.65),
+                                                     roughness=0.35, metallic=0.65)
+            self._apply_material(rack_path, rack_mat)
 
         # AMR 충전 도크 표시 (충전소 구역 안, 바닥 마커)
         # half-height=0.025이므로 바닥에 딱 붙으려면 중심 z도 0.025 —
@@ -355,23 +388,32 @@ class SceneBuilder:
             self._set_scale(dock_path, (0.6, 0.45, 0.025))
             self._set_translate(dock_path, (x, y, 0.025))
             self._set_color(dock_path, (0.3, 0.7, 0.3))
+            dock_mat = self._get_or_create_material("ChargeDockGreen", (0.3, 0.7, 0.3),
+                                                     roughness=0.45, metallic=0.0)
+            self._apply_material(dock_path, dock_mat)
 
         # 서버실 가벽 (동쪽 + 남쪽 — 복도 쪽으로 열려 있는 나머지 2면은 건물 외벽이 대신함)
         sx0, sy0, sw, sd, _c, _l = WORKSHOP_ZONES["server_room"]
         t, h = 0.1, 3.0
+        interior_wall_color = (0.7, 0.7, 0.72)
+        interior_wall_mat = self._get_or_create_material(
+            "InteriorPartitionWall", interior_wall_color, roughness=0.55, metallic=0.1)
+
         wall_e = f"{self.config.root_prim_path}/Layout/ServerRoom/wall_e"
         we = self._UsdGeom.Cube.Define(self._stage, wall_e)
         we.CreateSizeAttr(2.0)
         self._set_scale(wall_e, (t / 2.0, sd / 2.0, h / 2.0))
         self._set_translate(wall_e, (sx0 + sw - t / 2.0, sy0 + sd / 2.0, h / 2.0))
-        self._set_color(wall_e, (0.7, 0.7, 0.72))
+        self._set_color(wall_e, interior_wall_color)
+        self._apply_material(wall_e, interior_wall_mat)
 
         wall_s = f"{self.config.root_prim_path}/Layout/ServerRoom/wall_s"
         ws = self._UsdGeom.Cube.Define(self._stage, wall_s)
         ws.CreateSizeAttr(2.0)
         self._set_scale(wall_s, (sw / 2.0, t / 2.0, h / 2.0))
         self._set_translate(wall_s, (sx0 + sw / 2.0, sy0 + t / 2.0, h / 2.0))
-        self._set_color(wall_s, (0.7, 0.7, 0.72))
+        self._set_color(wall_s, interior_wall_color)
+        self._apply_material(wall_s, interior_wall_mat)
 
         # 3세부 소성가공 셀 — 안전펜스 (반입구 3.8m)
         fx0, fy0, fw, fd, _c, _l = WORKSHOP_ZONES["forming_cell"]
@@ -1381,3 +1423,49 @@ class SceneBuilder:
         gprim = self._UsdGeom.Gprim(prim)
         attr = gprim.GetDisplayColorAttr()
         attr.Set([self._Gf.Vec3f(*color)])
+
+    # ========================================================================
+    # 재질 (UsdPreviewSurface) — MDL(.mdl) 파일 없이 러프니스/메탈릭만으로
+    # RTX에서 실제 빛 반응을 주는 경량 PBR. add_workshop_layout()의 primitive
+    # 지오메트리(바닥/벽/랙/펜스)가 DisplayColor만 쓰던 무광 평면 색상 대신
+    # 이걸 쓰면 조명 반사가 생겨 "실감"이 크게 올라간다. Iron.mdl/Gold.mdl
+    # 로드 실패 이슈(별도 문서에 기록됨)를 완전히 피해간다 — 외부 .mdl 자산이
+    # 전혀 필요 없다.
+    # ========================================================================
+    def _get_or_create_material(self, name: str,
+                                color: Tuple[float, float, float],
+                                roughness: float = 0.6,
+                                metallic: float = 0.0) -> object:
+        """이름으로 캐싱되는 UsdPreviewSurface 재질을 반환 (없으면 생성)."""
+        if name in self._material_cache:
+            return self._material_cache[name]
+
+        UsdShade = self._UsdShade
+        Gf = self._Gf
+        mat_path = f"{self.config.root_prim_path}/Materials/{name}"
+        material = UsdShade.Material.Define(self._stage, mat_path)
+        shader = UsdShade.Shader.Define(self._stage, f"{mat_path}/PreviewSurface")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader.CreateInput("diffuseColor", self._Sdf.ValueTypeNames.Color3f).Set(
+            Gf.Vec3f(*color))
+        shader.CreateInput("roughness", self._Sdf.ValueTypeNames.Float).Set(
+            float(roughness))
+        shader.CreateInput("metallic", self._Sdf.ValueTypeNames.Float).Set(
+            float(metallic))
+        material.CreateSurfaceOutput().ConnectToSource(
+            shader.ConnectableAPI(), "surface")
+
+        self._material_cache[name] = material
+        return material
+
+    def _apply_material(self, prim_path: str, material: object) -> None:
+        """prim에 재질을 바인딩 (DisplayColor는 그대로 fallback으로 남는다)."""
+        prim = self._stage.GetPrimAtPath(prim_path)
+        if not prim:
+            return
+        try:
+            binding_api = self._UsdShade.MaterialBindingAPI.Apply(prim)
+            binding_api.Bind(material)
+        except Exception:
+            logger.warning("[VIS] _apply_material: bind failed for %s",
+                           prim_path, exc_info=True)
