@@ -123,13 +123,30 @@ class _HeuristicBackend(_MotionBackendBase):
     """
     name = "heuristic"
 
+    # spec에 검증된 home_joint_positions이 없는 로봇(예: fanuc_crx10ia —
+    # UR10 자세를 재사용했다가 실측에서 팔이 접히는 걸 확인하고 비워둔
+    # 상태, robot_loader.py 참고)을 위한 최후 폴백 기준 벡터. go_home()이
+    # 실제로 커맨드하는 값이 아니라, 이 heuristic이 yaw/shoulder/elbow
+    # 오프셋을 "더하는" 기준점일 뿐이라 부정확해도 로봇이 안 움직이는 것
+    # 보다 훨씬 낫다 — 완전히 편 자세(전부 0)보다 살짝 굽혀서 특이점에서
+    # 떨어뜨려 놓는다.
+    _GENERIC_6DOF_FALLBACK_Q: List[float] = [0.0, -0.5, 0.8, -0.3, 0.0, 0.0]
+
     def __init__(self, spec, config: RMPflowConfig,
                  base_xy: Tuple[float, float] = (5.0, 0.0)) -> None:
         self.spec = spec
         self.config = config
         self.base_xy = base_xy
-        self._home_q: List[float] = list(spec.home_joint_positions) \
-            if spec and spec.home_joint_positions else []
+        if spec and spec.home_joint_positions:
+            self._home_q: List[float] = list(spec.home_joint_positions)
+        else:
+            self._home_q = list(self._GENERIC_6DOF_FALLBACK_Q)
+            logger.warning(
+                "[RMP] heuristic backend: %s에 검증된 home_joint_positions이 "
+                "없어 범용 6-DOF 폴백 자세를 기준점으로 사용합니다 — 실제 "
+                "로봇의 joint 배치와 다를 수 있어 동작이 부자연스러울 수 "
+                "있음(그래도 완전히 멈춰있는 것보다는 나음).",
+                spec.name if spec else "?")
 
     def reset(self, current_q: Optional[List[float]] = None) -> None:
         pass
