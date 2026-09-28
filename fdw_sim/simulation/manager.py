@@ -731,33 +731,13 @@ class SimulationManager:
         # USD 스테이지에 빌드
         self.visualizer.build_scene()
 
-        # transfer 이벤트 구독 — 부품 이동 애니메이션 트리거
-        self._setup_transfer_visualization()
-
-    def _setup_transfer_visualization(self) -> None:
-        """MaterialCell의 transfer 완료 이벤트를 시각화에 연결."""
-        if self.visualizer is None:
-            return
-
-        from fdw_sim.messaging.bus import Topics
-
-        def on_transfer(msg) -> None:
-            """MATERIAL_TRANSFER 토픽 콜백."""
-            try:
-                # MaterialTransferCommand는 dataclass
-                part_id = getattr(msg, "part_id", None)
-                from_cell = getattr(msg, "from_cell", None)
-                to_cell = getattr(msg, "to_cell", None)
-                if part_id and to_cell:
-                    self.visualizer.transfer_part(
-                        part_id,
-                        from_cell or self.material_cell.cell_id,
-                        to_cell,
-                    )
-            except Exception:
-                logger.exception("transfer visualization hook failed")
-
-        self.bus.subscribe(Topics.MATERIAL_TRANSFER, on_transfer)
+        # 부품 이동 애니메이션: 예전엔 MATERIAL_TRANSFER 커맨드 발행 시점에
+        # 셀→셀 고정 시간(transfer_duration_sec) tween을 바로 시작했는데,
+        # 그러면 실제 AMR 주행 시간(거리/속도, 보통 수 초~10여 초)과
+        # 무관하게 부품이 먼저 도착해버리고 AMR은 화면에서 정지된 채였다.
+        # Level 2.4부터는 WorkshopVisualizer.update()가 매 프레임
+        # MaterialCell.amrs를 직접 폴링해서 AMR을 실제로 굴리고 그 위에
+        # 화물을 얹어 나르므로, 이 커맨드-시점 훅은 더 이상 필요 없다.
 
     def stop(self) -> None:
         if not self._running:

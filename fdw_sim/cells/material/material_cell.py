@@ -37,9 +37,19 @@ class AMR:
     position: tuple = (0.0, 0.0)
     busy: bool = False
     payload_part_id: Optional[str] = None
+    from_cell: Optional[str] = None
     target_cell: Optional[str] = None
     remaining_distance_m: float = 0.0
     transfer_command_id: Optional[str] = None
+    total_distance_m: float = 0.0
+    # 배송 완료 시점의 스냅샷 — 시각화(WorkshopVisualizer)가 이 셀의 step()
+    # 이후에 폴링하므로, payload_part_id/target_cell이 이미 None으로 지워진
+    # 뒤에도 "방금 뭘 어디로 배송했는지" 알 수 있도록 남겨둔다.
+    # transfer_command_id는 매 이송마다 고유하므로, 시각화 쪽에서 이 값이
+    # 바뀌었는지만 보고 "새로 배송된 건인지" edge-detect 한다.
+    last_delivered_part_id: Optional[str] = None
+    last_delivered_to: Optional[str] = None
+    last_delivered_command_id: Optional[str] = None
 
 
 @dataclass
@@ -110,6 +120,7 @@ class MaterialCell(DistributedIntelligenceCell):
             for amr in self.amrs:
                 amr.busy = False
                 amr.payload_part_id = None
+                amr.from_cell = None
                 amr.target_cell = None
             return True
         return False
@@ -170,6 +181,7 @@ class MaterialCell(DistributedIntelligenceCell):
 
         amr.busy = True
         amr.payload_part_id = taken
+        amr.from_cell = cmd.from_cell
         amr.target_cell = cmd.to_cell
         amr.transfer_command_id = cmd.command_id
 
@@ -181,6 +193,7 @@ class MaterialCell(DistributedIntelligenceCell):
             amr.position = from_loc.position
         else:
             amr.remaining_distance_m = 5.0  # 기본 5m
+        amr.total_distance_m = amr.remaining_distance_m
 
         logger.info("[%s] %s assigned: %s (%.1fm)",
                     self.cell_id, amr.amr_id, cmd.part_id, amr.remaining_distance_m)
@@ -204,8 +217,12 @@ class MaterialCell(DistributedIntelligenceCell):
         # else: 타겟이 외부 시스템(예: 출하)인 경우 그냥 소멸
 
         self.log_kpi("amr_delivery_count", 1.0, tags={"amr_id": amr.amr_id})
+        amr.last_delivered_part_id = delivered_part
+        amr.last_delivered_to = delivered_to
+        amr.last_delivered_command_id = amr.transfer_command_id
         amr.busy = False
         amr.payload_part_id = None
+        amr.from_cell = None
         amr.target_cell = None
         amr.transfer_command_id = None
         logger.info("[%s] %s delivered %s to %s",

@@ -41,31 +41,6 @@ PART_COLORS = {
 
 
 @dataclass
-class PartTween:
-    """부품 위치 보간 상태."""
-    part_id: str
-    start: Tuple[float, float, float]
-    end: Tuple[float, float, float]
-    duration: float
-    elapsed: float = 0.0
-
-    def progress(self) -> float:
-        if self.duration <= 0:
-            return 1.0
-        return min(1.0, self.elapsed / self.duration)
-
-    def current(self) -> Tuple[float, float, float]:
-        t = self.progress()
-        # smoothstep
-        s = t * t * (3.0 - 2.0 * t)
-        return (
-            self.start[0] + (self.end[0] - self.start[0]) * s,
-            self.start[1] + (self.end[1] - self.start[1]) * s,
-            self.start[2] + (self.end[2] - self.start[2]) * s,
-        )
-
-
-@dataclass
 class WorkshopVizConfig:
     """워크숍 시각화 옵션."""
     cell_size: Tuple[float, float, float] = (1.8, 1.8, 0.8)
@@ -86,6 +61,12 @@ class WorkshopVizConfig:
     # Level 2.1: GPU device-lost 회피용 안전 토글
     skip_auto_camera: bool = False           # True면 _auto_frame_camera 건너뜀
                                               # (AGX Thor에서 SceneCamera 생성이 GPU crash trigger인 경우)
+
+    # Level 2.4: AMR 실제 주행 + 로봇팔 pick-and-place
+    amr_dock_offset: Tuple[float, float] = (0.0, -1.3)  # 셀 중심 기준 AMR 정차 위치 오프셋
+    amr_deck_height: float = 0.28            # 부품이 AMR 적재함 위에 놓이는 높이(m)
+    pick_place_travel_time_sec: float = 3.0  # AMR -> 작업대 운반 구간 소요 시간
+    pick_place_approach_height: float = 0.3  # pick/place 시 위아래로 여유를 두는 높이
 
     # ---------------------------------------------------------------- Level 2.2
     # 모션 모드: "auto" | "rmpflow" | "ik" | "heuristic"
@@ -152,7 +133,6 @@ class WorkshopVisualizer:
         self.cell_types: Dict[str, str] = {}
 
         # 부품 추적
-        self._part_tweens: Dict[str, PartTween] = {}
         self._part_locations: Dict[str, str] = {}   # part_id -> cell_id (정적)
         self._part_types: Dict[str, str] = {}
 
@@ -170,6 +150,16 @@ class WorkshopVisualizer:
         self._robots: Dict[str, Dict] = {}
         # 현재 가공 중인 셀의 부품 위치 (용접 경로 계산)
         self._cell_processing_part: Dict[str, str] = {}   # cell_id -> part_id
+
+        # Level 2.4: AMR 실 주행 + pick-and-place
+        # amr_id -> 마지막으로 처리한 last_delivered_command_id (중복 처리 방지)
+        self._amr_last_seen_delivery: Dict[str, str] = {}
+        # cell_id -> 그 셀 로봇이 지금 나르고 있는 part_id (carry 단계에서
+        # 매 프레임 TCP 위치로 부품을 따라가게 함)
+        self._active_pick_place: Dict[str, str] = {}
+        # PROCESSING 이벤트가 pick-and-place 도중에 도착해 용접 모션을
+        # 바로 시작 못 한 셀들 — pick-and-place 끝나는 대로 시작해준다
+        self._pending_weld_after_pick: set = set()
 
         # Level 2.2: 모션 모드 정규화
         self._motion_mode = (self.config.motion_mode or "auto").lower()
@@ -500,11 +490,6 @@ class WorkshopVisualizer:
     # ========================================================================
     # 좌표 헬퍼
     # ========================================================================
-    def _bench_top(self, cell_id: str) -> Tuple[float, float, float]:
-        x, y, z = self.cell_positions[cell_id]
-        bz = self.config.cell_size[2] + self.config.part_height_above_bench
-        return (x, y, z + bz)
-
     def _input_buffer_pos(self, cell_id: str) -> Tuple[float, float, float]:
         x, y, z = self.cell_positions[cell_id]
         sx = self.config.cell_size[0]
@@ -516,6 +501,15 @@ class WorkshopVisualizer:
         sx = self.config.cell_size[0]
         sz = self.config.cell_size[2]
         return (x + sx * 0.35, y, z + sz + 0.15)
+
+    def _amr_dock_pos(self, cell_id: str) -> Optional[Tuple[float, float]]:
+        """AMR이 이 셀 옆에 정차하는 지점(바닥, 2D) — 작업대 중앙을 그대로
+        관통하지 않도록 셀 중심에서 고정 오프셋만큼 떨어뜨린다."""
+        pos = self.cell_positions.get(cell_id)
+        if pos is None:
+            return None
+        ox, oy = self.config.amr_dock_offset
+        return (pos[0] + ox, pos[1] + oy)
 
     # ========================================================================
     # 부품 시각화 API (외부에서 호출 가능)
@@ -530,29 +524,10 @@ class WorkshopVisualizer:
         self._part_locations[part_id] = cell_id
         self._part_types[part_id] = part_type
 
-    def transfer_part(self, part_id: str, from_cell: str, to_cell: str,
-                      duration: Optional[float] = None) -> None:
-        """부품을 한 셀 → 다른 셀로 부드럽게 이동시키는 tween 등록."""
-        if self.scene is None:
-            return
-        if part_id not in self._part_types:
-            return
-
-        start = self._output_buffer_pos(from_cell) if from_cell in self.cell_positions \
-                else self._bench_top(from_cell)
-        end = self._input_buffer_pos(to_cell)
-        dur = duration if duration is not None else self.config.transfer_duration_sec
-
-        self._part_tweens[part_id] = PartTween(part_id=part_id,
-                                                start=start, end=end,
-                                                duration=dur)
-        self._part_locations[part_id] = to_cell
-
     def remove_part(self, part_id: str) -> None:
         if self.scene is None:
             return
         self.scene.remove_part(part_id)
-        self._part_tweens.pop(part_id, None)
         self._part_locations.pop(part_id, None)
         self._part_types.pop(part_id, None)
 
@@ -564,17 +539,7 @@ class WorkshopVisualizer:
         if self.scene is None:
             return
 
-        # 1) tween 진행
-        finished: List[str] = []
-        for pid, tw in self._part_tweens.items():
-            tw.elapsed += dt
-            self.scene.move_part(pid, tw.current())
-            if tw.progress() >= 1.0:
-                finished.append(pid)
-        for pid in finished:
-            del self._part_tweens[pid]
-
-        # 2) MaterialCell 랙 자동 sync (새 부품 입고 감지)
+        # 1) MaterialCell 랙 자동 sync (새 부품 입고 감지)
         # smart_rack 구조: Dict[part_id, {"part_type": ..., ...}]
         if self._material_cell is not None:
             try:
@@ -602,8 +567,9 @@ class WorkshopVisualizer:
             except Exception:
                 logger.exception("smart_rack sync failed")
 
-        # 3) 모션 컨트롤러 + 스파크 emitter 업데이트
-        #    (용접 셀 로봇팔 → 부품 추적 + TCP 위치 기반 스파크 방출)
+        # 2) 모션 컨트롤러 + 스파크 emitter + pick-and-place 운반 업데이트
+        #    (용접 셀 로봇팔 → 부품 추적 + TCP 위치 기반 스파크 방출 /
+        #    AMR에서 집어온 부품을 carry 단계 동안 TCP를 따라가게 함)
         for cell_id, rob in self._robots.items():
             ik = rob.get("ik")
             rmp = rob.get("rmp")
@@ -616,36 +582,49 @@ class WorkshopVisualizer:
                 except Exception:
                     logger.exception("[VIS] controller update failed for %s", cell_id)
 
+            phase = None
+            if ctrl is not None and hasattr(ctrl, "get_phase"):
+                try:
+                    phase = str(ctrl.get_phase()).lower()
+                except Exception:
+                    phase = None
+
+            tcp = None
+            if ctrl is not None and hasattr(ctrl, "get_tcp_position"):
+                try:
+                    tcp = ctrl.get_tcp_position()
+                except Exception:
+                    tcp = None
+
             # 스파크: TCP 위치 갱신 + weld 단계일 때만 활성화
             if sparks is not None:
-                tcp = None
-                if rmp is not None and hasattr(rmp, "get_tcp_position"):
-                    try:
-                        tcp = rmp.get_tcp_position()
-                    except Exception:
-                        tcp = None
-                if tcp is None and ik is not None and hasattr(ik, "get_tcp_position"):
-                    try:
-                        tcp = ik.get_tcp_position()
-                    except Exception:
-                        tcp = None
                 if tcp is not None:
                     sparks.set_tcp_position(tcp)
-
-                # 활성 조건: 현재 컨트롤러 phase == "weld"
-                active = False
-                if ctrl is not None and hasattr(ctrl, "get_phase"):
-                    try:
-                        active = (str(ctrl.get_phase()).lower() == "weld")
-                    except Exception:
-                        active = False
-                sparks.set_active(active)
-
+                sparks.set_active(phase == "weld")
                 try:
                     sparks.update(dt)
                 except Exception:
                     logger.exception("[VIS] spark emitter update failed for %s",
                                      cell_id)
+
+            # pick-and-place: carry(=weld phase 재사용) 단계 동안 부품이
+            # TCP를 따라가고, 경로가 끝나면 작업대에 내려놓은 뒤 밀려있던
+            # 용접 모션이 있으면 바로 시작한다.
+            part_id = self._active_pick_place.get(cell_id)
+            if part_id is not None:
+                if phase == "weld" and tcp is not None:
+                    self.scene.move_part(part_id, tcp)
+                if ctrl is not None and ctrl.is_idle():
+                    self.scene.move_part(part_id, self._input_buffer_pos(cell_id))
+                    del self._active_pick_place[cell_id]
+                    logger.info("[VIS] pick-and-place finished @ %s: %s placed on bench",
+                                cell_id, part_id)
+                    if cell_id in self._pending_weld_after_pick:
+                        self._pending_weld_after_pick.discard(cell_id)
+                        self._start_welding_motion(cell_id)
+
+        # 3) AMR 실주행 + 화물 부품 추종
+        self._update_amr_positions(dt)
 
     # ========================================================================
     # 이벤트 핸들러
@@ -665,6 +644,14 @@ class WorkshopVisualizer:
         rob = self._robots[cell_id]
         ctrl = rob.get("rmp") or rob.get("ik")
         if ctrl is None:
+            return
+
+        # 로봇이 AMR에서 부품을 집어 작업대로 옮기는 pick-and-place 도중이면
+        # 이 이벤트로 끼어들지 않는다 — 모션이 끝나면 update() 루프가
+        # _pending_weld_after_pick을 보고 알아서 용접을 시작/go_home 한다.
+        if cell_id in self._active_pick_place:
+            if state_str.upper() == "PROCESSING":
+                self._pending_weld_after_pick.add(cell_id)
             return
 
         # PROCESSING 상태로 전환되면 용접 경로 시작
@@ -774,6 +761,127 @@ class WorkshopVisualizer:
             static=True,
         ))
         logger.info("[VIS] registered %d obstacles for RMPflow @ %s", 2, cell_id)
+
+    # ========================================================================
+    # Level 2.4: AMR 실 주행 + 화물 부품 추종 + pick-and-place
+    # ========================================================================
+    def _amr_current_world_pos(self, amr) -> Optional[Tuple[float, float, float]]:
+        """AMR의 현재 월드 좌표(바닥, z=0) — from/to 정차 지점 사이를
+        remaining_distance_m/total_distance_m 진행률로 선형보간."""
+        from_dock = self._amr_dock_pos(amr.from_cell) if amr.from_cell else None
+        to_dock = self._amr_dock_pos(amr.target_cell) if amr.target_cell else None
+        if from_dock is None or to_dock is None:
+            return None
+        total = max(amr.total_distance_m, 1e-6)
+        remaining = max(0.0, min(total, amr.remaining_distance_m))
+        progress = max(0.0, min(1.0, 1.0 - remaining / total))
+        x = from_dock[0] + (to_dock[0] - from_dock[0]) * progress
+        y = from_dock[1] + (to_dock[1] - from_dock[1]) * progress
+        return (x, y, 0.0)
+
+    def _update_amr_positions(self, dt: float) -> None:
+        """MaterialCell.amrs를 폴링해서 (1) 이동 중인 AMR을 실제로 굴리고
+        그 위 화물을 따라가게 하고, (2) 방금 배송 완료된 AMR을 감지해서
+        로봇팔 pick-and-place를 트리거한다."""
+        if self._material_cell is None or self.scene is None:
+            return
+
+        for amr in self._material_cell.amrs:
+            # 배송 완료 감지 (edge-detect — MaterialCell.step()이 이 update()
+            # 보다 먼저 실행되므로, 이 시점엔 이미 payload/target이 지워져
+            # 있다. last_delivered_* 스냅샷으로 판단한다)
+            cmd_id = amr.last_delivered_command_id
+            if cmd_id and self._amr_last_seen_delivery.get(amr.amr_id) != cmd_id:
+                self._amr_last_seen_delivery[amr.amr_id] = cmd_id
+                dock = self._amr_dock_pos(amr.last_delivered_to) if amr.last_delivered_to else None
+                if amr.last_delivered_part_id and amr.last_delivered_to and dock is not None:
+                    self._on_amr_delivered(
+                        amr.last_delivered_part_id, amr.last_delivered_to,
+                        (dock[0], dock[1], 0.0),
+                    )
+
+            if not amr.busy:
+                continue
+
+            pos = self._amr_current_world_pos(amr)
+            if pos is None:
+                continue
+            self.scene.move_amr(amr.amr_id, pos)
+
+            # 화물이 있고, 아직 로봇이 안 집어간 상태면 AMR 위에 얹혀서 이동
+            if amr.payload_part_id and amr.payload_part_id not in self._active_pick_place.values():
+                deck_pos = (pos[0], pos[1], pos[2] + self.config.amr_deck_height)
+                try:
+                    self.scene.move_part(amr.payload_part_id, deck_pos)
+                except Exception:
+                    logger.exception("[VIS] move_part (AMR cargo) failed for %s",
+                                      amr.payload_part_id)
+
+    def _on_amr_delivered(self, part_id: str, to_cell: str,
+                          amr_pos: Tuple[float, float, float]) -> None:
+        """AMR이 부품을 셀에 배송한 순간 — 그 셀에 로봇팔이 있으면
+        pick-and-place(AMR -> 작업대) 모션을 시작하고, 없으면(또는 로봇이
+        이미 다른 동작 중이면) 예전처럼 바로 입력 버퍼 위치로 스냅한다."""
+        started = False
+        if to_cell in self._robots:
+            started = self._start_pick_and_place(to_cell, part_id, amr_pos)
+        if not started and self.scene is not None:
+            try:
+                self.scene.move_part(part_id, self._input_buffer_pos(to_cell))
+            except Exception:
+                logger.exception("[VIS] fallback move_part failed for %s", part_id)
+
+    def _start_pick_and_place(self, cell_id: str, part_id: str,
+                              amr_pos: Tuple[float, float, float]) -> bool:
+        """AMR 위 부품을 로봇팔로 집어 작업대(입력 버퍼)로 옮기는 모션 시작.
+
+        기존 _start_welding_motion과 동일한 3단계 경로(approach/weld/retreat)
+        컨트롤러 메커니즘을 그대로 재사용한다 — approach 단계가 AMR 위로
+        내려가는 "집기" 동작, weld 단계가 AMR -> 작업대로 나르는 "운반"
+        동작(그래서 update() 루프에서 이 구간에 TCP를 따라 부품을 이동시킨다),
+        retreat 단계가 내려놓고 올라오는 "놓기" 동작이 된다.
+
+        로봇이 이미 다른 모션(이전 용접 등) 중이면 시작하지 않고 False를
+        반환한다 — 흔치 않은 경합 상황이라 호출자가 즉시 작업대로 스냅하는
+        단순 폴백으로 처리한다.
+        """
+        rob = self._robots.get(cell_id)
+        if rob is None:
+            return False
+        rmp = rob.get("rmp")
+        ik = rob.get("ik")
+        ctrl = rmp if rmp is not None else ik
+        if ctrl is None or not ctrl.is_idle():
+            return False
+
+        pick_h = self.config.amr_deck_height
+        start = (amr_pos[0], amr_pos[1], amr_pos[2] + pick_h)
+        end = self._input_buffer_pos(cell_id)
+        travel_time_sec = self.config.pick_place_travel_time_sec
+        approach_height = self.config.pick_place_approach_height
+
+        try:
+            if rmp is not None:
+                # RMPflowController — kwarg 기반 API
+                rmp.start_path(start=start, end=end,
+                               travel_time_sec=travel_time_sec,
+                               approach_height=approach_height)
+            else:
+                # IKController — WeldingPath 객체를 넘기는 API
+                # (_start_welding_motion과 동일한 패턴)
+                from fdw_sim.visualization.ik_controller import WeldingPath
+                path = WeldingPath(start=start, end=end,
+                                   travel_time_sec=travel_time_sec,
+                                   approach_height=approach_height)
+                ik.start_path(path)
+        except Exception:
+            logger.exception("[VIS] pick-and-place start_path failed for %s", cell_id)
+            return False
+
+        self._active_pick_place[cell_id] = part_id
+        logger.info("[VIS] pick-and-place started @ %s: %s (%s -> %s)",
+                    cell_id, part_id, start, end)
+        return True
 
     # ========================================================================
     # 디버깅
