@@ -713,11 +713,18 @@ class SimulationManager:
 
         # AMR 등록 (MaterialCell의 AMR들)
         if self.material_cell is not None:
+            # AMR 초기 배치 기준 위치 — 용접 셀(WELDING)이 등록되어 있으면
+            # 그 옆에 도킹시키고, 없으면 기존처럼 MaterialCell 옆에 배치
+            dock_pos = self._cell_locations.get(self.material_cell.cell_id, (0.0, 0.0, 0.0))
+            for cid, cell in self.cells.items():
+                ctype = cell.config.cell_type.value if hasattr(cell.config, "cell_type") else ""
+                if ctype == "welding":
+                    dock_pos = self._cell_locations.get(cid, dock_pos)
+                    break
+
             for i, amr in enumerate(self.material_cell.amrs):
                 amr_id = getattr(amr, "amr_id", f"AMR_{i:02d}")
-                # AMR을 MaterialCell 옆에 배치
-                mat_pos = self._cell_locations.get(self.material_cell.cell_id, (0.0, 0.0, 0.0))
-                amr_pos = (mat_pos[0] - 1.5 + i * 0.7, mat_pos[1] - 1.5, 0.0)
+                amr_pos = (dock_pos[0] - 1.5 + i * 0.7, dock_pos[1] - 1.5, 0.0)
                 self.visualizer.register_amr(amr_id, position=amr_pos)
             self.visualizer.attach_material_cell(self.material_cell)
 
