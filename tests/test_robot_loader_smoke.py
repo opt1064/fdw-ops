@@ -256,5 +256,77 @@ class TestSimulationConfigLevel21(unittest.TestCase):
         self.assertAlmostEqual(cfg.weld_path_height, 0.1)
 
 
+class TestRmpflowControllerNonFrankaPathLookup(unittest.TestCase):
+    """RMPflowController가 franka가 아닌 로봇에 franka의 Lula 파일을
+    잘못 물려주지 않는지 확인 (2026-09-28 DGX Spark 실측 회귀 버그).
+
+    실제 버그: bundled motion_policy_configs 디렉토리에 franka 서브폴더만
+    있고 대상 로봇(예: fanuc_crx10ia) 서브폴더가 없으면, 예전 코드는
+    "일단 franka 걸로라도" 하고 franka의 rmpflow_common.yaml/urdf를
+    반환했다. 그 결과 RmpFlow가 franka 전용 kinematics 모델로 완전히 다른
+    articulation(CRX-10iA)을 제어하려다 매 update()마다 예외를 던졌다
+    (컨트롤러 update가 무한 반복 실패 — 실측 로그로 확인).
+
+    이 테스트는 Isaac Sim 없이 순수 경로탐색 로직만 검증한다.
+    """
+
+    def _make_bundle_with_only_franka(self, tmp_dir: str) -> str:
+        import os
+        bundled = os.path.join(tmp_dir, "motion_policy_configs")
+        franka_dir = os.path.join(bundled, "franka")
+        os.makedirs(os.path.join(franka_dir, "rmpflow"), exist_ok=True)
+        open(os.path.join(franka_dir, "lula_franka_gen.urdf"), "w").close()
+        open(os.path.join(franka_dir, "rmpflow",
+                          "franka_rmpflow_common.yaml"), "w").close()
+        open(os.path.join(franka_dir, "rmpflow",
+                          "robot_descriptor.yaml"), "w").close()
+        return bundled
+
+    def test_non_franka_robot_does_not_fall_back_to_franka_files(self):
+        import tempfile
+        from fdw_sim.visualization.rmpflow_controller import (
+            RMPflowController, RMPflowConfig,
+        )
+        from fdw_sim.visualization.robot_loader import ROBOT_CATALOG
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bundled = self._make_bundle_with_only_franka(tmp)
+            crx_spec = ROBOT_CATALOG["fanuc_crx10ia"]
+            ctrl = RMPflowController(articulation=None, spec=crx_spec,
+                                     config=RMPflowConfig())
+            # 번들 디렉토리를 직접 가짜로 대체 (Isaac Sim/env var 탐색 우회)
+            ctrl._locate_bundled_motion_policy_dir = lambda: bundled
+
+            self.assertIsNone(
+                ctrl._locate_rmp_config(),
+                "fanuc_crx10ia는 franka의 rmpflow yaml을 받으면 안 된다")
+            self.assertIsNone(
+                ctrl._locate_urdf(),
+                "fanuc_crx10ia는 franka의 urdf를 받으면 안 된다")
+            self.assertIsNone(
+                ctrl._locate_robot_description(),
+                "fanuc_crx10ia는 franka의 robot_description을 받으면 안 된다")
+
+    def test_franka_robot_still_finds_franka_files(self):
+        """franka 계열 로봇은 여전히 franka 번들 파일을 정상적으로 찾아야 한다
+        (하위호환 확인 — 이번 수정으로 franka 자체가 깨지면 안 됨)."""
+        import tempfile
+        from fdw_sim.visualization.rmpflow_controller import (
+            RMPflowController, RMPflowConfig,
+        )
+        from fdw_sim.visualization.robot_loader import ROBOT_CATALOG
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bundled = self._make_bundle_with_only_franka(tmp)
+            franka_spec = ROBOT_CATALOG["franka_panda"]
+            ctrl = RMPflowController(articulation=None, spec=franka_spec,
+                                     config=RMPflowConfig())
+            ctrl._locate_bundled_motion_policy_dir = lambda: bundled
+
+            self.assertIsNotNone(ctrl._locate_rmp_config())
+            self.assertIsNotNone(ctrl._locate_urdf())
+            self.assertIsNotNone(ctrl._locate_robot_description())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -626,6 +626,11 @@ class RMPflowController:
                 return candidate
         return None
 
+    def _is_franka(self) -> bool:
+        """spec이 franka 계열인지 (franka_panda, franka_fr3, factory_franka 등)."""
+        name = (self.spec.name if self.spec and self.spec.name else "")
+        return "franka" in name.lower()
+
     def _locate_rmp_config(self) -> Optional[str]:
         """RMPflow common-config YAML 탐색.
 
@@ -634,6 +639,14 @@ class RMPflowController:
         motion_policy_configs가 없을 가능성이 높으므로, 못 찾으면 그냥
         None을 반환해 _try_init_rmpflow가 IK/heuristic으로 자연스럽게
         fallback하도록 한다 (신규 로봇 추가 시 크래시 없이 항상 동작).
+
+        ⚠️ 2026-09-28 DGX Spark 실측 버그: 예전엔 robot_key에 맞는
+        디렉토리가 없으면 franka 경로로 무조건 fallback했는데, 이러면
+        franka가 아닌 로봇(articulation 구조·DOF·링크 이름이 전혀 다름)에
+        franka 전용 Lula kinematics 모델을 강제로 물려서 매 update()마다
+        예외가 터졌다 (RmpFlow가 기대하는 articulation 구조와 실제
+        articulation이 안 맞음). franka 계열이 아니면 franka 경로로
+        fallback하지 않는다 — 못 찾으면 None → heuristic으로 안전하게 이동.
         """
         import os
         robot_key = (self.spec.name.upper() if self.spec and self.spec.name
@@ -647,20 +660,23 @@ class RMPflowController:
         env = os.environ.get("FDW_RMPFLOW_YAML")
         if env and os.path.isfile(env):
             return env
-        # 표준 후보들
-        for cand in self.config.rmp_config_candidates:
-            for root in [
-                "/home/isweon/isaac_assets",
-                os.path.expanduser("~/isaac_assets"),
-                os.path.expanduser("~/.local/share/ov/data/assets"),
-                "/opt/nvidia/isaac-sim-assets",
-            ]:
-                p = os.path.join(root, cand)
-                if os.path.isfile(p):
-                    return p
+
+        is_franka = self._is_franka()
+
+        # 표준 후보들 — franka 전용 경로이므로 franka 계열에만 적용
+        if is_franka:
+            for cand in self.config.rmp_config_candidates:
+                for root in [
+                    "/home/isweon/isaac_assets",
+                    os.path.expanduser("~/isaac_assets"),
+                    os.path.expanduser("~/.local/share/ov/data/assets"),
+                    "/opt/nvidia/isaac-sim-assets",
+                ]:
+                    p = os.path.join(root, cand)
+                    if os.path.isfile(p):
+                        return p
+
         # Isaac Sim이 자체 번들하는 예제 RMPflow 설정 (Thor 실측으로 확인된 경로)
-        # — 번들 자체는 franka 존재 여부로 검증하지만, 실제 대상 로봇의
-        # 하위 디렉토리가 있으면 그쪽을 우선 시도한다.
         bundled = self._locate_bundled_motion_policy_dir()
         if bundled:
             if robot_key:
@@ -669,16 +685,19 @@ class RMPflowController:
                                   f"{robot_name}_rmpflow_common.yaml")
                 if os.path.isfile(p):
                     return p
-            p = os.path.join(bundled, "franka", "rmpflow",
-                              "franka_rmpflow_common.yaml")
-            if os.path.isfile(p):
-                return p
+            if is_franka:
+                p = os.path.join(bundled, "franka", "rmpflow",
+                                  "franka_rmpflow_common.yaml")
+                if os.path.isfile(p):
+                    return p
         return None
 
     def _locate_urdf(self) -> Optional[str]:
         """로봇 URDF 탐색 (franka 하드코딩 → spec 기반 일반화).
 
         찾지 못하면 None — 호출자가 heuristic backend로 fallback한다.
+        franka가 아닌 로봇에는 franka URDF로 fallback하지 않는다
+        (_locate_rmp_config의 2026-09-28 버그 노트 참고 — 동일한 문제).
         """
         import os
         robot_key = (self.spec.name.upper() if self.spec and self.spec.name
@@ -687,18 +706,23 @@ class RMPflowController:
             env = os.environ.get(f"FDW_{robot_key}_URDF")
             if env and os.path.isfile(env):
                 return env
-        # 하위호환: 기존 franka 전용 env var
-        env = os.environ.get("FDW_FRANKA_URDF")
-        if env and os.path.isfile(env):
-            return env
-        # franka urdf는 일반적으로 isaacsim_assets에 포함
-        for root in [
-            os.path.expanduser("~/isaac_assets/Isaac/Robots/FrankaRobotics/FrankaPanda"),
-        ]:
-            for fname in ("franka.urdf", "panda.urdf"):
-                p = os.path.join(root, fname)
-                if os.path.isfile(p):
-                    return p
+
+        is_franka = self._is_franka()
+
+        if is_franka:
+            # 하위호환: 기존 franka 전용 env var
+            env = os.environ.get("FDW_FRANKA_URDF")
+            if env and os.path.isfile(env):
+                return env
+            # franka urdf는 일반적으로 isaacsim_assets에 포함
+            for root in [
+                os.path.expanduser("~/isaac_assets/Isaac/Robots/FrankaRobotics/FrankaPanda"),
+            ]:
+                for fname in ("franka.urdf", "panda.urdf"):
+                    p = os.path.join(root, fname)
+                    if os.path.isfile(p):
+                        return p
+
         # Isaac Sim이 자체 번들하는 Lula URDF (Thor 실측으로 확인된 경로)
         bundled = self._locate_bundled_motion_policy_dir()
         if bundled:
@@ -707,9 +731,10 @@ class RMPflowController:
                 p = os.path.join(bundled, robot_name, f"lula_{robot_name}_gen.urdf")
                 if os.path.isfile(p):
                     return p
-            p = os.path.join(bundled, "franka", "lula_franka_gen.urdf")
-            if os.path.isfile(p):
-                return p
+            if is_franka:
+                p = os.path.join(bundled, "franka", "lula_franka_gen.urdf")
+                if os.path.isfile(p):
+                    return p
         return None
 
     def _locate_robot_description(self, hint_dir: Optional[str] = None) -> Optional[str]:
@@ -721,8 +746,8 @@ class RMPflowController:
         실패했었다). 여러 흔한 이름 후보를 hint_dir(보통 rmpflow yaml이 있는
         디렉토리) 및 번들 경로에서 직접 찾는다.
 
-        franka 전용으로 하드코딩되어 있던 env var / 번들 하위경로도
-        spec.name 기반으로 일반화했다 (하위호환 유지).
+        franka가 아닌 로봇에는 franka robot_description으로 fallback하지
+        않는다 (_locate_rmp_config의 2026-09-28 버그 노트 참고).
         """
         import os
         robot_key = (self.spec.name.upper() if self.spec and self.spec.name
@@ -731,9 +756,12 @@ class RMPflowController:
             env = os.environ.get(f"FDW_{robot_key}_ROBOT_DESCRIPTION")
             if env and os.path.isfile(env):
                 return env
-        env = os.environ.get("FDW_FRANKA_ROBOT_DESCRIPTION")
-        if env and os.path.isfile(env):
-            return env
+
+        is_franka = self._is_franka()
+        if is_franka:
+            env = os.environ.get("FDW_FRANKA_ROBOT_DESCRIPTION")
+            if env and os.path.isfile(env):
+                return env
 
         candidate_names = (
             "robot_descriptor.yaml",
@@ -747,7 +775,8 @@ class RMPflowController:
         if bundled:
             if robot_key:
                 search_dirs.append(os.path.join(bundled, self.spec.name, "rmpflow"))
-            search_dirs.append(os.path.join(bundled, "franka", "rmpflow"))
+            if is_franka:
+                search_dirs.append(os.path.join(bundled, "franka", "rmpflow"))
 
         for d in search_dirs:
             for name in candidate_names:
