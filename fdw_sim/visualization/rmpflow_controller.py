@@ -1094,12 +1094,15 @@ class RMPflowController:
     def _apply_joints(self, q: List[float]) -> None:
         """Articulation에 joint 적용 — IKController와 동일 로직.
 
-        이전엔 실패를 logger.debug로만 남겨서, pick-and-place의 phase/타이머는
-        정상 완주하는데(started/finished 로그) 실제 articulation은 전혀 안
-        움직이는 경우를 구분할 방법이 없었다(2026-09-28 DGX Spark 실측 —
-        영상으로 로봇이 AMR 도킹 내내 한 프레임도 안 움직이는 걸 확인했는데
-        로그는 정상이었음). 원인 규명을 위해 실패/무동작 케이스를 최초 1회만
-        WARNING으로 남긴다(매 프레임 스팸 방지).
+        ⚠️ 2026-09-28 DGX Spark 실측으로 확인된 근본 원인: set_joint_positions()
+        만으로는 "순간이동(kinematic)"만 될 뿐, 그 관절에 물리 PD 드라이브가
+        붙어있으면 다음 physics step에서 바로 원래(안 바뀐) 드라이브 타겟으로
+        되돌아가 버린다 — 로그는 "pick-and-place started/finished"까지 전부
+        정상인데 실측 영상에선 로봇이 AMR 도킹 전 구간 동안 한 프레임도 안
+        움직인 게 바로 이것 때문이었다(WARNING 승격 후에도 예외/None 케이스가
+        전혀 안 찍혔다 — 즉 set_joint_positions() 호출 자체는 에러 없이
+        "성공"하고 있었음). set_joint_position_targets()(드라이브 타겟)를
+        같이/우선 호출해야 물리 스텝이 지나가도 그 자세를 유지한다.
         """
         if self.articulation is None:
             if not self._warned_no_articulation:
@@ -1110,20 +1113,36 @@ class RMPflowController:
         try:
             import numpy as np  # type: ignore
             arr = np.array(q, dtype=float)
+            applied = False
+
+            # 1) 순간이동 — 블렌드 중간값을 지연 없이 바로 반영(선택적, 실패해도 무방)
             if hasattr(self.articulation, "set_joint_positions"):
-                self.articulation.set_joint_positions(arr)
+                try:
+                    self.articulation.set_joint_positions(arr)
+                except Exception as e:
+                    logger.debug("[RMP] set_joint_positions failed: %s", e)
+
+            # 2) 드라이브 타겟 — 이게 실제로 물리 스텝을 버텨내는 핵심.
+            #    없으면 안 움직이는 것과 마찬가지이므로 반드시 시도한다.
+            if hasattr(self.articulation, "set_joint_position_targets"):
+                self.articulation.set_joint_position_targets(arr)
+                applied = True
             elif hasattr(self.articulation, "apply_action"):
                 from omni.isaac.core.utils.types import ArticulationAction  # type: ignore
                 self.articulation.apply_action(
                     ArticulationAction(joint_positions=arr))
-            else:
-                if not self._warned_no_apply_method:
-                    self._warned_no_apply_method = True
-                    logger.warning(
-                        "[RMP] _apply_joints: articulation(%s)에 "
-                        "set_joint_positions/apply_action이 둘 다 없어 "
-                        "joint 명령이 전혀 적용되지 않고 있음",
-                        type(self.articulation).__name__)
+                applied = True
+            elif hasattr(self.articulation, "set_joint_positions"):
+                # 최후 폴백 — 드라이브가 없는 articulation이면 이걸로도 충분
+                applied = True
+
+            if not applied and not self._warned_no_apply_method:
+                self._warned_no_apply_method = True
+                logger.warning(
+                    "[RMP] _apply_joints: articulation(%s)에 "
+                    "set_joint_position_targets/apply_action/set_joint_positions"
+                    "이 전부 없어 joint 명령이 전혀 적용되지 않고 있음",
+                    type(self.articulation).__name__)
         except Exception as e:
             if not self._warned_apply_exception:
                 self._warned_apply_exception = True

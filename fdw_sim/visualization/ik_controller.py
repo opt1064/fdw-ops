@@ -436,17 +436,32 @@ class IKController:
             self._current_q = list(q)
 
     def _apply_joints(self, q: List[float]) -> None:
-        """Articulation에 joint 적용."""
+        """Articulation에 joint 적용.
+
+        set_joint_positions()만 호출하면 순간이동(kinematic)만 될 뿐, 관절에
+        물리 PD 드라이브가 붙어있으면 다음 physics step에서 바로 원래(안 바뀐)
+        드라이브 타겟으로 되돌아간다(2026-09-28 DGX Spark 실측 — RMPflowController
+        쪽에서 동일 증상 확인, 상세 경위는 rmpflow_controller.py._apply_joints
+        주석 참고). set_joint_position_targets()/apply_action()으로 드라이브
+        타겟을 같이 갱신해야 물리 스텝이 지나가도 자세가 유지된다.
+        """
         if self.articulation is None:
             return
         try:
             import numpy as np  # type: ignore
             arr = np.array(q, dtype=float)
-            # 5.x SingleArticulation
+
+            # 1) 순간이동 — 지연 없이 바로 반영(선택적, 실패해도 무방)
             if hasattr(self.articulation, "set_joint_positions"):
-                self.articulation.set_joint_positions(arr)
+                try:
+                    self.articulation.set_joint_positions(arr)
+                except Exception as e:
+                    logger.debug("[IK] set_joint_positions failed: %s", e)
+
+            # 2) 드라이브 타겟 — 물리 스텝을 버텨내는 핵심
+            if hasattr(self.articulation, "set_joint_position_targets"):
+                self.articulation.set_joint_position_targets(arr)
             elif hasattr(self.articulation, "apply_action"):
-                # 일부 버전 fallback
                 from omni.isaac.core.utils.types import ArticulationAction  # type: ignore
                 self.articulation.apply_action(ArticulationAction(joint_positions=arr))
         except Exception as e:
