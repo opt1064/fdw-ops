@@ -47,3 +47,19 @@ def setup_logging(level: str = "INFO",
     # Isaac Sim 자체 로그 너무 시끄러움 방지
     for noisy in ("omni", "carb", "OmniGraph", "kit"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    # uncaught exception은 logger.exception()을 거치지 않고 Python 기본
+    # excepthook이 sys.stderr에 직접 쓴다 — 이 stderr가 SimulationManager의
+    # fd-level 필터(파이프 + 백그라운드 스레드)를 거치는 상태에서 프로세스가
+    # 크래시하면, 스레드가 마지막 줄을 미처 못 읽고 죽어버려 트레이스백이
+    # 파일에도 콘솔에도 전혀 안 남는 경우가 실측됨(2026-09-28 DGX Spark,
+    # `sim.start()` 크래시 시 "line 315, in main"에서 통째로 유실).
+    # excepthook을 로깅 모듈로도 우회시켜 FileHandler에 동기적으로 즉시
+    # 기록되도록 한다(파이프/스레드 레이스와 무관).
+    def _log_unhandled_exception(exc_type, exc_value, exc_tb) -> None:
+        logging.getLogger("fdw_sim.uncaught").critical(
+            "Unhandled exception — 프로세스 종료됨",
+            exc_info=(exc_type, exc_value, exc_tb))
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _log_unhandled_exception
