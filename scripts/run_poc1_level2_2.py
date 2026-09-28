@@ -315,11 +315,27 @@ def main() -> int:
     sim.start()
     boot_time = time.time() - t0
     print(f"\n[INFO] Isaac Sim boot 완료 ({boot_time:.1f}s)")
-    if sim.config.livestream == 2:
-        print("[INFO] WebRTC 클라이언트 접속 URL:")
-        print("       http://<AGX_THOR_IP>:8211/streaming/webrtc-client\n")
-    elif sim.config.livestream == 1:
-        print("[INFO] Native Streaming Client에서 <AGX_THOR_IP>로 접속\n")
+    if sim.config.livestream in (1, 2):
+        # 실측(2026-09-28 DGX Spark): 이 자리에 고정 문자열 "<AGX_THOR_IP>"가
+        # 그대로 찍혀서 사용자가 그 주소로 접속 시도 -> 당연히 실패 -> "프로그램이
+        # 안 된다"로 오인한 사례가 있었음. 실제 접속 가능한 IP를 최대한 자동
+        # 탐지해서 보여준다(실패 시에만 플레이스홀더로 폴백).
+        host_ip = "<이 서버의 실제 IP>"
+        try:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect(("8.8.8.8", 80))
+                host_ip = s.getsockname()[0]
+            finally:
+                s.close()
+        except Exception:
+            pass
+        if sim.config.livestream == 2:
+            print("[INFO] WebRTC 클라이언트 접속 URL:")
+            print(f"       http://{host_ip}:8211/streaming/webrtc-client\n")
+        else:
+            print(f"[INFO] Native Streaming Client에서 {host_ip}로 접속\n")
 
     try:
         submit_jobs(sim, cfg)
