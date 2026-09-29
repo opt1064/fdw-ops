@@ -463,9 +463,9 @@ class SceneBuilder:
         직접 쓰는 방식이라 환산 불필요. 다른 정적 배경 소품과 동일하게
         물리는 안 붙인다(순수 시각 요소).
 
-        기본 위치(30.6, 2.5, 0.0)는 forming_cell 안전펜스 안쪽 중앙 —
-        롤러/프레스가 반입구를 가리지 않는다(반입구는 남쪽 벽에만 있고
-        이 위치는 안전펜스로 둘러싸인 구역 중앙이라 여유 있음)."""
+        기본 위치(30.6, 2.5, 0.0)는 forming_cell 구역 중앙(안전펜스는
+        2026-09-29 사용자 요청으로 제거됨 — add_workshop_layout()에서는
+        더 이상 이 메서드를 안전펜스와 함께 호출하지 않는다)."""
         root = f"{self.config.root_prim_path}/Layout/{name}"
         self._UsdGeom.Xform.Define(self._stage, root)
         self._set_translate(root, position)
@@ -1057,15 +1057,14 @@ class SceneBuilder:
         self._set_color(wall_s, interior_wall_color)
         self._apply_material(wall_s, interior_wall_mat)
 
-        # 3세부 소성가공 셀 — 안전펜스(반입구 3.8m) + 실제 장비 2대(파이프
-        # 성형 작업대 + CNC 파이프 벤딩기, 사용자 제공 레퍼런스 사진 반영,
-        # 2026-09-29). 실제 장비가 생겨서 아래 "미구현 placeholder"
-        # 목록에서는 뺐다 — 셀 로직 자체는 아직 없지만
-        # (DistributedIntelligenceCell 미구현) 외형은 실사로 채움.
+        # 3세부 소성가공 셀 — 실제 장비 2대(파이프 성형 작업대 + CNC 파이프
+        # 벤딩기, 사용자 제공 레퍼런스 사진 반영, 2026-09-29). 실제 장비가
+        # 생겨서 아래 "미구현 placeholder" 목록에서는 뺐다 — 셀 로직
+        # 자체는 아직 없지만(DistributedIntelligenceCell 미구현) 외형은
+        # 실사로 채움. 안전펜스는 2026-09-29 사용자 요청으로 제거함
+        # (add_safety_fence() 메서드 자체는 남겨둠 — 필요해지면 재사용 가능).
         # 두 장비 각각의 기본 position은 서로 겹치므로(둘 다 "혼자 쓸 때"
         # 기준 기본값), 여기선 서쪽/동쪽으로 나란히 명시적으로 배치한다.
-        fx0, fy0, fw, fd, _c, _l = WORKSHOP_ZONES["forming_cell"]
-        self.add_safety_fence("forming_cell", fx0, fy0, fw, fd)
         self.add_metal_forming_machine(position=(27.5, 2.5, 0.0))
         self.add_cnc_pipe_bender(position=(33.0, 2.5, 0.0))
 
