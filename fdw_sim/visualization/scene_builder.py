@@ -530,38 +530,52 @@ class SceneBuilder:
                             position: Tuple[float, float, float] = (33.0, 2.5, 0.0),
                             name: str = "CNC_Pipe_Bender",
                             ) -> str:
-        """실사 공장 사진 레퍼런스의 CNC 파이프 벤딩기 — 길고 흰색인 메인
-        본체 + 노란색 피더/벤딩 헤드/스윙 암 + 어두운 금속 레일/척/다이.
-        add_metal_forming_machine()과 같은 forming_cell(3세부 소성가공
-        셀)에 같이 배치되는 두 번째 실 장비.
+        """실사 산업용 CNC 파이프 벤딩기(고해상도판, 2026-09-29 사용자
+        요청으로 단순 버전을 대체) — LM 가이드 레일 2열, 서보 모터,
+        맨드릴 로드, 프레셔/와이퍼 다이, 유압 호스, HMI 컨트롤 패널까지
+        세분화된 부품으로 구성. add_metal_forming_machine()과 같은
+        forming_cell(3세부 소성가공 셀)에 같이 배치되는 두 번째 실 장비.
 
         사용자 제공 레퍼런스 스크립트(Cube size=1.0 + scale=전체 크기
         방식)를 이 프로젝트 관례(Cube size=2.0 + scale=half-extent)로
-        정확히 환산해서 옮겼다 — Cylinder(척/다이)는 원래도 반경/높이
-        직접 지정이라 환산 불필요. 다른 정적 배경 소품과 동일하게 물리는
-        안 붙인다(순수 시각 요소).
+        정확히 환산해서 옮겼다 — Cylinder(척/다이/호스 등)는 원래도
+        반경/높이 직접 지정이라 환산 불필요. 다른 정적 배경 소품과
+        동일하게 물리는 안 붙인다(순수 시각 요소).
 
         기본 위치(33.0, 2.5, 0.0)는 add_metal_forming_machine()의 기본
         위치(30.6, 2.5)와 겹치지 않도록 이 프로젝트의 add_workshop_layout()
         호출부에서 두 장비 모두에 명시적 position을 지정해 나란히
-        배치한다(각 메서드 자체의 기본값은 독립적으로 썼을 때를 위한
-        값이라 그대로 쓰면 겹친다 — add_workshop_layout() 소스 참고)."""
+        배치한다. 이 고해상도판은 단순판보다 가로로 더 커서(맨드릴 로드가
+        뒤로 길게 뻗음, 로컬 x -3.2~2.65 ≈ 5.85m) — 기본 위치 기준
+        add_workshop_layout()의 서쪽 장비(x=27.5)와 약 1.05m, 동쪽 벽과
+        약 0.45m 여유를 파이썬 산술로 확인해뒀다(코드만 바뀌면 재확인
+        필요)."""
         root = f"{self.config.root_prim_path}/Layout/{name}"
         self._UsdGeom.Xform.Define(self._stage, root)
         self._set_translate(root, position)
 
         color_body = (0.92, 0.92, 0.92)
-        color_head = (0.95, 0.75, 0.05)
-        color_dark = (0.25, 0.25, 0.28)
+        color_yellow = (0.95, 0.75, 0.05)
+        color_metal = (0.25, 0.25, 0.28)
+        color_black = (0.12, 0.12, 0.12)
+        color_screen = (0.15, 0.35, 0.85)
         mat_body = self._get_or_create_material(
             f"BenderBodyWhite_{self._color_key(color_body)}", color_body,
             roughness=0.4, metallic=0.15)
-        mat_head = self._get_or_create_material(
-            f"BenderHeadYellow_{self._color_key(color_head)}", color_head,
+        mat_yellow = self._get_or_create_material(
+            f"BenderHeadYellow_{self._color_key(color_yellow)}", color_yellow,
             roughness=0.4, metallic=0.2)
-        mat_dark = self._get_or_create_material(
-            f"BenderDarkMetal_{self._color_key(color_dark)}", color_dark,
+        mat_metal = self._get_or_create_material(
+            f"BenderDarkMetal_{self._color_key(color_metal)}", color_metal,
             roughness=0.3, metallic=0.7)
+        mat_black = self._get_or_create_material(
+            f"BenderBlack_{self._color_key(color_black)}", color_black,
+            roughness=0.4, metallic=0.3)
+        # HMI 터치스크린 — 은은한 자체발광으로 "켜져 있는 화면" 느낌
+        mat_screen = self._get_or_create_material(
+            f"BenderScreenBlue_{self._color_key(color_screen)}", color_screen,
+            roughness=0.2, metallic=0.0,
+            emissive_color=color_screen, emissive_intensity=1.5)
 
         def _box(path: str, center: Tuple[float, float, float],
                 half_extent: Tuple[float, float, float],
@@ -584,29 +598,55 @@ class SceneBuilder:
             self._set_color(path, color)
             self._apply_material(path, mat)
 
-        # 1) 메인 본체 (흰색 캐비닛)
-        _box(f"{root}/Main_Body", (0, 0, 0.55), (1.75, 0.4, 0.55), color_body, mat_body)
+        # 1) 메인 본체 + 하부 디테일
+        _box(f"{root}/Base_Frame", (0, 0, 0.5), (1.8, 0.4, 0.45), color_body, mat_body)
+        _box(f"{root}/Vent_Grille", (0.5, 0.41, 0.5), (0.4, 0.01, 0.25), color_black, mat_black)
 
-        # 2) 상단 리니어 가이드 레일
-        _box(f"{root}/Top_Rail", (-0.2, 0.15, 1.15), (1.5, 0.1, 0.05), color_dark, mat_dark)
+        # 수평 조절 발 6개
+        foot_i = 0
+        for x in (-1.5, 0.0, 1.5):
+            for y in (-0.35, 0.35):
+                _cyl(f"{root}/Foot_{foot_i:02d}", (x, y, 0.05), 0.04, 0.1, "Z",
+                     color_metal, mat_metal)
+                foot_i += 1
 
-        # 3) 파이프 이송 피더 / 척
-        _box(f"{root}/Feeder_Base", (-1.2, 0.15, 1.3), (0.25, 0.2, 0.2), color_head, mat_head)
-        _cyl(f"{root}/Feeder_Chuck", (-0.8, 0.15, 1.3), 0.08, 0.4, "X", color_dark, mat_dark)
+        # 2) 리니어 가이드 레일 2열(LM Guide)
+        _box(f"{root}/Guide_Rail_Front", (-0.2, -0.2, 0.975), (1.6, 0.025, 0.025),
+             color_metal, mat_metal)
+        _box(f"{root}/Guide_Rail_Back", (-0.2, 0.2, 0.975), (1.6, 0.025, 0.025),
+             color_metal, mat_metal)
 
-        # 4) 벤딩 헤드 베이스
-        _box(f"{root}/Head_Base", (2.0, 0.3, 0.7), (0.4, 0.5, 0.35), color_head, mat_head)
-        _box(f"{root}/Head_Support", (2.1, 0.6, 0.3), (0.25, 0.4, 0.2), color_head, mat_head)
+        # 3) 파이프 이송 피더 / 서보 모터 / 척 / 맨드릴 로드
+        _box(f"{root}/Feeder_Base", (-1.2, 0.0, 1.1), (0.3, 0.25, 0.1), color_yellow, mat_yellow)
+        _box(f"{root}/Feeder_Motor", (-1.4, 0.0, 1.3), (0.1, 0.1, 0.15), color_black, mat_black)
+        _cyl(f"{root}/Feeder_Chuck", (-0.8, 0.0, 1.15), 0.08, 0.3, "X", color_metal, mat_metal)
+        _cyl(f"{root}/Mandrel_Rod", (-2.2, 0.0, 1.15), 0.02, 2.0, "X", color_metal, mat_metal)
 
-        # 5) 벤딩 금형(다이) — 다단 원통형
-        _cyl(f"{root}/Bending_Die_L1", (2.0, 0.5, 1.15), 0.18, 0.15, "Z", color_dark, mat_dark)
-        _cyl(f"{root}/Bending_Die_L2", (2.0, 0.5, 1.35), 0.15, 0.15, "Z", color_dark, mat_dark)
+        # 4) 벤딩 헤드 어셈블리(서보 + 다단 금형 + 프레셔/와이퍼 다이)
+        _box(f"{root}/Head_Mount", (2.0, 0.1, 0.6), (0.4, 0.5, 0.3), color_yellow, mat_yellow)
+        _box(f"{root}/Head_Servo", (2.0, -0.4, 0.6), (0.15, 0.15, 0.2), color_black, mat_black)
+        _cyl(f"{root}/Bend_Die_L1", (2.0, 0.2, 1.15), 0.18, 0.12, "Z", color_metal, mat_metal)
+        _cyl(f"{root}/Bend_Die_L2", (2.0, 0.2, 1.30), 0.15, 0.12, "Z", color_metal, mat_metal)
+        _cyl(f"{root}/Bend_Die_Axis", (2.0, 0.2, 1.45), 0.05, 0.2, "Z", color_black, mat_black)
+        _box(f"{root}/Pressure_Die", (1.5, 0.4, 1.15), (0.3, 0.05, 0.05), color_metal, mat_metal)
+        _box(f"{root}/Wiper_Die", (1.7, 0.1, 1.15), (0.2, 0.025, 0.05), color_metal, mat_metal)
 
-        # 6) 스윙 암 + 클램프 다이
-        _box(f"{root}/Swing_Arm", (2.2, 0.8, 0.9), (0.3, 0.15, 0.2), color_head, mat_head)
-        _box(f"{root}/Clamp_Die", (2.2, 0.8, 1.15), (0.15, 0.075, 0.1), color_dark, mat_dark)
+        # 5) 스윙 암 + 클램프 다이 + 링크
+        _box(f"{root}/Swing_Arm_Base", (2.3, 0.6, 0.95), (0.35, 0.2, 0.1), color_yellow, mat_yellow)
+        _box(f"{root}/Clamp_Die", (2.3, 0.6, 1.15), (0.125, 0.075, 0.06), color_metal, mat_metal)
+        _box(f"{root}/Arm_Linkage", (2.5, 0.6, 0.95), (0.1, 0.25, 0.075), color_black, mat_black)
 
-        logger.info("[VIS] CNC pipe bender added @ %s", position)
+        # 6) 유압 호스(시각 연출)
+        _cyl(f"{root}/Hydraulic_Hose_1", (2.0, 0.5, 0.3), 0.02, 0.6, "Y", color_black, mat_black)
+        _cyl(f"{root}/Hydraulic_Hose_2", (2.1, 0.6, 0.3), 0.02, 0.6, "Y", color_black, mat_black)
+
+        # 7) HMI 조작 패널(자체발광 터치스크린)
+        _cyl(f"{root}/Panel_Stand", (0.5, -0.6, 0.5), 0.03, 1.0, "Z", color_body, mat_body)
+        _box(f"{root}/Panel_Box", (0.5, -0.6, 1.05), (0.05, 0.2, 0.15), color_body, mat_body)
+        _box(f"{root}/Panel_Screen", (0.49, -0.6, 1.05), (0.005, 0.175, 0.125),
+             color_screen, mat_screen)
+
+        logger.info("[VIS] detailed CNC pipe bender added @ %s", position)
         return root
 
     def add_cantilever_rack(self,
