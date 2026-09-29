@@ -617,6 +617,7 @@ class SceneBuilder:
                            total_height: float = 2.0,
                            shelf_thickness: float = 0.03,
                            post_size: float = 0.04,
+                           name: str = "SteelShelving",
                            ) -> str:
         """실사 공장 사진 레퍼런스의 백색 철재 다단 선반(경량/중량랙) —
         소형 부품/공구함 보관용. 캔틸레버 랙(긴 파이프 전용)과 달리 평평한
@@ -632,8 +633,10 @@ class SceneBuilder:
 
         기본 위치(14.5, 5.0, 0.0)는 소재관리 존의 기존 보관 랙(x 4~12)과
         캔틸레버 랙(x 14.5~17.8, y 1.1~2.9) 양쪽 모두와 안 겹치는 빈
-        공간(y~5.0)이다."""
-        shelf_root = f"{self.config.root_prim_path}/Layout/SteelShelving"
+        공간(y~5.0)이다. name은 여러 선반을 배치할 때 prim 경로가 겹쳐서
+        서로 덮어쓰지 않도록 구분하는 이름이다 — 한 씬에 여러 개 놓을
+        땐 반드시 호출마다 고유하게 줘야 한다."""
+        shelf_root = f"{self.config.root_prim_path}/Layout/{name}"
         self._UsdGeom.Xform.Define(self._stage, shelf_root)
         self._set_translate(shelf_root, position)
 
@@ -823,21 +826,24 @@ class SceneBuilder:
 
         self.add_floor_lane_markings()
 
-        # 소재관리 존 — 보관 랙 3열
+        # 소재관리 존 — 보관 랙 3열. 예전엔 그냥 속이 찬 파란 박스
+        # (rack_0/1/2, w=8.0 x d=1.0 x h=2.2 단색 큐브)였는데, 2026-09-29
+        # 사용자 요청으로 add_steel_shelving()(백색 다단 선반, 실제 기둥+
+        # 선반판 구조)으로 교체 — 옛 박스와 같은 자리/같은 바깥 치수를
+        # 유지하도록 num_bays/bay_width/shelf_depth/total_height를 역산했다
+        # (7 bay x 8/7m ≈ 8.0m, depth=1.0m, height=2.2m). position은
+        # add_steel_shelving()이 시작 모서리(x)/중심(y) 기준이라, 옛
+        # (x0,y0)="시작 모서리" 값에서 y만 d/2를 더해 중심으로 변환했다.
         for i, (x0, y0, w, d, h) in enumerate([
             (4.0, 3.0, 8.0, 1.0, 2.2),
             (4.0, 5.0, 8.0, 1.0, 2.2),
             (4.0, 7.0, 8.0, 1.0, 2.2),
         ]):
-            rack_path = f"{self.config.root_prim_path}/Layout/MaterialRacks/rack_{i}"
-            rack = self._UsdGeom.Cube.Define(self._stage, rack_path)
-            rack.CreateSizeAttr(2.0)
-            self._set_scale(rack_path, (w / 2.0, d / 2.0, h / 2.0))
-            self._set_translate(rack_path, (x0 + w / 2.0, y0 + d / 2.0, h / 2.0))
-            self._set_color(rack_path, (0.25, 0.45, 0.65))
-            rack_mat = self._get_or_create_material("SteelRack", (0.25, 0.45, 0.65),
-                                                     roughness=0.35, metallic=0.65)
-            self._apply_material(rack_path, rack_mat)
+            self.add_steel_shelving(
+                position=(x0, y0 + d / 2.0, 0.0),
+                num_bays=7, bay_width=w / 7.0,
+                shelf_depth=d, total_height=h, num_levels=5,
+                name=f"MaterialRack_{i}")
 
         # AMR 충전 도크 표시 (충전소 구역 안, 바닥 마커)
         # half-height=0.025이므로 바닥에 딱 붙으려면 중심 z도 0.025 —
@@ -856,10 +862,6 @@ class SceneBuilder:
         # 소재관리 존 — 캔틸레버 랙 + 각 층 양쪽 지지대에 가득 얹힌 원자재
         # 아연도금 파이프 다발(장식용, 보관 랙/AMR 통로 사이 빈 공간).
         self.add_loaded_cantilever_rack()
-
-        # 소재관리 존 — 백색 철재 다단 선반(소형 부품/공구함용, 캔틸레버
-        # 랙과 다른 y 대역이라 서로 안 겹침).
-        self.add_steel_shelving()
 
         # 서버실 가벽 (동쪽 + 남쪽 — 복도 쪽으로 열려 있는 나머지 2면은 건물 외벽이 대신함)
         sx0, sy0, sw, sd, _c, _l = WORKSHOP_ZONES["server_room"]
