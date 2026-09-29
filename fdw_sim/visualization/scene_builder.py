@@ -438,6 +438,51 @@ class SceneBuilder:
         logger.info("[VIS] safety fence '%s' added (gate=%.1fm)", root_name, gate_w)
         return fence_root
 
+    def add_raw_pipe_bundle(self,
+                            position: Tuple[float, float, float] = (16.0, 2.0, 0.0),
+                            pipe_radius: float = 0.0212,
+                            pipe_length: float = 3.2,
+                            spacing: float = 0.043,
+                            layers: Tuple[int, ...] = (6, 7, 8, 9, 8, 7, 6)
+                            ) -> str:
+        """실사 공장 사진 레퍼런스처럼 육각형으로 쌓인 아연도금 원자재
+        파이프 다발 — 소재관리 존 장식용 정적 프롭(사용자 제공 스펙:
+        반경 21.2mm=42.4mm 관경, 길이 3.2m, 재질 metallic=1.0,
+        roughness=0.4). 시뮬레이션 로직과 무관한 배경 디테일이라 물리
+        (RigidBody/Collision)는 안 붙인다 — 다른 정적 소품(랙, 펜스 등)과
+        동일하게 순수 시각 요소로만 둔다.
+
+        position은 다발의 중심(파이프가 로컬 X축을 따라 누움) — 기본값은
+        소재관리 존 안 보관 랙(y 3~8)과 AMR 통로(x>=20.6) 사이 빈 공간."""
+        bundle_root = f"{self.config.root_prim_path}/Layout/RawPipeBundle"
+        self._UsdGeom.Xform.Define(self._stage, bundle_root)
+        self._set_translate(bundle_root, position)
+
+        color = (0.75, 0.78, 0.80)
+        mat = self._get_or_create_material(
+            f"GalvanizedSteel_{self._color_key(color)}", color,
+            roughness=0.4, metallic=1.0)
+
+        z_step = spacing * 0.866025  # sqrt(3)/2 — 육각 적층 층간 높이
+        count = 0
+        for i, n in enumerate(layers):
+            z = i * z_step + pipe_radius
+            y_start = -(n - 1) * spacing / 2.0
+            for j in range(n):
+                y = y_start + j * spacing
+                p = f"{bundle_root}/Pipe_{count:02d}"
+                cyl = self._UsdGeom.Cylinder.Define(self._stage, p)
+                cyl.CreateRadiusAttr(pipe_radius)
+                cyl.CreateHeightAttr(pipe_length)
+                cyl.CreateAxisAttr("X")
+                self._set_translate(p, (0.0, y, z))
+                self._set_color(p, color)
+                self._apply_material(p, mat)
+                count += 1
+
+        logger.info("[VIS] raw pipe bundle added @ %s (%d pipes)", position, count)
+        return bundle_root
+
     def add_unimplemented_cell_marker(self, zone_name: str,
                                        x0: float, y0: float, w: float, d: float,
                                        label: str,
@@ -524,6 +569,9 @@ class SceneBuilder:
             dock_mat = self._get_or_create_material("ChargeDockGreen", (0.3, 0.7, 0.3),
                                                      roughness=0.45, metallic=0.0)
             self._apply_material(dock_path, dock_mat)
+
+        # 소재관리 존 — 원자재 아연도금 파이프 다발(장식용, 랙/AMR 통로 사이 빈 공간)
+        self.add_raw_pipe_bundle()
 
         # 서버실 가벽 (동쪽 + 남쪽 — 복도 쪽으로 열려 있는 나머지 2면은 건물 외벽이 대신함)
         sx0, sy0, sw, sd, _c, _l = WORKSHOP_ZONES["server_room"]
@@ -1329,6 +1377,13 @@ class SceneBuilder:
 
         self._set_translate(part_path, position)
         self._set_color(part_path, color)
+        # 아연도금 강관 재질 — 사용자 제공 레퍼런스 스펙(metallic=1.0,
+        # roughness=0.3~0.5)을 따름. 색상별로 캐싱해서 타입마다 다른
+        # 색(PART_COLORS)을 써도 각각 제 색으로 반사되게 한다.
+        part_mat = self._get_or_create_material(
+            f"GalvanizedSteel_{self._color_key(color)}", color,
+            roughness=0.4, metallic=1.0)
+        self._apply_material(part_path, part_mat)
 
         self._part_prims[part_id] = part_path
         logger.info("[VIS] part %s spawned @ %s (shape=%s)",
