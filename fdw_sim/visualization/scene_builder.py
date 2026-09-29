@@ -445,6 +445,121 @@ class SceneBuilder:
         logger.info("[VIS] safety fence '%s' added (gate=%.1fm)", root_name, gate_w)
         return fence_root
 
+    def add_robot_linear_unit(self,
+                              position: Tuple[float, float, float] = (34.6, 10.2, 0.0),
+                              name: str = "Robot_Linear_Unit",
+                              track_len: float = 2.4,
+                              ) -> str:
+        """실사 산업용 로봇 리니어 유닛(7축 주행 트랙) — 다관절 로봇(KUKA 등)을
+        얹어 작업 반경을 늘려주는 슬라이딩 축 베이스. 트랙 베이스 + LM
+        가이드 레일 2열 + 이동식 슬라이더(캐리지 플레이트/사이드 커버/
+        구동 모터/로봇 마운트 페데스탈) + 케이블 베어(에너지 체인, 고정부
+        +슬라이더에 붙은 이동부)로 구성. WORKSHOP_ZONES["machining_cell"]
+        (5세부 정밀가공 셀)을 채우는 실제 장비 — add_unimplemented_cell_marker()
+        의 무채색 "미구현" 플레이스홀더를 대신한다(add_workshop_layout()
+        에서 machining_cell을 그 목록에서 뺐다).
+
+        사용자 제공 레퍼런스 스크립트(Cube size=1.0 + scale=전체 크기
+        방식, CollisionAPI 적용)를 이 프로젝트 관례(Cube size=2.0 +
+        scale=half-extent, 정적 배경 소품은 물리 안 붙임)로 옮겼다 —
+        Cylinder(로봇 마운트 페데스탈)는 원래도 반경/높이 직접 지정이라
+        환산 불필요.
+
+        레퍼런스의 트랙 길이(8.0m)는 60m급 대형 홀 기준이라, 이 셀의
+        실제 구역 크기(3.0m x 4.0m)에 맞춰 track_len=2.4m로 축소했다
+        (기본 position=(34.6, 10.2, 0.0)은 정밀가공 셀 중심에서 y를
+        0.2m 낮춘 값 — 오버헤드 크레인의 북쪽 기둥(x=33.0, y=11.4)과
+        최소 0.18m(x축)/0.33m(y축) 간격을 두기 위함, 파이썬 산술로
+        검증). 캐리지/모터/마운트 등 트랙 길이와 무관한 세부 치수는
+        레퍼런스 값을 그대로 half-extent 환산만 해서 썼다.
+
+        Moving_Slider는 빈 Xform 그룹으로 남겨둔다 — 사용자 제공 사용법
+        (Window > Content에서 Kuka KR 시리즈 USD를 스테이지로 끌어와
+        Moving_Slider의 자식으로 종속시키고 로봇 베이스 Z를 마운트
+        상단(로컬 z≈0.70)에 맞추는 것)은 Isaac Sim GUI에서 수동으로
+        수행하는 후속 작업이라 이 코드는 트랙+캐리지 뼈대까지만 만든다
+        (KUKA robot이 이 프로젝트의 로컬 에셋 카탈로그에 없어 코드로
+        자동 로드할 수 없음). Moving_Slider를 로컬 X로 옮기면 결합된
+        로봇 전체가 트랙을 따라 움직이는 것처럼 보인다."""
+        root = f"{self.config.root_prim_path}/Layout/{name}"
+        self._UsdGeom.Xform.Define(self._stage, root)
+        self._set_translate(root, position)
+
+        color_track = (0.15, 0.15, 0.18)
+        color_rail = (0.6, 0.6, 0.65)
+        color_orange = (0.85, 0.35, 0.05)
+        color_black = (0.1, 0.1, 0.1)
+        mat_track = self._get_or_create_material(
+            f"LinearUnitTrackDark_{self._color_key(color_track)}", color_track,
+            roughness=0.4, metallic=0.5)
+        mat_rail = self._get_or_create_material(
+            f"LinearUnitRailMetal_{self._color_key(color_rail)}", color_rail,
+            roughness=0.25, metallic=0.85)
+        mat_orange = self._get_or_create_material(
+            f"LinearUnitKukaOrange_{self._color_key(color_orange)}", color_orange,
+            roughness=0.4, metallic=0.15)
+        mat_black = self._get_or_create_material(
+            f"LinearUnitBlack_{self._color_key(color_black)}", color_black,
+            roughness=0.5, metallic=0.3)
+
+        def _box(path: str, center: Tuple[float, float, float],
+                half_extent: Tuple[float, float, float],
+                color: Tuple[float, float, float], mat) -> None:
+            cube = self._UsdGeom.Cube.Define(self._stage, path)
+            cube.CreateSizeAttr(2.0)
+            self._set_scale(path, half_extent)
+            self._set_translate(path, center)
+            self._set_color(path, color)
+            self._apply_material(path, mat)
+
+        def _cyl(path: str, center: Tuple[float, float, float],
+                radius: float, height: float,
+                color: Tuple[float, float, float], mat) -> None:
+            cyl = self._UsdGeom.Cylinder.Define(self._stage, path)
+            cyl.CreateRadiusAttr(radius)
+            cyl.CreateHeightAttr(height)
+            cyl.CreateAxisAttr("Z")
+            self._set_translate(path, center)
+            self._set_color(path, color)
+            self._apply_material(path, mat)
+
+        # 1) 고정 하부 트랙 + LM 가이드 레일 2열
+        track_half = track_len / 2.0
+        _box(f"{root}/Track_Base", (0, 0, 0.15), (track_half, 0.45, 0.15),
+             color_track, mat_track)
+        _box(f"{root}/Guide_Rail_L", (0, -0.3, 0.325), (track_half, 0.025, 0.025),
+             color_rail, mat_rail)
+        _box(f"{root}/Guide_Rail_R", (0, 0.3, 0.325), (track_half, 0.025, 0.025),
+             color_rail, mat_rail)
+
+        # 2) 이동식 슬라이더 그룹 — 로컬 X 이동시키면 위에 결합된 로봇 전체가
+        # 트랙을 따라 주행하는 것처럼 보임 (정적 배경 소품이라 실제로는 안 움직임)
+        slider_root = f"{root}/Moving_Slider"
+        self._UsdGeom.Xform.Define(self._stage, slider_root)
+
+        _box(f"{slider_root}/Carriage_Plate", (0, 0, 0.38), (0.5, 0.5, 0.03),
+             color_orange, mat_orange)
+        _box(f"{slider_root}/Carriage_Side_Cover", (0, -0.55, 0.25), (0.5, 0.05, 0.15),
+             color_orange, mat_orange)
+        _box(f"{slider_root}/Drive_Motor", (0.3, 0.55, 0.25), (0.15, 0.1, 0.125),
+             color_black, mat_black)
+
+        # 3) 로봇 마운트 페데스탈 — 여기 위에 KUKA 로봇을 수동으로 올림(위 docstring 참고)
+        _cyl(f"{slider_root}/Robot_Mount_Base", (0, 0, 0.55), 0.35, 0.28,
+             color_black, mat_black)
+        _cyl(f"{slider_root}/Robot_Mount_Top", (0, 0, 0.70), 0.35, 0.02,
+             color_orange, mat_orange)
+
+        # 4) 케이블 베어(에너지 체인) — 시각 연출용, 트랙 길이에 맞춰 축소
+        _box(f"{root}/Cable_Chain_Fixed", (-track_half / 2.0, -0.7, 0.15),
+             (track_half / 2.0, 0.075, 0.075), color_black, mat_black)
+        _box(f"{slider_root}/Cable_Chain_Moving", (-0.3, -0.7, 0.25), (0.25, 0.075, 0.025),
+             color_black, mat_black)
+
+        logger.info("[VIS] robot linear unit added @ %s (track_len=%.1fm)",
+                    position, track_len)
+        return root
+
     def add_metal_forming_machine(self,
                                   position: Tuple[float, float, float] = (30.6, 2.5, 0.0),
                                   name: str = "MetalForming_Machine",
@@ -1321,8 +1436,15 @@ class SceneBuilder:
         self.add_metal_forming_machine(position=(27.5, 2.5, 0.0))
         self.add_cnc_pipe_bender(position=(33.0, 2.5, 0.0))
 
+        # 5세부 정밀가공 셀 — 로봇 리니어 유닛(7축 주행 트랙, 사용자 제공
+        # 레퍼런스, 2026-09-29). 실제 장비가 생겨서 아래 "미구현
+        # placeholder" 목록에서는 뺐다 — 오버헤드 크레인의 북쪽 기둥
+        # (x=33.0, y=11.4)과 겹치지 않도록 position.y를 셀 중심(10.4)
+        # 보다 0.2m 낮춰뒀다(add_robot_linear_unit() docstring 참고).
+        self.add_robot_linear_unit()
+
         # 아직 셀 로직이 없는 구역 — 눈에 띄는 placeholder만 배치
-        for zone_name in ("additive_cell", "machining_cell"):
+        for zone_name in ("additive_cell",):
             zx0, zy0, zw, zd, _c, label = WORKSHOP_ZONES[zone_name]
             self.add_unimplemented_cell_marker(zone_name, zx0, zy0, zw, zd, label)
 
