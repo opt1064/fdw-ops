@@ -171,6 +171,29 @@ ASSET_CATALOG: Dict[str, UsdAssetSpec] = {
     ),
 
     # ========================================================================
+    # Machining — heavy-duty manipulator (mounted on robot linear unit track)
+    # ========================================================================
+    "kuka_kr210_l150": UsdAssetSpec(
+        name="kuka_kr210_l150",
+        # 2026-09-29 사용자 제공: "Kuka/KR210_L150/kr210_l150.usd" — Isaac
+        # Sim 자산 브라우저에서 Robots 하위 경로로 확인한 값이라, 이
+        # 카탈로그의 다른 항목들(예: ur10e = "Isaac/Robots/UniversalRobots/
+        # ur10e/ur10e.usd")과 동일한 규칙으로 "Isaac/Robots/" 접두어를
+        # 붙였다. mir100 케이스(Isaac 6.1 공식 카탈로그에 없어 항상 404)
+        # 처럼 이 경로가 실제 Nucleus/S3에 없을 수도 있다 — find_local_asset()
+        # 이 로컬에서 못 찾으면 add_robot_linear_unit()이 remote fallback을
+        # 시도하고, 그마저 실패하면 예외를 잡아 로봇 없이(마운트 페데스탈만)
+        # 계속 진행한다(크래시 안 남). 로컬에 없다면 mir100과 동일하게
+        # FDW_KUKA_KR210_L150_USD 환경변수로 로컬 경로를 직접 지정 가능.
+        usd_subpath="Isaac/Robots/Kuka/KR210_L150/kr210_l150.usd",
+        category="manipulator",
+        description="KUKA KR210 L150 — heavy-duty 6-axis articulated arm "
+                    "(210kg payload class), mounted on robot linear unit "
+                    "track (machining_cell)",
+        is_articulation=True,
+    ),
+
+    # ========================================================================
     # Inspection — manipulators light (UR series for forming/inspection)
     # ========================================================================
     "ur10e": UsdAssetSpec(

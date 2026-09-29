@@ -449,6 +449,7 @@ class SceneBuilder:
                               position: Tuple[float, float, float] = (34.6, 10.2, 0.0),
                               name: str = "Robot_Linear_Unit",
                               track_len: float = 2.4,
+                              attach_robot_asset: Optional[str] = "kuka_kr210_l150",
                               ) -> str:
         """실사 산업용 로봇 리니어 유닛(7축 주행 트랙) — 다관절 로봇(KUKA 등)을
         얹어 작업 반경을 늘려주는 슬라이딩 축 베이스. 트랙 베이스 + LM
@@ -473,14 +474,18 @@ class SceneBuilder:
         검증). 캐리지/모터/마운트 등 트랙 길이와 무관한 세부 치수는
         레퍼런스 값을 그대로 half-extent 환산만 해서 썼다.
 
-        Moving_Slider는 빈 Xform 그룹으로 남겨둔다 — 사용자 제공 사용법
-        (Window > Content에서 Kuka KR 시리즈 USD를 스테이지로 끌어와
-        Moving_Slider의 자식으로 종속시키고 로봇 베이스 Z를 마운트
-        상단(로컬 z≈0.70)에 맞추는 것)은 Isaac Sim GUI에서 수동으로
-        수행하는 후속 작업이라 이 코드는 트랙+캐리지 뼈대까지만 만든다
-        (KUKA robot이 이 프로젝트의 로컬 에셋 카탈로그에 없어 코드로
-        자동 로드할 수 없음). Moving_Slider를 로컬 X로 옮기면 결합된
-        로봇 전체가 트랙을 따라 움직이는 것처럼 보인다."""
+        Moving_Slider는 캐리지 하드웨어(플레이트/커버/모터/마운트
+        페데스탈)를 담는 Xform 그룹 — 로컬 X로 옮기면 결합된 로봇
+        전체가 트랙을 따라 움직이는 것처럼 보인다. attach_robot_asset
+        (기본 "kuka_kr210_l150", asset_catalog.ASSET_CATALOG 참고)이
+        주어지면 마운트 페데스탈 위(로컬 z=0.70)에 실제 KUKA KR210 L150
+        USD를 자동으로 reference-attach 시도한다 — 2026-09-29 사용자가
+        정확한 경로(Kuka/KR210_L150/kr210_l150.usd)를 알려줘서 기존
+        add_amr_usd()와 동일한 local-first/remote-fallback 전략으로
+        자동 로드하게 됐다(예전엔 Isaac Sim GUI에서 수동으로 종속시켜야
+        했음). 로컬/원격 모두 실패해도 mir100 케이스처럼 예외를 잡아
+        마운트 페데스탈만 남기고 조용히 계속 진행한다(크래시 안 남) —
+        attach_robot_asset=None으로 호출하면 아예 시도하지 않는다."""
         root = f"{self.config.root_prim_path}/Layout/{name}"
         self._UsdGeom.Xform.Define(self._stage, root)
         self._set_translate(root, position)
@@ -544,11 +549,44 @@ class SceneBuilder:
         _box(f"{slider_root}/Drive_Motor", (0.3, 0.55, 0.25), (0.15, 0.1, 0.125),
              color_black, mat_black)
 
-        # 3) 로봇 마운트 페데스탈 — 여기 위에 KUKA 로봇을 수동으로 올림(위 docstring 참고)
+        # 3) 로봇 마운트 페데스탈 — 여기 위에 KUKA 로봇을 자동으로 올림(아래 참고)
         _cyl(f"{slider_root}/Robot_Mount_Base", (0, 0, 0.55), 0.35, 0.28,
              color_black, mat_black)
         _cyl(f"{slider_root}/Robot_Mount_Top", (0, 0, 0.70), 0.35, 0.02,
              color_orange, mat_orange)
+
+        # 3.5) 마운트 위에 실제 KUKA 로봇 USD 부착 시도 (위 docstring 참고) —
+        # ASSET_CATALOG의 다른 로컬 자산(mir100 등)과 동일한
+        # local-first/remote-fallback 전략. 로컬/원격 모두 없으면 예외를
+        # 잡아 마운트 페데스탈만 남기고 계속 진행한다(크래시 안 남).
+        if attach_robot_asset:
+            try:
+                from fdw_sim.visualization.asset_catalog import (
+                    ASSET_CATALOG, find_local_asset, resolve_asset_usd_path,
+                )
+                spec = ASSET_CATALOG.get(attach_robot_asset)
+                if spec is None:
+                    logger.warning("[VIS] add_robot_linear_unit: unknown asset '%s'",
+                                   attach_robot_asset)
+                else:
+                    local = find_local_asset(spec)
+                    usd_path = local if local is not None else resolve_asset_usd_path(spec)
+                    robot_path = f"{slider_root}/KR210_L150"
+                    prim = self.add_usd_reference(
+                        robot_path, usd_path,
+                        translation=(0.0, 0.0, 0.70),
+                        scale=spec.scale,
+                        variant_selection=spec.variant_selection,
+                    )
+                    if prim is None:
+                        logger.warning(
+                            "[VIS] add_robot_linear_unit: KUKA robot USD attach "
+                            "failed (%s) — mount pedestal only", usd_path)
+                    else:
+                        logger.info("[VIS] KUKA %s mounted on linear unit @ local z=0.70",
+                                    attach_robot_asset)
+            except Exception:
+                logger.exception("[VIS] add_robot_linear_unit: robot USD load failed")
 
         # 4) 케이블 베어(에너지 체인) — 시각 연출용, 트랙 길이에 맞춰 축소
         _box(f"{root}/Cable_Chain_Fixed", (-track_half / 2.0, -0.7, 0.15),
