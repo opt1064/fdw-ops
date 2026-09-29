@@ -526,6 +526,89 @@ class SceneBuilder:
         logger.info("[VIS] metal forming machine added @ %s", position)
         return root
 
+    def add_cnc_pipe_bender(self,
+                            position: Tuple[float, float, float] = (33.0, 2.5, 0.0),
+                            name: str = "CNC_Pipe_Bender",
+                            ) -> str:
+        """실사 공장 사진 레퍼런스의 CNC 파이프 벤딩기 — 길고 흰색인 메인
+        본체 + 노란색 피더/벤딩 헤드/스윙 암 + 어두운 금속 레일/척/다이.
+        add_metal_forming_machine()과 같은 forming_cell(3세부 소성가공
+        셀)에 같이 배치되는 두 번째 실 장비.
+
+        사용자 제공 레퍼런스 스크립트(Cube size=1.0 + scale=전체 크기
+        방식)를 이 프로젝트 관례(Cube size=2.0 + scale=half-extent)로
+        정확히 환산해서 옮겼다 — Cylinder(척/다이)는 원래도 반경/높이
+        직접 지정이라 환산 불필요. 다른 정적 배경 소품과 동일하게 물리는
+        안 붙인다(순수 시각 요소).
+
+        기본 위치(33.0, 2.5, 0.0)는 add_metal_forming_machine()의 기본
+        위치(30.6, 2.5)와 겹치지 않도록 이 프로젝트의 add_workshop_layout()
+        호출부에서 두 장비 모두에 명시적 position을 지정해 나란히
+        배치한다(각 메서드 자체의 기본값은 독립적으로 썼을 때를 위한
+        값이라 그대로 쓰면 겹친다 — add_workshop_layout() 소스 참고)."""
+        root = f"{self.config.root_prim_path}/Layout/{name}"
+        self._UsdGeom.Xform.Define(self._stage, root)
+        self._set_translate(root, position)
+
+        color_body = (0.92, 0.92, 0.92)
+        color_head = (0.95, 0.75, 0.05)
+        color_dark = (0.25, 0.25, 0.28)
+        mat_body = self._get_or_create_material(
+            f"BenderBodyWhite_{self._color_key(color_body)}", color_body,
+            roughness=0.4, metallic=0.15)
+        mat_head = self._get_or_create_material(
+            f"BenderHeadYellow_{self._color_key(color_head)}", color_head,
+            roughness=0.4, metallic=0.2)
+        mat_dark = self._get_or_create_material(
+            f"BenderDarkMetal_{self._color_key(color_dark)}", color_dark,
+            roughness=0.3, metallic=0.7)
+
+        def _box(path: str, center: Tuple[float, float, float],
+                half_extent: Tuple[float, float, float],
+                color: Tuple[float, float, float], mat) -> None:
+            cube = self._UsdGeom.Cube.Define(self._stage, path)
+            cube.CreateSizeAttr(2.0)
+            self._set_scale(path, half_extent)
+            self._set_translate(path, center)
+            self._set_color(path, color)
+            self._apply_material(path, mat)
+
+        def _cyl(path: str, center: Tuple[float, float, float],
+                radius: float, height: float, axis: str,
+                color: Tuple[float, float, float], mat) -> None:
+            cyl = self._UsdGeom.Cylinder.Define(self._stage, path)
+            cyl.CreateRadiusAttr(radius)
+            cyl.CreateHeightAttr(height)
+            cyl.CreateAxisAttr(axis)
+            self._set_translate(path, center)
+            self._set_color(path, color)
+            self._apply_material(path, mat)
+
+        # 1) 메인 본체 (흰색 캐비닛)
+        _box(f"{root}/Main_Body", (0, 0, 0.55), (1.75, 0.4, 0.55), color_body, mat_body)
+
+        # 2) 상단 리니어 가이드 레일
+        _box(f"{root}/Top_Rail", (-0.2, 0.15, 1.15), (1.5, 0.1, 0.05), color_dark, mat_dark)
+
+        # 3) 파이프 이송 피더 / 척
+        _box(f"{root}/Feeder_Base", (-1.2, 0.15, 1.3), (0.25, 0.2, 0.2), color_head, mat_head)
+        _cyl(f"{root}/Feeder_Chuck", (-0.8, 0.15, 1.3), 0.08, 0.4, "X", color_dark, mat_dark)
+
+        # 4) 벤딩 헤드 베이스
+        _box(f"{root}/Head_Base", (2.0, 0.3, 0.7), (0.4, 0.5, 0.35), color_head, mat_head)
+        _box(f"{root}/Head_Support", (2.1, 0.6, 0.3), (0.25, 0.4, 0.2), color_head, mat_head)
+
+        # 5) 벤딩 금형(다이) — 다단 원통형
+        _cyl(f"{root}/Bending_Die_L1", (2.0, 0.5, 1.15), 0.18, 0.15, "Z", color_dark, mat_dark)
+        _cyl(f"{root}/Bending_Die_L2", (2.0, 0.5, 1.35), 0.15, 0.15, "Z", color_dark, mat_dark)
+
+        # 6) 스윙 암 + 클램프 다이
+        _box(f"{root}/Swing_Arm", (2.2, 0.8, 0.9), (0.3, 0.15, 0.2), color_head, mat_head)
+        _box(f"{root}/Clamp_Die", (2.2, 0.8, 1.15), (0.15, 0.075, 0.1), color_dark, mat_dark)
+
+        logger.info("[VIS] CNC pipe bender added @ %s", position)
+        return root
+
     def add_cantilever_rack(self,
                             position: Tuple[float, float, float] = (14.5, 2.0, 0.0),
                             num_pillars: int = 4,
@@ -974,13 +1057,17 @@ class SceneBuilder:
         self._set_color(wall_s, interior_wall_color)
         self._apply_material(wall_s, interior_wall_mat)
 
-        # 3세부 소성가공 셀 — 안전펜스(반입구 3.8m) + 실제 파이프 성형 장비
-        # (사용자 제공 레퍼런스 사진 반영, 2026-09-29). 실제 장비가 생겨서
-        # 아래 "미구현 placeholder" 목록에서는 뺐다 — 셀 로직 자체는 아직
-        # 없지만(DistributedIntelligenceCell 미구현) 외형은 실사로 채움.
+        # 3세부 소성가공 셀 — 안전펜스(반입구 3.8m) + 실제 장비 2대(파이프
+        # 성형 작업대 + CNC 파이프 벤딩기, 사용자 제공 레퍼런스 사진 반영,
+        # 2026-09-29). 실제 장비가 생겨서 아래 "미구현 placeholder"
+        # 목록에서는 뺐다 — 셀 로직 자체는 아직 없지만
+        # (DistributedIntelligenceCell 미구현) 외형은 실사로 채움.
+        # 두 장비 각각의 기본 position은 서로 겹치므로(둘 다 "혼자 쓸 때"
+        # 기준 기본값), 여기선 서쪽/동쪽으로 나란히 명시적으로 배치한다.
         fx0, fy0, fw, fd, _c, _l = WORKSHOP_ZONES["forming_cell"]
         self.add_safety_fence("forming_cell", fx0, fy0, fw, fd)
-        self.add_metal_forming_machine()
+        self.add_metal_forming_machine(position=(27.5, 2.5, 0.0))
+        self.add_cnc_pipe_bender(position=(33.0, 2.5, 0.0))
 
         # 아직 셀 로직이 없는 구역 — 눈에 띄는 placeholder만 배치
         for zone_name in ("additive_cell", "machining_cell"):
