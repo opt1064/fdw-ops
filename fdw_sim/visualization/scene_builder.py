@@ -649,6 +649,101 @@ class SceneBuilder:
         logger.info("[VIS] detailed CNC pipe bender added @ %s", position)
         return root
 
+    def add_amr_charging_station(self,
+                                 position: Tuple[float, float, float] = (4.5, 10.9, 0.0),
+                                 name: str = "AMR_Charging_Station",
+                                 ) -> str:
+        """AMR 충전 스테이션 — 주차 패드 + 노란 진입 가이드선/범퍼 +
+        충전 타워 + 금속 충전 단자 2개 + 상태 표시 LED(자체발광 초록).
+        기존엔 그냥 초록 평판 마커(ChargeDocks/dock_N)였는데, 사용자
+        제공 레퍼런스로 실물 스테이션으로 교체됐다(add_workshop_layout()
+        참고).
+
+        사용자 제공 레퍼런스 스크립트(Cube size=1.0 + scale=전체 크기
+        방식)를 이 프로젝트 관례(Cube size=2.0 + scale=half-extent)로
+        정확히 환산해서 옮겼다 — Cylinder(단자/LED)는 원래도 반경/높이
+        직접 지정이라 환산 불필요. 다른 정적 배경 소품과 동일하게 물리는
+        안 붙인다(순수 시각 요소 — AMR 주행 로직은 USD 충돌체가 아니라
+        MaterialCell의 거리 기반 모델로 동작하므로 장애물 인식과 무관).
+
+        충전 타워/단자는 로컬 -x 쪽(스테이션 "뒤")에 있고 주차 패드는
+        원점 중심 ±0.75(x)/±0.6(y) — 폭 1.5m x 깊이 1.2m로 꽤 아담해서
+        기존 도크 두 곳(2.0m 간격)에 나란히 넣어도 안 겹친다."""
+        root = f"{self.config.root_prim_path}/Layout/{name}"
+        self._UsdGeom.Xform.Define(self._stage, root)
+        self._set_translate(root, position)
+
+        color_base = (0.15, 0.15, 0.15)
+        color_yellow = (0.95, 0.75, 0.05)
+        color_contact = (0.8, 0.8, 0.85)
+        color_led = (0.1, 0.9, 0.2)
+        mat_base = self._get_or_create_material(
+            f"ChargeStationDark_{self._color_key(color_base)}", color_base,
+            roughness=0.5, metallic=0.2)
+        mat_yellow = self._get_or_create_material(
+            f"ChargeStationYellow_{self._color_key(color_yellow)}", color_yellow,
+            roughness=0.4, metallic=0.1)
+        mat_contact = self._get_or_create_material(
+            f"ChargeStationContact_{self._color_key(color_contact)}", color_contact,
+            roughness=0.2, metallic=0.9)
+        # 상태 LED — 자체발광으로 "충전 중" 느낌
+        mat_led = self._get_or_create_material(
+            f"ChargeStationLED_{self._color_key(color_led)}", color_led,
+            roughness=0.3, metallic=0.0,
+            emissive_color=color_led, emissive_intensity=3.0)
+
+        def _box(path: str, center: Tuple[float, float, float],
+                half_extent: Tuple[float, float, float],
+                color: Tuple[float, float, float], mat) -> None:
+            cube = self._UsdGeom.Cube.Define(self._stage, path)
+            cube.CreateSizeAttr(2.0)
+            self._set_scale(path, half_extent)
+            self._set_translate(path, center)
+            self._set_color(path, color)
+            self._apply_material(path, mat)
+
+        def _cyl(path: str, center: Tuple[float, float, float],
+                radius: float, height: float, axis: str,
+                color: Tuple[float, float, float], mat) -> None:
+            cyl = self._UsdGeom.Cylinder.Define(self._stage, path)
+            cyl.CreateRadiusAttr(radius)
+            cyl.CreateHeightAttr(height)
+            cyl.CreateAxisAttr(axis)
+            self._set_translate(path, center)
+            self._set_color(path, color)
+            self._apply_material(path, mat)
+
+        # 1) 하단 주차 패드
+        _box(f"{root}/Parking_Pad", (0, 0, 0.01), (0.75, 0.6, 0.01), color_base, mat_base)
+
+        # 2) 주차 유도선(좌/우)
+        _box(f"{root}/Guide_Line_L", (0, -0.6, 0.015), (0.75, 0.025, 0.005),
+             color_yellow, mat_yellow)
+        _box(f"{root}/Guide_Line_R", (0, 0.6, 0.015), (0.75, 0.025, 0.005),
+             color_yellow, mat_yellow)
+
+        # 3) 충전 타워 본체
+        _box(f"{root}/Charging_Tower", (-0.6, 0, 0.4), (0.15, 0.3, 0.4),
+             color_base, mat_base)
+
+        # 4) 물리적 충전 접촉 단자
+        for i, y in enumerate((-0.15, 0.15)):
+            _cyl(f"{root}/Contact_{i}", (-0.43, y, 0.25), 0.04, 0.06, "X",
+                 color_contact, mat_contact)
+
+        # 5) 상태 표시 LED
+        _cyl(f"{root}/Status_LED", (-0.6, 0, 0.82), 0.08, 0.04, "Z",
+             color_led, mat_led)
+
+        # 6) 진입 가이드 범퍼
+        _box(f"{root}/Bumper_L", (-0.4, -0.45, 0.1), (0.3, 0.05, 0.1),
+             color_yellow, mat_yellow)
+        _box(f"{root}/Bumper_R", (-0.4, 0.45, 0.1), (0.3, 0.05, 0.1),
+             color_yellow, mat_yellow)
+
+        logger.info("[VIS] AMR charging station added @ %s", position)
+        return root
+
     def add_cantilever_rack(self,
                             position: Tuple[float, float, float] = (14.5, 2.0, 0.0),
                             num_pillars: int = 4,
@@ -1056,19 +1151,12 @@ class SceneBuilder:
                 shelf_depth=d, total_height=h, num_levels=5,
                 name=f"MaterialRack_{i}")
 
-        # AMR 충전 도크 표시 (충전소 구역 안, 바닥 마커)
-        # half-height=0.025이므로 바닥에 딱 붙으려면 중심 z도 0.025 —
-        # 이전에 0.02를 써서 바닥 아래로 0.005m 파묻혀 있었다.
+        # AMR 충전 스테이션 (충전소 구역 안) — 2026-09-29 사용자 요청으로
+        # 예전 평판 마커(ChargeDockGreen 박스)를 실물 스테이션(주차 패드
+        # + 가이드선/범퍼 + 충전 타워 + 단자 + LED)으로 교체.
         for i, (x, y) in enumerate([(4.5, 10.9), (6.5, 10.9)]):
-            dock_path = f"{self.config.root_prim_path}/Layout/ChargeDocks/dock_{i}"
-            dock = self._UsdGeom.Cube.Define(self._stage, dock_path)
-            dock.CreateSizeAttr(2.0)
-            self._set_scale(dock_path, (0.6, 0.45, 0.025))
-            self._set_translate(dock_path, (x, y, 0.025))
-            self._set_color(dock_path, (0.3, 0.7, 0.3))
-            dock_mat = self._get_or_create_material("ChargeDockGreen", (0.3, 0.7, 0.3),
-                                                     roughness=0.45, metallic=0.0)
-            self._apply_material(dock_path, dock_mat)
+            self.add_amr_charging_station(position=(x, y, 0.0),
+                                          name=f"AMR_Charging_Station_{i}")
 
         # 소재관리 존 — 캔틸레버 랙 + 각 층 양쪽 지지대에 가득 얹힌 원자재
         # 아연도금 파이프 다발(장식용, 보관 랙/AMR 통로 사이 빈 공간).
