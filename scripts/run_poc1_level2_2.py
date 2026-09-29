@@ -103,6 +103,11 @@ def main() -> int:
     p.add_argument("--keep-alive", action="store_true",
                    help="모든 job 완료 후 자동 종료하지 않고 창을 계속 띄워둠 "
                         "(창을 직접 닫거나 터미널에서 Ctrl+C 할 때까지 유지)")
+    p.add_argument("--single-amr-demo", action="store_true",
+                   help="검증용 최소 시나리오: AMR 1대 + part 1개만 투입하고 "
+                        "용접 셀 도착까지만 확인(route=[welding]만, inspection "
+                        "구간 없음). 여러 AMR/job이 겹쳐서 원인 파악이 어려울 "
+                        "때 AMR 이동 자체만 떼어서 보고 싶은 경우용.")
 
     # Level 2.1 플래그 (재사용)
     p.add_argument("--real-robot", action="store_true",
@@ -206,6 +211,25 @@ def main() -> int:
         os.environ.setdefault("OMNI_KIT_ALLOW_ROOT", "1")
 
     cfg = load_config(args.config)
+
+    if args.single_amr_demo:
+        # AMR 1대 + part 1개, route=[welding]만 — material→welding 이동
+        # 하나만 떼어서 눈으로 확인하기 위한 최소 시나리오. 두 번째 AMR이나
+        # inspection행 재이송이 겹쳐서 "몇 번째 AMR이 뭘 하는지" 헷갈리는
+        # 문제를 원천 차단한다.
+        cfg["cells"]["material"]["num_amrs"] = 1
+        cfg["jobs"] = [{
+            "job_id": "JOB_SINGLE_AMR",
+            "part_id": "PART_SINGLE",
+            "part_type": "tubular_frame_A",
+            "process_route": ["welding"],
+            "priority": "normal",
+            "recipe_overrides": {
+                "welding": {"speed": 0.10, "power": 1500.0, "path_length_mm": 220.0},
+            },
+        }]
+        print("[INFO] --single-amr-demo: AMR 1대 + part 1개(PART_SINGLE)만 "
+              "투입, route=[welding]만 (inspection 구간 없음)\n")
 
     # 기본은 GUI 모드
     headless_override = False
