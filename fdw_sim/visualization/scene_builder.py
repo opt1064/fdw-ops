@@ -18,7 +18,7 @@ mode="discrete"인 경우 절대 import되지 않는다.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -154,8 +154,9 @@ class SceneBuilder:
                           bounds: Tuple[float, float, float, float] = WORKSHOP_BOUNDS,
                           height: float = 4.5,
                           thickness: float = 0.2,
-                          color: Tuple[float, float, float] = (0.55, 0.58, 0.62)) -> str:
-        """작업장을 감싸는 4면 벽 — 배경 디테일용 (충돌/물리 없이 시각 전용).
+                          color: Tuple[float, float, float] = (0.55, 0.58, 0.62),
+                          skip_walls: Optional[Iterable[str]] = ("South",)) -> str:
+        """작업장을 감싸는 벽 — 배경 디테일용 (충돌/물리 없이 시각 전용).
 
         Args:
             bounds: (x_min, x_max, y_min, y_max) — 벽으로 둘러쌀 바닥 영역.
@@ -163,6 +164,9 @@ class SceneBuilder:
                 inspection@x=10, AMR은 x≈-1.5)를 여유 있게 감싸도록 잡았다.
             height: 벽 높이(m)
             thickness: 벽 두께(m)
+            skip_walls: 안 그릴 벽 이름("North"/"South"/"East"/"West")들.
+                기본으로 South를 뺀다 — 2026-09-29 사용자 요청: 카메라가
+                작업장 내부를 볼 수 있도록 정면(남쪽) 벽 없이 둔다.
         """
         x_min, x_max, y_min, y_max = bounds
         walls_root = f"{self.config.root_prim_path}/Environment/Walls"
@@ -173,6 +177,7 @@ class SceneBuilder:
         cx = (x_min + x_max) / 2.0
         cy = (y_min + y_max) / 2.0
         hz = height / 2.0
+        skip = set(skip_walls or ())
 
         # (이름, 중심, half-extent) — North/South는 X축을 따라 긴 벽, East/West는 Y축
         specs = [
@@ -182,6 +187,8 @@ class SceneBuilder:
             ("West", (x_min, cy, hz), (thickness, width_y / 2.0 + thickness, hz)),
         ]
         for name, center, half_extent in specs:
+            if name in skip:
+                continue
             wall_path = f"{walls_root}/{name}"
             wall = self._UsdGeom.Cube.Define(self._stage, wall_path)
             wall.CreateSizeAttr(2.0)
@@ -192,8 +199,8 @@ class SceneBuilder:
                                                roughness=0.5, metallic=0.15)
             self._apply_material(wall_path, mat)
 
-        logger.info("[VIS] factory walls added (bounds=%s, height=%.1fm)",
-                    bounds, height)
+        logger.info("[VIS] factory walls added (bounds=%s, height=%.1fm, skipped=%s)",
+                    bounds, height, sorted(skip))
         return walls_root
 
     def add_roof(self,

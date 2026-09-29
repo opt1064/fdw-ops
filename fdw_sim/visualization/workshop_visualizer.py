@@ -349,8 +349,10 @@ class WorkshopVisualizer:
 
         if self.config.show_factory_walls:
             try:
+                # 2026-09-29 사용자 요청: 지붕과 남쪽 벽은 안 그린다 — 카메라가
+                # 작업장 내부를 위/앞에서 볼 수 있도록. add_factory_walls()의
+                # skip_walls 기본값이 이미 South를 빼므로 별도 인자 불필요.
                 self.scene.add_factory_walls()
-                self.scene.add_roof()
                 # forming_cell 안전펜스 반입구(x 약 28.2~33.0) 구간엔 기둥을
                 # 안 놓는다 — scene_builder.WORKSHOP_ZONES["forming_cell"] +
                 # FORMING_GATE_WIDTH_M 기준 계산(반입구를 막아 보이는 것 방지).
@@ -364,7 +366,7 @@ class WorkshopVisualizer:
                     skip_x_ranges=[(gate_cx - gate_half, gate_cx + gate_half)])
                 self.scene.add_overhead_crane()
             except Exception:
-                logger.exception("[VIS] add_factory_walls/add_roof failed — continuing without them")
+                logger.exception("[VIS] add_factory_walls/pillars/crane failed — continuing without them")
 
         if self.config.show_ceiling_lights:
             try:
