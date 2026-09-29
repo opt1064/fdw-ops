@@ -172,7 +172,7 @@ def test_scene_builder_has_workshop_layout_methods() -> None:
                        "add_unimplemented_cell_marker", "add_workshop_layout",
                        "add_floor_lane_markings", "add_signal_tower",
                        "add_raw_pipe_bundle", "add_cantilever_rack",
-                       "add_loaded_cantilever_rack"]
+                       "add_loaded_cantilever_rack", "add_steel_shelving"]
     missing = [m for m in layout_methods if not hasattr(SceneBuilder, m)]
     assert not missing, f"SceneBuilder missing methods: {missing}"
     for m in layout_methods:

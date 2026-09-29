@@ -608,6 +608,70 @@ class SceneBuilder:
                     bundle_count, len(levels))
         return f"{self.config.root_prim_path}/Layout/CantileverRack"
 
+    def add_steel_shelving(self,
+                           position: Tuple[float, float, float] = (14.5, 5.0, 0.0),
+                           num_bays: int = 3,
+                           num_levels: int = 5,
+                           bay_width: float = 1.2,
+                           shelf_depth: float = 0.5,
+                           total_height: float = 2.0,
+                           shelf_thickness: float = 0.03,
+                           post_size: float = 0.04,
+                           ) -> str:
+        """실사 공장 사진 레퍼런스의 백색 철재 다단 선반(경량/중량랙) —
+        소형 부품/공구함 보관용. 캔틸레버 랙(긴 파이프 전용)과 달리 평평한
+        선반판이 여러 단(level) 쌓인 구조로, num_bays개 칸(bay)이 가로로
+        이어진다.
+
+        사용자 제공 레퍼런스 스크립트(Cube size=1.0 + scale=전체 크기
+        방식)를 이 프로젝트 관례(Cube size=2.0 + scale=half-extent)로
+        정확히 환산해서 옮겼다 — 모든 half-extent 값은 레퍼런스의 scale을
+        절반으로 나눈 값이다. 다른 정적 배경 소품과 동일하게 물리는 안
+        붙인다(순수 시각 요소 — 시뮬레이션 로직과 무관한 배경 디테일이라
+        아무것도 이 위에서 떨어지거나 부딪히지 않는다).
+
+        기본 위치(14.5, 5.0, 0.0)는 소재관리 존의 기존 보관 랙(x 4~12)과
+        캔틸레버 랙(x 14.5~17.8, y 1.1~2.9) 양쪽 모두와 안 겹치는 빈
+        공간(y~5.0)이다."""
+        shelf_root = f"{self.config.root_prim_path}/Layout/SteelShelving"
+        self._UsdGeom.Xform.Define(self._stage, shelf_root)
+        self._set_translate(shelf_root, position)
+
+        color = (0.92, 0.92, 0.92)
+        mat = self._get_or_create_material(
+            f"SteelShelfWhite_{self._color_key(color)}", color,
+            roughness=0.5, metallic=0.15)
+
+        def _part(path: str, center: Tuple[float, float, float],
+                  half_extent: Tuple[float, float, float]) -> None:
+            box = self._UsdGeom.Cube.Define(self._stage, path)
+            box.CreateSizeAttr(2.0)
+            self._set_scale(path, half_extent)
+            self._set_translate(path, center)
+            self._set_color(path, color)
+            self._apply_material(path, mat)
+
+        post_half = post_size / 2.0
+        for i in range(num_bays + 1):
+            x = i * bay_width
+            _part(f"{shelf_root}/Post_Front_{i}", (x, -shelf_depth / 2.0, total_height / 2.0),
+                  (post_half, post_half, total_height / 2.0))
+            _part(f"{shelf_root}/Post_Back_{i}", (x, shelf_depth / 2.0, total_height / 2.0),
+                  (post_half, post_half, total_height / 2.0))
+
+        level_gap = (total_height - 0.2) / max(1, num_levels - 1)
+        shelf_half = ((bay_width + post_size) / 2.0, shelf_depth / 2.0, shelf_thickness / 2.0)
+        for bay in range(num_bays):
+            x_center = bay * bay_width + bay_width / 2.0
+            for level in range(num_levels):
+                z = 0.15 + level * level_gap
+                _part(f"{shelf_root}/Shelf_{bay}_Level_{level}",
+                      (x_center, 0.0, z), shelf_half)
+
+        logger.info("[VIS] steel shelving added @ %s (%d bays x %d levels)",
+                    position, num_bays, num_levels)
+        return shelf_root
+
     def add_structural_pillars(self,
                                bounds: Tuple[float, float, float, float] = WORKSHOP_BOUNDS,
                                height: float = 4.3,
@@ -792,6 +856,10 @@ class SceneBuilder:
         # 소재관리 존 — 캔틸레버 랙 + 각 층 양쪽 지지대에 가득 얹힌 원자재
         # 아연도금 파이프 다발(장식용, 보관 랙/AMR 통로 사이 빈 공간).
         self.add_loaded_cantilever_rack()
+
+        # 소재관리 존 — 백색 철재 다단 선반(소형 부품/공구함용, 캔틸레버
+        # 랙과 다른 y 대역이라 서로 안 겹침).
+        self.add_steel_shelving()
 
         # 서버실 가벽 (동쪽 + 남쪽 — 복도 쪽으로 열려 있는 나머지 2면은 건물 외벽이 대신함)
         sx0, sy0, sw, sd, _c, _l = WORKSHOP_ZONES["server_room"]
