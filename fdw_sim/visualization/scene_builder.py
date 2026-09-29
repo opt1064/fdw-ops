@@ -1030,31 +1030,95 @@ class SceneBuilder:
 
     def add_overhead_crane(self,
                            bounds: Tuple[float, float, float, float] = WORKSHOP_BOUNDS,
-                           rail_z: float = 3.6,
+                           rail_z: float = 3.0,
                            bridge_x: float = 22.0,
                            inset: float = 1.0,
                            ) -> str:
-        """실사 공장 사진 레퍼런스의 천장 주행 크레인 — 레일(N/S 벽 안쪽,
-        X축 방향) + 그 사이를 가로지르는 브릿지 + 브릿지에 매달린 호이스트.
-        정적 배경 소품(실제로 주행하지 않음). 천장 조명(z=4.0)/지붕
-        (z=4.5)과 안 겹치도록 rail_z=3.6으로 그 아래에 둔다.
+        """실사 공장 사진 레퍼런스의 더블 거더(Double Girder) 천장 주행
+        크레인(고해상도판, 2026-09-29 사용자 요청으로 단순 레일+브릿지+
+        호이스트 버전을 대체) — 콘크리트 기둥 8개(남/북 레일 4쌍) +
+        레일 + 엔드 캐리지 + 평행 이중 거더 + 거더 위를 타고 이동하는
+        트롤리(호이스트 드럼+모터) + 와이어 케이블+훅 + 한쪽 끝에 매달린
+        조작 운전실(본체+창+지붕)까지 세분화된 부품으로 구성. 정적 배경
+        소품(실제로 주행하지 않음).
+
+        사용자 제공 레퍼런스 스크립트는 60x40m급 산업 홀 기준(기둥 높이
+        12m, 스팬 대략 그 이상)이라 이 프로젝트의 실제 배치도
+        (36.1x12.4m)엔 훨씬 스케일이 크다 — 축 대응(레퍼런스의 스팬축
+        X→이 프로젝트의 Y, 주행축 Y→X)과 수직 압축(기둥 12m→3.0m 레일
+        높이)으로 옮기고, 기둥 개수도 7쌍→4쌍으로 줄여 건물 크기에
+        맞췄다. rail_z를 기존 3.6에서 3.0으로 낮춘 건 엔드 캐리지/거더/
+        트롤리를 레일 위에 쌓아 올릴 공간을 확보하면서도, 맨 위(트롤리
+        상단 ≈3.92)가 여전히 천장 조명(z=4.0)/지붕(z=4.5)보다 아래에
+        있도록 하기 위함 — 파이썬 산술로 재확인함.
+
+        기둥 x 위치는 기존 바닥 소품(소재관리 존 캔틸레버 랙 x:[14.5,
+        17.8], AMR 충전 스테이션 x:[3.75,7.25], 적층/정밀가공 셀
+        placeholder)과 겹치지 않도록 남쪽/북쪽 레일 줄마다 따로 골랐다
+        (남: 2.0/10.0/19.5/30.5, 북: 2.0/10.0/19.5/33.0 — 북쪽만 30.5
+        대신 33.0을 쓰는 이유는 30.5가 적층 셀 placeholder 박스
+        (x:[28.975,30.725], y:[10.275,12.025])와 겹치기 때문).
 
         bridge_x 기본값 22.0은 용접 셀(WELDING_CELL_01, x=25.1) 근처
-        상공 — 중량물 인양이 필요할 법한 구간 위에 배치."""
+        상공(AMR 메인 통로 위) — 중량물 인양이 필요할 법한 구간 위에
+        배치, 기존 단순판과 동일한 위치를 유지."""
         x_min, x_max, y_min, y_max = bounds
         crane_root = f"{self.config.root_prim_path}/Environment/OverheadCrane"
         self._UsdGeom.Xform.Define(self._stage, crane_root)
 
-        color = (0.95, 0.35, 0.05)
-        mat = self._get_or_create_material("CraneOrange", color,
-                                           roughness=0.45, metallic=0.3)
+        color_concrete = (0.68, 0.66, 0.63)
+        color_rail = (0.30, 0.30, 0.33)
+        color_structure = (0.88, 0.68, 0.05)
+        color_dark = (0.15, 0.15, 0.17)
+        color_cabin = (0.85, 0.85, 0.87)
+        color_glass = (0.12, 0.20, 0.25)
+        color_cable = (0.08, 0.08, 0.08)
+        color_hook = (0.90, 0.40, 0.05)
+
+        mat_concrete = self._get_or_create_material(
+            f"CraneConcrete_{self._color_key(color_concrete)}", color_concrete,
+            roughness=0.85, metallic=0.0)
+        mat_rail = self._get_or_create_material(
+            f"CraneRailSteel_{self._color_key(color_rail)}", color_rail,
+            roughness=0.4, metallic=0.6)
+        mat_structure = self._get_or_create_material(
+            f"CraneStructureYellow_{self._color_key(color_structure)}", color_structure,
+            roughness=0.45, metallic=0.25)
+        mat_dark = self._get_or_create_material(
+            f"CraneDarkMetal_{self._color_key(color_dark)}", color_dark,
+            roughness=0.35, metallic=0.6)
+        mat_cabin = self._get_or_create_material(
+            f"CraneCabinWhite_{self._color_key(color_cabin)}", color_cabin,
+            roughness=0.4, metallic=0.1)
+        mat_glass = self._get_or_create_material(
+            f"CraneCabinGlass_{self._color_key(color_glass)}", color_glass,
+            roughness=0.15, metallic=0.3)
+        mat_cable = self._get_or_create_material(
+            f"CraneCable_{self._color_key(color_cable)}", color_cable,
+            roughness=0.5, metallic=0.4)
+        mat_hook = self._get_or_create_material(
+            f"CraneHookOrange_{self._color_key(color_hook)}", color_hook,
+            roughness=0.4, metallic=0.4)
 
         def _box(name: str, center: Tuple[float, float, float],
-                half_extent: Tuple[float, float, float]) -> None:
+                half_extent: Tuple[float, float, float],
+                color: Tuple[float, float, float], mat) -> None:
             p = f"{crane_root}/{name}"
             cube = self._UsdGeom.Cube.Define(self._stage, p)
             cube.CreateSizeAttr(2.0)
             self._set_scale(p, half_extent)
+            self._set_translate(p, center)
+            self._set_color(p, color)
+            self._apply_material(p, mat)
+
+        def _cyl(name: str, center: Tuple[float, float, float],
+                radius: float, height: float, axis: str,
+                color: Tuple[float, float, float], mat) -> None:
+            p = f"{crane_root}/{name}"
+            cyl = self._UsdGeom.Cylinder.Define(self._stage, p)
+            cyl.CreateRadiusAttr(radius)
+            cyl.CreateHeightAttr(height)
+            cyl.CreateAxisAttr(axis)
             self._set_translate(p, center)
             self._set_color(p, color)
             self._apply_material(p, mat)
@@ -1064,15 +1128,76 @@ class SceneBuilder:
         rail_half_x = (x_max - x_min) / 2.0 - inset
         rail_cx = (x_min + x_max) / 2.0
 
-        _box("Rail_South", (rail_cx, rail_y_south, rail_z), (rail_half_x, 0.15, 0.15))
-        _box("Rail_North", (rail_cx, rail_y_north, rail_z), (rail_half_x, 0.15, 0.15))
+        # 1) 콘크리트 기둥 — 남/북 레일 줄을 각각 4개씩 지지 (레퍼런스의
+        # 7쌍을 이 건물 크기에 맞춰 4쌍으로 축소, 바닥 소품과 안 겹치는
+        # x만 골랐다 — docstring 참고).
+        pillar_half = 0.22
+        pillar_height = rail_z - 0.12  # 레일 하단(rail_z - rail_half_z)까지
+        for i, x in enumerate((2.0, 10.0, 19.5, 30.5)):
+            _box(f"Pillar_Concrete_S_{i:02d}", (x, rail_y_south, pillar_height / 2.0),
+                 (pillar_half, pillar_half, pillar_height / 2.0), color_concrete, mat_concrete)
+        for i, x in enumerate((2.0, 10.0, 19.5, 33.0)):
+            _box(f"Pillar_Concrete_N_{i:02d}", (x, rail_y_north, pillar_height / 2.0),
+                 (pillar_half, pillar_half, pillar_height / 2.0), color_concrete, mat_concrete)
 
+        # 2) 주행 레일 (남/북, X축 방향)
+        _box("Rail_South", (rail_cx, rail_y_south, rail_z),
+             (rail_half_x, 0.15, 0.12), color_rail, mat_rail)
+        _box("Rail_North", (rail_cx, rail_y_north, rail_z),
+             (rail_half_x, 0.15, 0.12), color_rail, mat_rail)
+
+        # 3) 엔드 캐리지 — 각 레일 위를 구르며 더블 거더 양끝을 붙잡는 대차
+        carriage_z = rail_z + 0.12 + 0.15
+        _box("EndCarriage_South", (bridge_x, rail_y_south, carriage_z),
+             (0.45, 0.35, 0.15), color_dark, mat_dark)
+        _box("EndCarriage_North", (bridge_x, rail_y_north, carriage_z),
+             (0.45, 0.35, 0.15), color_dark, mat_dark)
+
+        # 4) 더블 거더 — 평행한 박스 빔 2개가 레일 사이(Y축 방향)를 가로지름
         bridge_half_y = (rail_y_north - rail_y_south) / 2.0
         bridge_cy = (rail_y_south + rail_y_north) / 2.0
-        _box("Bridge", (bridge_x, bridge_cy, rail_z + 0.1), (0.4, bridge_half_y, 0.2))
-        _box("Hoist", (bridge_x, bridge_cy, rail_z - 0.4), (0.3, 0.3, 0.2))
+        girder_z = carriage_z + 0.15 + 0.15
+        girder_offset = 0.35
+        _box("Girder_West", (bridge_x - girder_offset, bridge_cy, girder_z),
+             (0.15, bridge_half_y, 0.15), color_structure, mat_structure)
+        _box("Girder_East", (bridge_x + girder_offset, bridge_cy, girder_z),
+             (0.15, bridge_half_y, 0.15), color_structure, mat_structure)
 
-        logger.info("[VIS] overhead crane added (bridge @ x=%.1f)", bridge_x)
+        # 5) 트롤리 + 호이스트 드럼 + 모터 — 거더 위를 타고 스팬(Y)을 이동,
+        # 스팬 중심에서 북쪽으로 살짝 치우친 위치(기본, 인양 작업 중 느낌)
+        trolley_y = bridge_cy + 1.0
+        trolley_z = girder_z + 0.15 + 0.10
+        _box("Trolley_Base", (bridge_x, trolley_y, trolley_z),
+             (0.25, 0.25, 0.10), color_dark, mat_dark)
+        hoist_z = trolley_z - 0.10 - 0.15
+        _cyl("Hoist_Drum", (bridge_x, trolley_y, hoist_z), 0.15, 0.4, "Y",
+             color_dark, mat_dark)
+        _box("Hoist_Motor", (bridge_x + 0.3, trolley_y, hoist_z),
+             (0.12, 0.12, 0.12), color_structure, mat_structure)
+
+        # 6) 와이어 케이블 + 훅 — 호이스트에서 아래로 늘어뜨림(정적 소품,
+        # 바닥 장비와 안 겹치도록 hook_z=1.6로 충분히 위에 둠)
+        cable_top_z = hoist_z - 0.15
+        hook_z = 1.6
+        cable_len = cable_top_z - hook_z
+        _cyl("Wire_Cable", (bridge_x, trolley_y, (cable_top_z + hook_z) / 2.0),
+             0.02, cable_len, "Z", color_cable, mat_cable)
+        _box("Hook", (bridge_x, trolley_y, hook_z), (0.08, 0.08, 0.10),
+             color_hook, mat_hook)
+
+        # 7) 조작 운전실 — 남쪽 엔드 캐리지 아래, 레일 바깥쪽(y<rail_y_south)
+        # 으로 돌출되게 매달아 작업장 안쪽을 내려다보는 형태(본체+창+지붕)
+        cabin_y = rail_y_south - 0.5
+        cabin_z = rail_z - 0.5
+        _box("Cabin_Body", (bridge_x, cabin_y, cabin_z), (0.35, 0.4, 0.35),
+             color_cabin, mat_cabin)
+        _box("Cabin_Window", (bridge_x, cabin_y + 0.4, cabin_z + 0.05),
+             (0.28, 0.02, 0.18), color_glass, mat_glass)
+        _box("Cabin_Roof", (bridge_x, cabin_y, cabin_z + 0.38), (0.4, 0.45, 0.03),
+             color_structure, mat_structure)
+
+        logger.info("[VIS] detailed double-girder overhead crane added (bridge @ x=%.1f)",
+                    bridge_x)
         return crane_root
 
     def add_unimplemented_cell_marker(self, zone_name: str,
