@@ -501,11 +501,12 @@ class SceneBuilder:
         return rack_root
 
     def add_raw_pipe_bundle(self,
-                            position: Tuple[float, float, float] = (16.15, 2.0, 1.44),
+                            position: Tuple[float, float, float] = (16.15, 1.5, 1.44),
                             pipe_radius: float = 0.0212,
                             pipe_length: float = 3.2,
                             spacing: float = 0.043,
-                            layers: Tuple[int, ...] = (6, 7, 8, 9, 8, 7, 6)
+                            layers: Tuple[int, ...] = (4, 5, 6, 5, 4),
+                            name: str = "RawPipeBundle",
                             ) -> str:
         """실사 공장 사진 레퍼런스처럼 육각형으로 쌓인 아연도금 원자재
         파이프 다발 — 소재관리 존 장식용 정적 프롭(사용자 제공 스펙:
@@ -514,13 +515,19 @@ class SceneBuilder:
         (RigidBody/Collision)는 안 붙인다 — 다른 정적 소품(랙, 펜스 등)과
         동일하게 순수 시각 요소로만 둔다.
 
-        position은 다발의 중심(파이프가 로컬 X축을 따라 누움) — 기본값은
-        add_cantilever_rack()의 기본 배치(position=(14.5,2.0,0.0),
-        4기둥 x 1.1m 간격 = 3.3m 스팬) 위 3번째 층 지지대 윗면
-        (z=3*0.4+0.2=1.4, 지지대 half-height 0.04 → 윗면 z=1.44)에
-        정중앙으로 걸쳐 얹히도록 맞춘 값이다. 랙 배치를 바꾸면 이 값도
-        같이 조정해야 한다."""
-        bundle_root = f"{self.config.root_prim_path}/Layout/RawPipeBundle"
+        position은 다발의 중심(파이프가 로컬 X축을 따라 누움). name은
+        한 랙에 다발을 여러 개(여러 층 x 양쪽 지지대) 얹을 때 prim 경로가
+        겹쳐서 서로 덮어쓰지 않도록 구분하는 이름이다 — 반드시 호출마다
+        고유하게 줘야 한다(add_loaded_cantilever_rack() 참고).
+
+        ⚠️ 2026-09-29 실측(사용자 스크린샷)으로 확인된 버그: 예전 기본값
+        position=(16.15, 2.0, ...)은 add_cantilever_rack()의 랙 중심
+        (y=2.0, arm_L/arm_R 사이의 빈 틈)에 다발을 놓아서, 다발 대부분이
+        양쪽 지지대 사이 허공에 떠 있고 가장자리만 아슬아슬하게 걸쳐
+        비스듬히 얹힌 것처럼 보였다. 지지대는 rack y ± 0.5(각각 폭 0.8m)
+        에 있으므로, 다발은 반드시 그 중 한쪽 중심(y=1.5 또는 y=2.5,
+        기본 랙 배치 기준)에 놓아야 실제로 지지대 위에 납작하게 걸린다."""
+        bundle_root = f"{self.config.root_prim_path}/Layout/{name}"
         self._UsdGeom.Xform.Define(self._stage, bundle_root)
         self._set_translate(bundle_root, position)
 
@@ -548,6 +555,58 @@ class SceneBuilder:
 
         logger.info("[VIS] raw pipe bundle added @ %s (%d pipes)", position, count)
         return bundle_root
+
+    def add_loaded_cantilever_rack(self,
+                                   position: Tuple[float, float, float] = (14.5, 2.0, 0.0),
+                                   num_pillars: int = 4,
+                                   pillar_spacing: float = 1.1,
+                                   num_levels: int = 5,
+                                   level_spacing: float = 0.4,
+                                   base_height: float = 0.15,
+                                   pipe_length: float = 3.2,
+                                   pipe_radius: float = 0.0212,
+                                   bundle_layers: Tuple[int, ...] = (4, 5, 6, 5, 4),
+                                   loaded_levels: Optional[list] = None,
+                                   ) -> str:
+        """add_cantilever_rack()을 짓고 그 위 여러 층 양쪽 지지대에
+        파이프 다발을 실사 레퍼런스 사진처럼 꽉 채워 얹는다.
+
+        add_cantilever_rack()과 add_raw_pipe_bundle()을 각각 한 번씩만
+        불러서 조합하면(2026-09-29 이전 버전) 다발이 지지대 사이 빈
+        틈(y=랙 중심)에 놓여 절반 가까이 허공에 뜬 채 비스듬히 걸린
+        것처럼 보이는 문제가 있었다(사용자 스크린샷으로 확인). 이 메서드는
+        각 다발을 반드시 arm_L(y=랙중심-0.5) 또는 arm_R(y=랙중심+0.5)
+        중 한쪽 중심에 정확히 얹어서, 매 층 양쪽 지지대마다 다발이
+        납작하게 걸리도록 한다.
+
+        loaded_levels: 파이프를 얹을 층 번호 목록(1-indexed). None이면
+        전 층(1~num_levels)을 다 채운다 — 레퍼런스 사진처럼 거의 모든
+        선반에 다발이 있는 모습."""
+        self.add_cantilever_rack(
+            position=position, num_pillars=num_pillars,
+            pillar_spacing=pillar_spacing, num_levels=num_levels,
+            level_spacing=level_spacing, base_height=base_height)
+
+        rx, ry, rz = position
+        bundle_x = rx + (num_pillars - 1) * pillar_spacing / 2.0
+        arm_half_h = 0.04  # add_cantilever_rack()의 arm half-extent z와 일치해야 함
+        arm_y_offset = 0.5  # add_cantilever_rack()의 arm_L/arm_R y offset과 일치
+
+        levels = loaded_levels if loaded_levels is not None else list(range(1, num_levels + 1))
+        bundle_count = 0
+        for level in levels:
+            z = rz + level * level_spacing + 0.2 + arm_half_h  # 지지대 윗면
+            for side, y in (("L", ry - arm_y_offset), ("R", ry + arm_y_offset)):
+                self.add_raw_pipe_bundle(
+                    position=(bundle_x, y, z),
+                    pipe_radius=pipe_radius, pipe_length=pipe_length,
+                    layers=bundle_layers,
+                    name=f"PipeBundle_L{level}_{side}")
+                bundle_count += 1
+
+        logger.info("[VIS] loaded cantilever rack: %d pipe bundles across %d level(s)",
+                    bundle_count, len(levels))
+        return f"{self.config.root_prim_path}/Layout/CantileverRack"
 
     def add_structural_pillars(self,
                                bounds: Tuple[float, float, float, float] = WORKSHOP_BOUNDS,
@@ -730,12 +789,9 @@ class SceneBuilder:
                                                      roughness=0.45, metallic=0.0)
             self._apply_material(dock_path, dock_mat)
 
-        # 소재관리 존 — 캔틸레버 랙 + 그 위에 얹힌 원자재 아연도금 파이프
-        # 다발(장식용, 보관 랙/AMR 통로 사이 빈 공간). 순서 중요하지 않음
-        # (USD는 렌더 시 z-order가 아니라 실제 3D 위치로 그림) — 논리적
-        # 순서로만 랙을 먼저 짓는다.
-        self.add_cantilever_rack()
-        self.add_raw_pipe_bundle()
+        # 소재관리 존 — 캔틸레버 랙 + 각 층 양쪽 지지대에 가득 얹힌 원자재
+        # 아연도금 파이프 다발(장식용, 보관 랙/AMR 통로 사이 빈 공간).
+        self.add_loaded_cantilever_rack()
 
         # 서버실 가벽 (동쪽 + 남쪽 — 복도 쪽으로 열려 있는 나머지 2면은 건물 외벽이 대신함)
         sx0, sy0, sw, sd, _c, _l = WORKSHOP_ZONES["server_room"]
