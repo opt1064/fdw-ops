@@ -438,8 +438,70 @@ class SceneBuilder:
         logger.info("[VIS] safety fence '%s' added (gate=%.1fm)", root_name, gate_w)
         return fence_root
 
+    def add_cantilever_rack(self,
+                            position: Tuple[float, float, float] = (14.5, 2.0, 0.0),
+                            num_pillars: int = 4,
+                            pillar_spacing: float = 1.1,
+                            num_levels: int = 5,
+                            level_spacing: float = 0.4,
+                            base_height: float = 0.15,
+                            ) -> str:
+        """캔틸레버 랙 — 파이프처럼 길고 무거운 자재를 다층으로 보관하는
+        구조(사용자 제공 레퍼런스, 파란 기둥 + 양쪽 지지대 + 이탈방지턱).
+
+        기둥을 로컬 X축을 따라 num_pillars개 늘어세우고, 각 기둥에서
+        Y축 양쪽으로 지지대(arm)가 뻗어 나와 그 위에 긴 자재(파이프)가
+        여러 기둥에 걸쳐 얹힌다 — add_raw_pipe_bundle()의 파이프도 로컬
+        X축을 따라 눕는 형태라 방향이 그대로 맞는다.
+
+        원본 레퍼런스는 UsdPhysics.CollisionAPI를 붙였지만, 이 프로젝트의
+        다른 정적 배경 소품(펜스/기둥/크레인 등)과 마찬가지로 시뮬레이션
+        로직과 무관한 순수 시각 요소라 물리는 안 붙인다 — 붙여봐야 아무도
+        떨어뜨리거나 부딪히지 않으므로 렌더 비용만 늘어난다."""
+        rack_root = f"{self.config.root_prim_path}/Layout/CantileverRack"
+        self._UsdGeom.Xform.Define(self._stage, rack_root)
+        self._set_translate(rack_root, position)
+
+        color = (0.18, 0.38, 0.65)
+        mat = self._get_or_create_material(
+            f"CantileverRackBlue_{self._color_key(color)}", color,
+            roughness=0.45, metallic=0.2)
+
+        def _part(path: str, center: Tuple[float, float, float],
+                  half_extent: Tuple[float, float, float]) -> None:
+            box = self._UsdGeom.Cube.Define(self._stage, path)
+            box.CreateSizeAttr(2.0)
+            self._set_scale(path, half_extent)
+            self._set_translate(path, center)
+            self._set_color(path, color)
+            self._apply_material(path, mat)
+
+        upright_h = num_levels * level_spacing + 0.7
+        for p in range(num_pillars):
+            x = p * pillar_spacing
+            pillar_root = f"{rack_root}/Pillar_{p:02d}"
+
+            _part(f"{pillar_root}_Upright", (x, 0.0, upright_h / 2.0),
+                  (0.075, 0.1, upright_h / 2.0))
+            _part(f"{pillar_root}_Base", (x, 0.0, base_height / 2.0),
+                  (0.075, 1.0, base_height / 2.0))
+
+            for level in range(1, num_levels + 1):
+                z = level * level_spacing + 0.2
+                _part(f"{pillar_root}_Arm_L_{level}", (x, -0.5, z), (0.05, 0.4, 0.04))
+                _part(f"{pillar_root}_Arm_R_{level}", (x, 0.5, z), (0.05, 0.4, 0.04))
+                stopper_z = z + 0.06
+                _part(f"{pillar_root}_Stopper_L_{level}", (x, -0.88, stopper_z),
+                      (0.05, 0.02, 0.075))
+                _part(f"{pillar_root}_Stopper_R_{level}", (x, 0.88, stopper_z),
+                      (0.05, 0.02, 0.075))
+
+        logger.info("[VIS] cantilever rack added @ %s (%d pillars x %d levels)",
+                    position, num_pillars, num_levels)
+        return rack_root
+
     def add_raw_pipe_bundle(self,
-                            position: Tuple[float, float, float] = (16.0, 2.0, 0.0),
+                            position: Tuple[float, float, float] = (16.15, 2.0, 1.44),
                             pipe_radius: float = 0.0212,
                             pipe_length: float = 3.2,
                             spacing: float = 0.043,
@@ -453,7 +515,11 @@ class SceneBuilder:
         동일하게 순수 시각 요소로만 둔다.
 
         position은 다발의 중심(파이프가 로컬 X축을 따라 누움) — 기본값은
-        소재관리 존 안 보관 랙(y 3~8)과 AMR 통로(x>=20.6) 사이 빈 공간."""
+        add_cantilever_rack()의 기본 배치(position=(14.5,2.0,0.0),
+        4기둥 x 1.1m 간격 = 3.3m 스팬) 위 3번째 층 지지대 윗면
+        (z=3*0.4+0.2=1.4, 지지대 half-height 0.04 → 윗면 z=1.44)에
+        정중앙으로 걸쳐 얹히도록 맞춘 값이다. 랙 배치를 바꾸면 이 값도
+        같이 조정해야 한다."""
         bundle_root = f"{self.config.root_prim_path}/Layout/RawPipeBundle"
         self._UsdGeom.Xform.Define(self._stage, bundle_root)
         self._set_translate(bundle_root, position)
@@ -664,7 +730,11 @@ class SceneBuilder:
                                                      roughness=0.45, metallic=0.0)
             self._apply_material(dock_path, dock_mat)
 
-        # 소재관리 존 — 원자재 아연도금 파이프 다발(장식용, 랙/AMR 통로 사이 빈 공간)
+        # 소재관리 존 — 캔틸레버 랙 + 그 위에 얹힌 원자재 아연도금 파이프
+        # 다발(장식용, 보관 랙/AMR 통로 사이 빈 공간). 순서 중요하지 않음
+        # (USD는 렌더 시 z-order가 아니라 실제 3D 위치로 그림) — 논리적
+        # 순서로만 랙을 먼저 짓는다.
+        self.add_cantilever_rack()
         self.add_raw_pipe_bundle()
 
         # 서버실 가벽 (동쪽 + 남쪽 — 복도 쪽으로 열려 있는 나머지 2면은 건물 외벽이 대신함)
