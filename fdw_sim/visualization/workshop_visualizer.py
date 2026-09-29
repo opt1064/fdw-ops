@@ -351,6 +351,18 @@ class WorkshopVisualizer:
             try:
                 self.scene.add_factory_walls()
                 self.scene.add_roof()
+                # forming_cell 안전펜스 반입구(x 약 28.2~33.0) 구간엔 기둥을
+                # 안 놓는다 — scene_builder.WORKSHOP_ZONES["forming_cell"] +
+                # FORMING_GATE_WIDTH_M 기준 계산(반입구를 막아 보이는 것 방지).
+                from fdw_sim.visualization.scene_builder import (
+                    FORMING_GATE_WIDTH_M, WORKSHOP_ZONES,
+                )
+                fx0, _fy0, fw, _fd, _c, _l = WORKSHOP_ZONES["forming_cell"]
+                gate_cx = fx0 + fw / 2.0
+                gate_half = FORMING_GATE_WIDTH_M / 2.0 + 0.5
+                self.scene.add_structural_pillars(
+                    skip_x_ranges=[(gate_cx - gate_half, gate_cx + gate_half)])
+                self.scene.add_overhead_crane()
             except Exception:
                 logger.exception("[VIS] add_factory_walls/add_roof failed — continuing without them")
 

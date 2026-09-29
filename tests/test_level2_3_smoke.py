@@ -154,7 +154,8 @@ def test_scene_builder_has_environment_methods() -> None:
     """SceneBuilder가 환경/배경 디테일 메서드(벽/천장 조명)를 노출해야 한다."""
     from fdw_sim.visualization.scene_builder import SceneBuilder
 
-    env_methods = ["add_factory_walls", "add_ceiling_lights"]
+    env_methods = ["add_factory_walls", "add_ceiling_lights",
+                   "add_structural_pillars", "add_overhead_crane"]
     missing = [m for m in env_methods if not hasattr(SceneBuilder, m)]
     assert not missing, f"SceneBuilder missing methods: {missing}"
     for m in env_methods:

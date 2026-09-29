@@ -483,6 +483,100 @@ class SceneBuilder:
         logger.info("[VIS] raw pipe bundle added @ %s (%d pipes)", position, count)
         return bundle_root
 
+    def add_structural_pillars(self,
+                               bounds: Tuple[float, float, float, float] = WORKSHOP_BOUNDS,
+                               height: float = 4.3,
+                               spacing_x: float = 6.0,
+                               inset: float = 0.5,
+                               skip_x_ranges: Optional[list] = None,
+                               ) -> str:
+        """실사 공장 사진 레퍼런스의 흰색 지지 기둥 — 북/남 벽(긴 벽) 안쪽을
+        따라 일정 간격으로 배치. 남쪽 벽엔 forming_cell 안전펜스 반입구가
+        있어서, 그 구간(skip_x_ranges)에는 기둥을 놓지 않는다(반입구를
+        막아 보이는 걸 방지).
+
+        사용자가 준 레퍼런스 스크립트(공장 기둥 배열, 60x40m 기준)를 이
+        프로젝트의 실제 배치도(36.1x12.4m)에 맞춰 스케일 조정한 버전."""
+        x_min, x_max, y_min, y_max = bounds
+        pillars_root = f"{self.config.root_prim_path}/Environment/Pillars"
+        self._UsdGeom.Xform.Define(self._stage, pillars_root)
+
+        color = (0.92, 0.92, 0.92)
+        mat = self._get_or_create_material("StructuralPillarWhite", color,
+                                           roughness=0.5, metallic=0.1)
+
+        skip_x_ranges = skip_x_ranges or []
+
+        def _blocked(x: float) -> bool:
+            return any(lo <= x <= hi for lo, hi in skip_x_ranges)
+
+        half = 0.2  # 기둥 단면 0.4 x 0.4m
+        count = 0
+        x = x_min + spacing_x
+        while x < x_max - spacing_x * 0.5:
+            for y in (y_min + inset, y_max - inset):
+                if _blocked(x):
+                    continue
+                p = f"{pillars_root}/Pillar_{count:02d}"
+                cube = self._UsdGeom.Cube.Define(self._stage, p)
+                cube.CreateSizeAttr(2.0)
+                self._set_scale(p, (half, half, height / 2.0))
+                self._set_translate(p, (x, y, height / 2.0))
+                self._set_color(p, color)
+                self._apply_material(p, mat)
+                count += 1
+            x += spacing_x
+
+        logger.info("[VIS] %d structural pillars added", count)
+        return pillars_root
+
+    def add_overhead_crane(self,
+                           bounds: Tuple[float, float, float, float] = WORKSHOP_BOUNDS,
+                           rail_z: float = 3.6,
+                           bridge_x: float = 22.0,
+                           inset: float = 1.0,
+                           ) -> str:
+        """실사 공장 사진 레퍼런스의 천장 주행 크레인 — 레일(N/S 벽 안쪽,
+        X축 방향) + 그 사이를 가로지르는 브릿지 + 브릿지에 매달린 호이스트.
+        정적 배경 소품(실제로 주행하지 않음). 천장 조명(z=4.0)/지붕
+        (z=4.5)과 안 겹치도록 rail_z=3.6으로 그 아래에 둔다.
+
+        bridge_x 기본값 22.0은 용접 셀(WELDING_CELL_01, x=25.1) 근처
+        상공 — 중량물 인양이 필요할 법한 구간 위에 배치."""
+        x_min, x_max, y_min, y_max = bounds
+        crane_root = f"{self.config.root_prim_path}/Environment/OverheadCrane"
+        self._UsdGeom.Xform.Define(self._stage, crane_root)
+
+        color = (0.95, 0.35, 0.05)
+        mat = self._get_or_create_material("CraneOrange", color,
+                                           roughness=0.45, metallic=0.3)
+
+        def _box(name: str, center: Tuple[float, float, float],
+                half_extent: Tuple[float, float, float]) -> None:
+            p = f"{crane_root}/{name}"
+            cube = self._UsdGeom.Cube.Define(self._stage, p)
+            cube.CreateSizeAttr(2.0)
+            self._set_scale(p, half_extent)
+            self._set_translate(p, center)
+            self._set_color(p, color)
+            self._apply_material(p, mat)
+
+        rail_y_south = y_min + inset
+        rail_y_north = y_max - inset
+        rail_half_x = (x_max - x_min) / 2.0 - inset
+        rail_cx = (x_min + x_max) / 2.0
+
+        _box("Rail_South", (rail_cx, rail_y_south, rail_z), (rail_half_x, 0.15, 0.15))
+        _box("Rail_North", (rail_cx, rail_y_north, rail_z), (rail_half_x, 0.15, 0.15))
+
+        bridge_half_y = (rail_y_north - rail_y_south) / 2.0
+        bridge_cy = (rail_y_south + rail_y_north) / 2.0
+        _box("Bridge", (bridge_x, bridge_cy, rail_z + 0.1), (0.4, bridge_half_y, 0.2))
+        _box("Hoist", (bridge_x, bridge_cy, rail_z - 0.4), (0.3, 0.3, 0.2))
+
+        logger.info("[VIS] overhead crane added (bridge @ x=%.1f)", bridge_x)
+        return crane_root
+
     def add_unimplemented_cell_marker(self, zone_name: str,
                                        x0: float, y0: float, w: float, d: float,
                                        label: str,
