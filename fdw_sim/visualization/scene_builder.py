@@ -445,6 +445,87 @@ class SceneBuilder:
         logger.info("[VIS] safety fence '%s' added (gate=%.1fm)", root_name, gate_w)
         return fence_root
 
+    def add_metal_forming_machine(self,
+                                  position: Tuple[float, float, float] = (30.6, 2.5, 0.0),
+                                  name: str = "MetalForming_Machine",
+                                  ) -> str:
+        """실사 공장 사진 레퍼런스의 파이프 성형(소성가공) 작업대 — 밝은
+        회녹색 하부 베이스, 파이프를 거치/회전시키는 어두운 롤러 지지대
+        2쌍, 뒤쪽의 짙은 녹색 수직 프레스 구조물. WORKSHOP_ZONES
+        ["forming_cell"](3세부 소성가공 셀)을 채우는 실제 장비 —
+        add_unimplemented_cell_marker()의 무채색 "미구현" 플레이스홀더를
+        대신한다(add_workshop_layout()에서 forming_cell을 그 목록에서
+        뺐다).
+
+        사용자 제공 레퍼런스 스크립트(Cube size=1.0 + scale=전체 크기
+        방식)를 이 프로젝트 관례(Cube size=2.0 + scale=half-extent)로
+        정확히 환산해서 옮겼다 — Cylinder(롤러)는 원래도 반경/높이를
+        직접 쓰는 방식이라 환산 불필요. 다른 정적 배경 소품과 동일하게
+        물리는 안 붙인다(순수 시각 요소).
+
+        기본 위치(30.6, 2.5, 0.0)는 forming_cell 안전펜스 안쪽 중앙 —
+        롤러/프레스가 반입구를 가리지 않는다(반입구는 남쪽 벽에만 있고
+        이 위치는 안전펜스로 둘러싸인 구역 중앙이라 여유 있음)."""
+        root = f"{self.config.root_prim_path}/Layout/{name}"
+        self._UsdGeom.Xform.Define(self._stage, root)
+        self._set_translate(root, position)
+
+        color_base = (0.75, 0.78, 0.75)
+        color_dark = (0.2, 0.2, 0.22)
+        color_press = (0.15, 0.35, 0.25)
+        mat_base = self._get_or_create_material(
+            f"FormingBase_{self._color_key(color_base)}", color_base,
+            roughness=0.5, metallic=0.2)
+        mat_dark = self._get_or_create_material(
+            f"FormingDarkMetal_{self._color_key(color_dark)}", color_dark,
+            roughness=0.35, metallic=0.6)
+        mat_press = self._get_or_create_material(
+            f"FormingPressGreen_{self._color_key(color_press)}", color_press,
+            roughness=0.45, metallic=0.25)
+
+        def _box(path: str, center: Tuple[float, float, float],
+                half_extent: Tuple[float, float, float],
+                color: Tuple[float, float, float], mat) -> None:
+            cube = self._UsdGeom.Cube.Define(self._stage, path)
+            cube.CreateSizeAttr(2.0)
+            self._set_scale(path, half_extent)
+            self._set_translate(path, center)
+            self._set_color(path, color)
+            self._apply_material(path, mat)
+
+        def _roller(path: str, center: Tuple[float, float, float],
+                   radius: float, height: float) -> None:
+            cyl = self._UsdGeom.Cylinder.Define(self._stage, path)
+            cyl.CreateRadiusAttr(radius)
+            cyl.CreateHeightAttr(height)
+            cyl.CreateAxisAttr("X")
+            self._set_translate(path, center)
+            self._set_color(path, color_dark)
+            self._apply_material(path, mat_dark)
+
+        # 1) 하부 베이스 + 작업대 평면
+        _box(f"{root}/Base_Lower", (0, 0, 0.3), (1.25, 0.6, 0.3), color_base, mat_base)
+        _box(f"{root}/Base_Upper", (0, 0, 0.65), (1.0, 0.5, 0.05), color_base, mat_base)
+
+        # 2) 파이프 거치용 롤러 지지대(좌/우 한 쌍씩)
+        for i, x_pos in enumerate((-0.6, 0.6)):
+            base_path = f"{root}/RollerStand_{i}"
+            _box(f"{base_path}_Block", (x_pos, 0, 0.75), (0.2, 0.3, 0.075),
+                 color_dark, mat_dark)
+            _roller(f"{base_path}_Roller_Front", (x_pos, -0.15, 0.88), 0.08, 0.3)
+            _roller(f"{base_path}_Roller_Back", (x_pos, 0.15, 0.88), 0.08, 0.3)
+
+        # 3) 후면 수직 프레스 구조물
+        _box(f"{root}/Press_Base", (-1.0, 0.8, 0.5), (0.5, 0.3, 0.5),
+             color_press, mat_press)
+        _box(f"{root}/Press_Pillar", (-1.0, 0.8, 1.5), (0.3, 0.2, 0.75),
+             color_press, mat_press)
+        _box(f"{root}/Press_Head", (-0.8, 0.5, 2.0), (0.5, 0.4, 0.25),
+             color_press, mat_press)
+
+        logger.info("[VIS] metal forming machine added @ %s", position)
+        return root
+
     def add_cantilever_rack(self,
                             position: Tuple[float, float, float] = (14.5, 2.0, 0.0),
                             num_pillars: int = 4,
@@ -893,12 +974,16 @@ class SceneBuilder:
         self._set_color(wall_s, interior_wall_color)
         self._apply_material(wall_s, interior_wall_mat)
 
-        # 3세부 소성가공 셀 — 안전펜스 (반입구 3.8m)
+        # 3세부 소성가공 셀 — 안전펜스(반입구 3.8m) + 실제 파이프 성형 장비
+        # (사용자 제공 레퍼런스 사진 반영, 2026-09-29). 실제 장비가 생겨서
+        # 아래 "미구현 placeholder" 목록에서는 뺐다 — 셀 로직 자체는 아직
+        # 없지만(DistributedIntelligenceCell 미구현) 외형은 실사로 채움.
         fx0, fy0, fw, fd, _c, _l = WORKSHOP_ZONES["forming_cell"]
         self.add_safety_fence("forming_cell", fx0, fy0, fw, fd)
+        self.add_metal_forming_machine()
 
         # 아직 셀 로직이 없는 구역 — 눈에 띄는 placeholder만 배치
-        for zone_name in ("additive_cell", "machining_cell", "forming_cell"):
+        for zone_name in ("additive_cell", "machining_cell"):
             zx0, zy0, zw, zd, _c, label = WORKSHOP_ZONES[zone_name]
             self.add_unimplemented_cell_marker(zone_name, zx0, zy0, zw, zd, label)
 
