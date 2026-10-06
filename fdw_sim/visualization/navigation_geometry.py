@@ -14,6 +14,9 @@ from typing import Iterable
 from fdw_sim.cells.material.traffic import StaticObstacle
 
 Bounds = tuple[float, float, float, float]
+# Authored by the spark emitter, not inferred from a name or empty geometry.
+NONPHYSICAL_VFX_ROLE_ATTRIBUTE = "fdw:navigation:role"
+NONPHYSICAL_VFX_ROLE = "nonphysical_vfx"
 WORKSHOP_BOUNDS: Bounds = (0.0, 36.1, 0.0, 12.4)
 # Shared with SceneBuilder.add_workshop_layout, including the shelving posts.
 MATERIAL_RACK_LAYOUT = (
@@ -161,6 +164,25 @@ def _assembly_path(root: str, parts: tuple[str, ...]) -> str:
     return f"{root}/{'/'.join(parts)}"
 
 
+def _is_nonphysical_vfx(prim, root_path: str) -> bool:
+    """Exclude an explicitly tagged visual PointInstancer and its prototypes.
+
+    Empty/static instancers and objects merely named Sparks remain obstacles.
+    Descendant prototype meshes must not leak back into the static map when the
+    emitter is idle or when its live particles move around the workshop.
+    """
+    from pxr import UsdGeom
+
+    current = prim
+    while current and str(current.GetPath()).startswith(root_path + "/"):
+        if current.IsA(UsdGeom.PointInstancer):
+            role = current.GetAttribute(NONPHYSICAL_VFX_ROLE_ATTRIBUTE)
+            if role and role.Get() == NONPHYSICAL_VFX_ROLE:
+                return True
+        current = current.GetParent()
+    return False
+
+
 def extract_static_navigation_map(stage, root_path: str = "/World/FDW", *,
                                   bounds: Bounds = WORKSHOP_BOUNDS,
                                   robot_height_m: float = 1.5) -> StaticNavigationMap:
@@ -210,7 +232,7 @@ def extract_static_navigation_map(stage, root_path: str = "/World/FDW", *,
         path = str(prim.GetPath())
         relative = path[len(root_path):].strip("/")
         parts = tuple(relative.split("/")) if relative else ()
-        if not parts or _excluded(parts):
+        if not parts or _excluded(parts) or _is_nonphysical_vfx(prim, root_path):
             continue
         # Material/shader references carry appearance, not collision geometry.
         # They can be nested inside equipment assemblies in imported assets.

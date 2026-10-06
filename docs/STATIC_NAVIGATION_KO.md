@@ -50,3 +50,7 @@ python -m pytest -q
 - 기본 envelope의 fixture 서비스 도크: 소재 `(13.05, 4.9)`, 용접 `(25.1, 8.95)`, 검사 `(34.6, 4.65)`. 실제 로드 자산 경계가 다르면 선택 좌표가 달라지거나 시작이 거절될 수 있습니다.
 - 같은 전체 fixture에서 2.4×1.0m envelope는 연결된 경로를 찾지 못해 안전하게 거절됩니다. 랙을 옮기거나 더 작은 envelope로 축소하지 않습니다.
 - 기존 6개 smoke, compileall, diff 검사 통과. Discrete 예시: 출하 1, 격리 2, 미완료 0. Discrete 결과는 정적 공장 지도 검증이 아닙니다.
+
+### 시작 시 빈 Sparks 오류 수정
+
+초기 비활성 스파크 PointInstancer를 고정 설비로 분류하여 `Static USD geometry has empty bounds: .../Sparks`로 시작이 중단되는 회귀를 수정했습니다. 스파크 생성기가 명시적인 `fdw:navigation:role=nonphysical_vfx` 역할을 기록하며, 지도는 그 역할이 있는 PointInstancer와 소유 prototype만 제외합니다. 이름에 `Sparks`가 포함된 실제 설비, 일반 PointInstancer 또는 측정 불가능한 실제 고정 형상을 무조건 제외하지 않습니다. 실제 스파크 생성기의 빈 상태·활성 입자·다시 비운 상태와 시작 시 지도 수집을 CPU OpenUSD 회귀로 검사합니다. Isaac GUI 실행 확인은 별도입니다.
