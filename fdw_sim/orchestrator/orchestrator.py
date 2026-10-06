@@ -202,10 +202,11 @@ class FDWOrchestrator:
             # 1) 부품이 target cell의 input_buffer에 도착했으면 dispatch
             if target_state and target_state.input_buffer.occupied \
                     and target_state.input_buffer.part_id == tracker.job.part_id \
+                    and target_state.placement_ready \
                     and target_state.state in (CellState.READY, CellState.IDLE):
                 if self._dispatched_jobs_at_cell.get(target_cell_id) != job_id:
-                    self._issue_dispatch(tracker, target_cell_id, current_proc)
-                    self._dispatched_jobs_at_cell[target_cell_id] = job_id
+                    if self._issue_dispatch(tracker, target_cell_id, current_proc):
+                        self._dispatched_jobs_at_cell[target_cell_id] = job_id
                 continue
 
             # 2) target cell이 작업을 끝내고 output_buffer에 부품 있으면 → 다음 단계로 이송
@@ -270,7 +271,12 @@ class FDWOrchestrator:
         logger.info("[ORCH] transfer issued: %s %s -> %s (job=%s)",
                     cmd.command_id, from_cell, target_cell, tracker.job.job_id)
 
-    def _issue_dispatch(self, tracker: JobTracker, cell_id: str, process: str) -> None:
+    def _issue_dispatch(self, tracker: JobTracker, cell_id: str, process: str) -> bool:
+        # A cached READY status may predate AMR placement or another dispatch.
+        # Recheck the registered local cell before issuing irreversible work.
+        cell = self.cell_registry.get(cell_id)
+        if cell is not None and not cell.is_part_ready(tracker.job.part_id):
+            return False
         operation = self.config.process_to_operation.get(process, "START")
         recipe = tracker.job.recipe_overrides.get(process, {})
         cmd = DispatchCommand(
@@ -280,10 +286,14 @@ class FDWOrchestrator:
             recipe=recipe,
             next_cell=self._lookup_next_cell(tracker),
             priority=tracker.job.priority,
+            part_id=tracker.job.part_id,
         )
         self.bus.publish(Topics.DISPATCH_COMMAND, cmd)
+        if cell is not None and cell.current_command is not cmd:
+            return False
         logger.info("[ORCH] dispatch issued: %s -> %s op=%s (job=%s)",
                     cmd.command_id, cell_id, operation, tracker.job.job_id)
+        return True
 
     def _lookup_next_cell(self, tracker: JobTracker) -> Optional[str]:
         next_idx = tracker.route_index + 1

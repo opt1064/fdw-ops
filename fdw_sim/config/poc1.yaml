@@ -9,6 +9,9 @@ simulation:
   headless: true
   log_dir: ./fdw_sim/logs
   run_name: null            # null이면 자동 타임스탬프
+  motion_execution: verified # schematic은 명시적인 논리 데모, 물리 파지 아님
+  amr_footprint_size: [1.2, 0.8] # 최소 XY 외접 크기; GUI는 로드된 메시로 확대
+  amr_clearance_m: 0.15
 
 orchestrator:
   decision_period_sec: 0.2

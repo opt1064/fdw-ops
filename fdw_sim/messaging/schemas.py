@@ -94,6 +94,12 @@ class CellStatusMessage:
     inspection_verdict: Optional[str] = None
     verdict_part_id: Optional[str] = None
     verdict_reason: Optional[str] = None
+    # An occupied input can still be reserved on an AMR, awaiting placement.
+    placement_ready: bool = True
+    placement_transfer_command_id: Optional[str] = None
+    current_command_id: Optional[str] = None
+    current_part_id: Optional[str] = None
+    motion_required: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -119,6 +125,9 @@ class DispatchCommand:
     priority: str = "normal"                    # low | normal | high | critical
     command_id: str = field(default_factory=lambda: f"CMD_{uuid.uuid4().hex[:8].upper()}")
     timestamp: float = field(default_factory=time.time)
+    # Required in motion mode. Optional only for legacy logical callers;
+    # the orchestrator always includes it.
+    part_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

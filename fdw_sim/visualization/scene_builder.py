@@ -2285,12 +2285,47 @@ class SceneBuilder:
             return
         self._stage.RemovePrim(path)
 
-    def move_amr(self, amr_id: str, target: Tuple[float, float, float]) -> None:
+    def get_amr_footprint(self, amr_id: str, position: tuple) -> Optional[Tuple[float, float]]:
+        """Conservative current world bounds about the vehicle pose origin.
+
+        Includes offset geometry; must be queried after reference composition.
+        This is mesh sizing, not a PhysX contact/drive validation.
+        """
+        import math
+        path = self._amr_prims.get(amr_id)
+        if path is None:
+            return None
+        try:
+            cache = self._UsdGeom.BBoxCache(self._Usd.TimeCode.Default(),
+                [self._UsdGeom.Tokens.default_, self._UsdGeom.Tokens.render,
+                 self._UsdGeom.Tokens.proxy], useExtentsHint=False)
+            bounds = cache.ComputeWorldBound(self._stage.GetPrimAtPath(path)).ComputeAlignedRange()
+            if bounds.IsEmpty():
+                return None
+            low, high = bounds.GetMin(), bounds.GetMax()
+            size = tuple(2 * max(abs(float(low[i]) - position[i]),
+                                 abs(float(high[i]) - position[i])) for i in range(2))
+            return size if all(math.isfinite(v) and v > 0 for v in size) else None
+        except Exception:
+            logger.exception("[VIS] cannot measure AMR footprint %s", amr_id)
+            return None
+
+    def move_amr(self, amr_id: str, target: Tuple[float, float, float],
+                 heading: float = 0.0) -> None:
         path = self._amr_prims.get(amr_id)
         if path is None:
             logger.warning("[VIS] move_amr: unknown amr %s", amr_id)
             return
         self._set_translate(path, target)
+        # Heading belongs to the vehicle root, separate from asset local axes.
+        import math
+        xform = self._UsdGeom.Xformable(self._stage.GetPrimAtPath(path))
+        op = next((op for op in xform.GetOrderedXformOps()
+                   if op.GetOpName() == "xformOp:rotateZ:fdwHeading"), None)
+        if op is None:
+            op = xform.AddRotateZOp(opSuffix="fdwHeading")
+        op.Set(math.degrees(heading))
+        self._enforce_xform_order(xform)
 
     # ========================================================================
     # 조회

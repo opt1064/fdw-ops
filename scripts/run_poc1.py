@@ -116,6 +116,9 @@ def build_simulation(cfg: Dict[str, Any], mode_override: str = None,
         livestream=int(sim_cfg_d.get("livestream", 0)),
         log_dir=Path(sim_cfg_d["log_dir"]),
         run_name=sim_cfg_d.get("run_name"),
+        motion_execution=sim_cfg_d.get("motion_execution", "verified"),
+        amr_footprint_size=tuple(sim_cfg_d.get("amr_footprint_size", (1.2, 0.8))),
+        amr_clearance_m=float(sim_cfg_d.get("amr_clearance_m", 0.15)),
     )
 
     orch_d = cfg["orchestrator"]
@@ -223,6 +226,10 @@ def print_report(sim: SimulationManager) -> None:
     for m in interesting:
         if m in summ:
             s = summ[m]
+            if m == "quality_pass_rate":
+                print(f"   - final_quality_pass_rate={s['last']:.3f} "
+                      f"(cumulative-snapshot mean={s['avg']:.3f}, not final pass rate)")
+                continue
             print(f"   - {m:25s}  count={int(s['count']):3d}  "
                   f"avg={s['avg']:7.3f}  min={s['min']:7.3f}  max={s['max']:7.3f}")
 

@@ -1,59 +1,16 @@
-"""PoC-1 Level 2.2 — RMPflow 충돌회피 모션 + 용접 스파크 파티클 데모.
+"""PoC-1 visualization: conservative AMR traffic and explicit motion evidence.
 
-Level 2.1의 Lula IK 컨트롤러를 Lula **RMPflow**(Reactive Motion Policy flow)로
-교체하여 작업대/부품을 장애물로 인식하고 회피 모션을 생성한다. 또한 용접
-PROCESSING 단계에서 TCP(엔드 이펙터) 위치에 PointInstancer 기반 스파크
-파티클을 분사하여 시각적 사실감을 향상시킨다.
+Default --motion-execution verified holds pickup because the shipped controllers
+have no validated gripper/contact adapter. Robot USD loading or a heuristic pose
+is not proof of physical grasp, reach, collision safety, or welding.
 
-3-tier 모션 백엔드 (자동 fallback):
+For a full, clearly labeled operations demo (logical placement/timers, no arm
+commands or sparks), choose explicitly:
+    "$ISAACSIM_PYTHON_EXE" scripts/run_poc1_level2_2.py --gui --real-robot \
+        --realtime --keep-alive --motion-execution schematic
 
-    1. rmpflow   : Lula RMPflow + ArticulationMotionPolicy (장애물 회피 O)
-    2. ik        : Lula Kinematics Solver (Level 2.1과 동일, 회피 X)
-    3. heuristic : 외부 의존 0 — 어깨/팔꿈치 휴리스틱 + ±법선 repulsion
-
-실행 예시:
-
-    # GUI에서 FANUC CRX-10iA(기본) + RMPflow + 스파크
-    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-        python scripts/run_poc1_level2_2.py --gui --real-robot
-
-    # WebRTC 스트리밍 + RMPflow 강제 (실패시 RMPflowController 내부에서 fallback)
-    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-        python scripts/run_poc1_level2_2.py --livestream 2 --real-robot \
-            --motion-mode rmpflow
-
-    # RMPflow는 끄고 Level 2.1 IK로 — 스파크는 켜둠
-    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-        python scripts/run_poc1_level2_2.py --gui --real-robot --motion-mode ik
-
-    # 스파크 비활성 + 휴리스틱 모션
-    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-        python scripts/run_poc1_level2_2.py --gui --real-robot \
-            --motion-mode heuristic --no-sparks
-
-    # 스파크 분사 비율 조정 (기본 30/s)
-    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-        python scripts/run_poc1_level2_2.py --gui --real-robot \
-            --spark-rate 60 --spark-lifetime 0.6
-
-    # Level 2.3: AMR을 NovaCarter 대신 Jetbot으로 (Props/* 404 우회)
-    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-        python scripts/run_poc1_level2_2.py --gui --real-robot \
-            --amr-asset jetbot
-
-    # Level 2.3: AMR/카메라/Rack 모두 placeholder로 (로봇팔만 실제)
-    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-        python scripts/run_poc1_level2_2.py --gui --real-robot \
-            --no-real-amr --no-real-smart-rack --no-real-inspection-cam
-
-전제:
-    * Isaac Sim 5.1.0 + Nucleus 접속 가능 (or 환경변수 ISAAC_ASSETS_ROOT 지정)
-    * CRX-10iA USD 경로는 미검증 추정치 (fdw_sim/visualization/robot_loader.py의
-      ROBOT_CATALOG["fanuc_crx10ia"] 주석 참고) — 404 시 FDW_FANUC_CRX10IA_USD로
-      로컬 경로 override 하거나 --robot franka_panda로 되돌릴 것
-    * RMPflow config는 franka 전용 번들만 Isaac 배포본에 포함되어 있어,
-      --robot fanuc_crx10ia 사용 시 RMPflow/IK 백엔드를 못 찾으면 자동으로
-      heuristic 모션으로 fallback한다 (크래시 아님 — 의도된 동작)
+Motion backends auto/rmpflow/ik/heuristic remain available for model diagnostics.
+Read docs/MOTION_COORDINATION_KO.md for limits and the pending Isaac GUI checks.
 """
 from __future__ import annotations
 
@@ -125,6 +82,8 @@ def main() -> int:
     p.add_argument("--motion-mode", choices=VALID_MOTION_MODES, default="auto",
                    help="모션 백엔드: auto(=rmpflow→ik→heuristic) | "
                         "rmpflow | ik | heuristic (기본: auto)")
+    p.add_argument("--motion-execution", choices=["verified", "schematic"], default="verified",
+                   help="verified: hold unless physical grasp validated; schematic: labeled logical operations demo")
     p.add_argument("--no-sparks", dest="enable_sparks",
                    action="store_false", default=True,
                    help="용접 스파크 파티클 비활성")
@@ -257,6 +216,7 @@ def main() -> int:
 
     # Level 2.2 옵션
     sim.config.motion_mode = args.motion_mode
+    sim.config.motion_execution = args.motion_execution
     sim.config.enable_sparks = args.enable_sparks
     sim.config.spark_rate = args.spark_rate
     sim.config.spark_lifetime_sec = args.spark_lifetime
@@ -301,6 +261,7 @@ def main() -> int:
     print(f" Motion enabled   : {sim.config.enable_ik}")
     print(f" Motion mode      : {sim.config.motion_mode} "
           f"(auto=rmpflow→ik→heuristic)")
+    print(f" Execution        : {sim.config.motion_execution} (schematic is not physical grasp/welding)")
     print(f" RMPflow obstacles: {sim.config.rmpflow_register_obstacles}")
     print(f" Sparks enabled   : {sim.config.enable_sparks}")
     print(f" Spark rate       : {sim.config.spark_rate:.1f} /s")

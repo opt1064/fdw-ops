@@ -45,16 +45,21 @@ def test_amr_quality_snapshot_survives_source_change_and_delivery_retry():
     mat._on_transfer_command(transfer())
     mat._dispatch_amrs()
     amr = mat.amrs[0]
+    for _ in range(1000):
+        mat._step_amr(amr, .05)
+        if amr.phase == "to_destination":
+            break
+    assert amr.phase == "to_destination"
     assert amr.payload_quality == q and amr.payload_quality is not q
     q.score = 1.0
     insp.receive_part_with_quality('OTHER', QualityPrediction(.9, .1, .8))
-    mat._step_amr(amr, 2.0)
+    mat._step_amr(amr, 30.0)
     assert amr.busy and amr.payload_quality.score == .2
     assert insp._incoming_quality.score == .9
     insp.input_buffer.occupied = False
     insp.input_buffer.part_id = None
     carried = amr.payload_quality
-    mat._step_amr(amr, 2.0)
+    mat._step_amr(amr, 30.0)
     assert insp.input_buffer.part_id == 'P'
     assert insp._incoming_quality.score == .2
     assert insp._incoming_quality is not carried
@@ -216,6 +221,15 @@ def test_report_discloses_quarantine_separately(tmp_path, capsys):
     assert 'Completed jobs       : 0' in report
 
 
+def test_report_final_pass_rate_is_not_cumulative_snapshot_average(tmp_path, capsys):
+    from scripts.run_poc1 import print_report
+    sim, _ = run_flow(tmp_path, {'BAD': .1, 'GOOD': 1, 'BAD2': .1})
+    print_report(sim)
+    report = capsys.readouterr().out
+    assert 'final_quality_pass_rate=0.333' in report
+    assert 'not final pass rate' in report
+
+
 def test_slow_inspection_status_does_not_mix_new_output_with_old_verdict(tmp_path):
     sim, _ = run_flow(tmp_path, {'GOOD': 1, 'BAD': .1, 'GOOD2': 1}, inspection_hz=.7)
     assert {t.job.part_id for t in sim.orchestrator.completed_jobs} == {'GOOD', 'GOOD2'}
@@ -227,7 +241,7 @@ def test_missing_source_quality_arrives_as_unknown():
     output(weld, 'P', None)
     weld.publish_status()  # Missing quality must not break status publication either.
     mat._assign_amr(mat.amrs[0], transfer())
-    mat._step_amr(mat.amrs[0], 2)
+    mat._step_amr(mat.amrs[0], 30)
     assert insp.input_buffer.part_id == 'P'
     assert insp._incoming_quality is None
     assert insp.agent.judge(insp._incoming_quality)['verdict'] == 'FAIL'
