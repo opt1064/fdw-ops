@@ -1,5 +1,7 @@
 # FDW-OPS Virtual Workshop
 
+> 정적 랙·설비 경로 검사 추가: [정적 관통 방지와 검증 범위](docs/STATIC_NAVIGATION_KO.md). 실제 USD 경계 기반 경로 및 도크 검사이며 Isaac GUI/접촉 검증은 별도입니다.
+
 > **2026-10-06 동작/검증 범위 정정:** 아래의 과거 GUI 동작 기록은 실제 파지·TCP 도달·충돌 안전 검증을 뜻하지 않습니다. 현재 기본 verified 모드는 검증된 파지 어댑터가 없으면 픽업을 보류합니다. 운영 데모는 명시적 `--motion-execution schematic`을 사용하며 실제 팔 집기/용접으로 표현하지 않습니다. [AMR·공정 동기화와 검증 한계](docs/MOTION_COORDINATION_KO.md)를 먼저 확인하세요.
 
 > **Isaac Sim 기반 분산지능 셀 시뮬레이터** — 시뮬레이션은 DGX Spark, 실시간 제어(HIL)는 AGX Thor

@@ -175,6 +175,13 @@ def test_scene_measures_large_loaded_amr_before_transport(tmp_path, monkeypatch,
             return lambda *args, **kwargs: None
         def get_amr_footprint(self, amr_id, position):
             return extent
+        def local_point_to_world_meters(self, point): return tuple(point)
+        def get_cell_world_position(self, cid): return viz.cell_positions[cid]
+        def get_amr_height(self, amr_id): return 1.0
+        def get_static_navigation_map(self, **kwargs):
+            from types import SimpleNamespace
+            return SimpleNamespace(obstacles=(), bounds=(-20,20,-20,20),source='test-double',
+                boundary_polygon=((-20,-20),(20,-20),(20,20),(-20,20)),floor_height_m=0.0)
     monkeypatch.setattr('fdw_sim.visualization.workshop_visualizer.SceneBuilder', BuildScene)
     monkeypatch.setattr(viz, '_spawn_robot_arm', lambda *a, **kw: None)
     viz.config.skip_auto_camera = True
@@ -196,18 +203,53 @@ def test_scene_measures_large_loaded_amr_before_transport(tmp_path, monkeypatch,
 
 
 def test_mesh_footprint_accounts_for_offset_from_vehicle_origin():
-    from types import SimpleNamespace
+    from pxr import Usd, UsdGeom, Gf
     from fdw_sim.visualization.scene_builder import SceneBuilder
-    class Bounds:
-        def IsEmpty(self): return False
-        def GetMin(self): return (8, 19, 0)
-        def GetMax(self): return (11, 21, 1)
-        def ComputeAlignedRange(self): return self
     scene = SceneBuilder.__new__(SceneBuilder)
-    scene._amr_prims = {'A': '/A'}
-    scene._stage = SimpleNamespace(GetPrimAtPath=lambda path: path)
-    scene._Usd = SimpleNamespace(TimeCode=SimpleNamespace(Default=lambda: 0))
-    scene._UsdGeom = SimpleNamespace(Tokens=SimpleNamespace(default_='default', render='render', proxy='proxy'),
-        BBoxCache=lambda *a, **kw: SimpleNamespace(ComputeWorldBound=lambda prim: Bounds()))
-    # A 3m-wide offset mesh needs a 4m origin-centred footprint, not just 3m.
-    assert scene.get_amr_footprint('A', (10, 20, 0)) == (4, 2)
+    scene._Usd, scene._UsdGeom, scene._Gf = Usd, UsdGeom, Gf
+    scene._stage = Usd.Stage.CreateInMemory()
+    UsdGeom.SetStageMetersPerUnit(scene._stage, 1.0)
+    root = UsdGeom.Xform.Define(scene._stage, '/A')
+    root.AddTranslateOp().Set((10,20,0))
+    cube = UsdGeom.Cube.Define(scene._stage, '/A/body')
+    cube.CreateSizeAttr(2)
+    cube.AddTranslateOp().Set((-.5,0,.5))
+    cube.AddScaleOp().Set((1.5,1,.5))
+    scene._amr_prims = {'A':'/A'}
+    assert scene.get_amr_footprint('A', (10,20,0)) == pytest.approx((4,2))
+
+
+def test_measured_height_floor_and_oversized_payload_drive_runtime_map(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    sim, mat, weld, viz, sparks = setup(tmp_path)
+    requested_heights = []
+    class BuildScene(Scene):
+        def __init__(self, config): super().__init__()
+        def __getattr__(self, name): return lambda *args, **kwargs: None
+        def get_amr_footprint(self, *args): return (1.2,.8)
+        def get_amr_height(self, *args): return 4.2
+        def local_point_to_world_meters(self, p): return (p[0],p[1],p[2]+5)
+        def get_cell_world_position(self, cid):
+            return self.local_point_to_world_meters(viz.cell_positions[cid])
+        def get_static_navigation_map(self, **kwargs):
+            requested_heights.append(kwargs['robot_height_m'])
+            return SimpleNamespace(obstacles=(),bounds=(-20,20,-20,20),source='test-double',
+                boundary_polygon=((-20,-20),(20,-20),(20,20),(-20,20)),floor_height_m=5.0)
+        def get_part_footprint(self, part): return (1.2,.8)
+        def get_part_height(self, part): return 1.1  # exceeds configured one metre
+        def move_part_world(self, part, position): self.parts[part]=position
+    monkeypatch.setattr('fdw_sim.visualization.workshop_visualizer.SceneBuilder',BuildScene)
+    monkeypatch.setattr(viz,'_spawn_robot_arm',lambda *a,**kw:None)
+    viz.config.skip_auto_camera=True
+    for amr in mat.amrs: viz.register_amr(amr.amr_id,(*amr.position,0),heading=amr.heading)
+    try:
+        viz.build_scene()
+        assert requested_heights==[4.2]
+        viz._update_amr_positions(.1)
+        assert all(pose[0][2]==5 for pose in viz.scene.amrs.values())
+        viz.spawn_part('TALL','test','MAT')
+        assert 'TALL' in mat.payload_geometry_issues
+        mat.amrs[0].payload_part_id='TALL'
+        viz._update_amr_positions(.1)
+        assert viz.scene.parts['TALL'][2]==pytest.approx(5.28)
+    finally: sim.stop()

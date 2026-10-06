@@ -21,6 +21,13 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, Optional, Tuple
 import logging
 
+from fdw_sim.visualization.navigation_geometry import (
+    WORKSHOP_BOUNDS, MATERIAL_RACK_LAYOUT, SHELVING_POST_SIZE,
+    CHARGING_STATION_POSITIONS, CANTILEVER_POSITION,
+    FORMING_MACHINE_POSITION, PIPE_BENDER_POSITION, LINEAR_UNIT_POSITION,
+    CRANE_PILLAR_X_SOUTH, CRANE_PILLAR_X_NORTH,
+)
+
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -29,7 +36,6 @@ logger = logging.getLogger(__name__)
 # 도면 기준(원점 = 건물 좌하단, 단위 m): 전체 36.1 x 12.4.
 # name: (x0, y0, w, d, color, label) — x0,y0은 구역 좌하단, w/d는 폭/깊이.
 # ============================================================================
-WORKSHOP_BOUNDS: Tuple[float, float, float, float] = (0.0, 36.1, 0.0, 12.4)
 
 
 # 실사 공장 바닥(밝은 회색 에폭시) 레퍼런스에 맞춘 균일한 라이트그레이 팔레트.
@@ -107,6 +113,13 @@ class SceneBuilder:
         self._stage = omni.usd.get_context().get_stage()
         if self._stage is None:
             raise RuntimeError("USD stage is None. Did you start SimulationApp?")
+
+        # Authored coordinates are metres. Honour an explicitly configured USD
+        # unit, but do not inherit USD's unauthored centimetre fallback.
+        if not self._stage.HasAuthoredMetadata("metersPerUnit"):
+            UsdGeom.SetStageMetersPerUnit(self._stage, 1.0)
+        if not self._stage.HasAuthoredMetadata("upAxis"):
+            UsdGeom.SetStageUpAxis(self._stage, UsdGeom.Tokens.z)
 
         # 루트 Xform 생성
         UsdGeom.Xform.Define(self._stage, self.config.root_prim_path)
@@ -446,7 +459,7 @@ class SceneBuilder:
         return fence_root
 
     def add_robot_linear_unit(self,
-                              position: Tuple[float, float, float] = (34.6, 10.2, 0.0),
+                              position: Tuple[float, float, float] = LINEAR_UNIT_POSITION,
                               name: str = "Robot_Linear_Unit",
                               track_len: float = 2.4,
                               attach_robot_asset: Optional[str] = "kuka_kr210_l150",
@@ -898,7 +911,7 @@ class SceneBuilder:
         return root
 
     def add_cantilever_rack(self,
-                            position: Tuple[float, float, float] = (14.5, 2.0, 0.0),
+                            position: Tuple[float, float, float] = CANTILEVER_POSITION,
                             num_pillars: int = 4,
                             pillar_spacing: float = 1.1,
                             num_levels: int = 5,
@@ -1016,7 +1029,7 @@ class SceneBuilder:
         return bundle_root
 
     def add_loaded_cantilever_rack(self,
-                                   position: Tuple[float, float, float] = (14.5, 2.0, 0.0),
+                                   position: Tuple[float, float, float] = CANTILEVER_POSITION,
                                    num_pillars: int = 4,
                                    pillar_spacing: float = 1.1,
                                    num_levels: int = 5,
@@ -1075,7 +1088,7 @@ class SceneBuilder:
                            shelf_depth: float = 0.5,
                            total_height: float = 2.0,
                            shelf_thickness: float = 0.03,
-                           post_size: float = 0.04,
+                           post_size: float = SHELVING_POST_SIZE,
                            name: str = "SteelShelving",
                            ) -> str:
         """실사 공장 사진 레퍼런스의 백색 철재 다단 선반(경량/중량랙) —
@@ -1286,10 +1299,10 @@ class SceneBuilder:
         # x만 골랐다 — docstring 참고).
         pillar_half = 0.22
         pillar_height = rail_z - 0.12  # 레일 하단(rail_z - rail_half_z)까지
-        for i, x in enumerate((2.0, 10.0, 19.5, 30.5)):
+        for i, x in enumerate(CRANE_PILLAR_X_SOUTH):
             _box(f"Pillar_Concrete_S_{i:02d}", (x, rail_y_south, pillar_height / 2.0),
                  (pillar_half, pillar_half, pillar_height / 2.0), color_concrete, mat_concrete)
-        for i, x in enumerate((2.0, 10.0, 19.5, 33.0)):
+        for i, x in enumerate(CRANE_PILLAR_X_NORTH):
             _box(f"Pillar_Concrete_N_{i:02d}", (x, rail_y_north, pillar_height / 2.0),
                  (pillar_half, pillar_half, pillar_height / 2.0), color_concrete, mat_concrete)
 
@@ -1418,11 +1431,7 @@ class SceneBuilder:
         # (7 bay x 8/7m ≈ 8.0m, depth=1.0m, height=2.2m). position은
         # add_steel_shelving()이 시작 모서리(x)/중심(y) 기준이라, 옛
         # (x0,y0)="시작 모서리" 값에서 y만 d/2를 더해 중심으로 변환했다.
-        for i, (x0, y0, w, d, h) in enumerate([
-            (4.0, 3.0, 8.0, 1.0, 2.2),
-            (4.0, 5.0, 8.0, 1.0, 2.2),
-            (4.0, 7.0, 8.0, 1.0, 2.2),
-        ]):
+        for i, (x0, y0, w, d, h) in enumerate(MATERIAL_RACK_LAYOUT):
             self.add_steel_shelving(
                 position=(x0, y0 + d / 2.0, 0.0),
                 num_bays=7, bay_width=w / 7.0,
@@ -1432,8 +1441,8 @@ class SceneBuilder:
         # AMR 충전 스테이션 (충전소 구역 안) — 2026-09-29 사용자 요청으로
         # 예전 평판 마커(ChargeDockGreen 박스)를 실물 스테이션(주차 패드
         # + 가이드선/범퍼 + 충전 타워 + 단자 + LED)으로 교체.
-        for i, (x, y) in enumerate([(4.5, 10.9), (6.5, 10.9)]):
-            self.add_amr_charging_station(position=(x, y, 0.0),
+        for i, position in enumerate(CHARGING_STATION_POSITIONS):
+            self.add_amr_charging_station(position=position,
                                           name=f"AMR_Charging_Station_{i}")
 
         # 소재관리 존 — 캔틸레버 랙 + 각 층 양쪽 지지대에 가득 얹힌 원자재
@@ -1471,8 +1480,8 @@ class SceneBuilder:
         # (add_safety_fence() 메서드 자체는 남겨둠 — 필요해지면 재사용 가능).
         # 두 장비 각각의 기본 position은 서로 겹치므로(둘 다 "혼자 쓸 때"
         # 기준 기본값), 여기선 서쪽/동쪽으로 나란히 명시적으로 배치한다.
-        self.add_metal_forming_machine(position=(27.5, 2.5, 0.0))
-        self.add_cnc_pipe_bender(position=(33.0, 2.5, 0.0))
+        self.add_metal_forming_machine(position=FORMING_MACHINE_POSITION)
+        self.add_cnc_pipe_bender(position=PIPE_BENDER_POSITION)
 
         # 5세부 정밀가공 셀 — 로봇 리니어 유닛(7축 주행 트랙, 사용자 제공
         # 레퍼런스, 2026-09-29). 실제 장비가 생겨서 아래 "미구현
@@ -2285,46 +2294,182 @@ class SceneBuilder:
             return
         self._stage.RemovePrim(path)
 
-    def get_amr_footprint(self, amr_id: str, position: tuple) -> Optional[Tuple[float, float]]:
-        """Conservative current world bounds about the vehicle pose origin.
+    def local_point_to_world_meters(self, point: tuple, parent_path: Optional[str] = None
+                                    ) -> Tuple[float, float, float]:
+        """Convert authored local coordinates through all parents and USD units."""
+        from fdw_sim.visualization.navigation_geometry import local_point_to_world_meters
+        return local_point_to_world_meters(
+            self._stage, parent_path or self.config.root_prim_path, point)
 
-        Includes offset geometry; must be queried after reference composition.
-        This is mesh sizing, not a PhysX contact/drive validation.
+    def world_meters_to_local_point(self, point: tuple, parent_path: Optional[str] = None
+                                    ) -> Tuple[float, float, float]:
+        from fdw_sim.visualization.navigation_geometry import world_meters_to_local_point
+        return world_meters_to_local_point(
+            self._stage, parent_path or self.config.root_prim_path, point)
+
+    def get_cell_world_position(self, cell_id: str) -> Tuple[float, float, float]:
+        path = self._cell_prims.get(cell_id)
+        if path is None:
+            raise ValueError(f"Cannot measure unknown cell {cell_id}")
+        return self.local_point_to_world_meters((0.0, 0.0, 0.0), path)
+
+    def get_static_navigation_map(self, *, robot_height_m: float = 1.5):
+        """Read fixed displayed geometry. Failure must stop route configuration."""
+        from fdw_sim.visualization.navigation_geometry import extract_static_navigation_map
+        return extract_static_navigation_map(
+            self._stage, self.config.root_prim_path, robot_height_m=robot_height_m)
+
+    def add_navigation_markers(self, docks: dict, bays: Iterable[tuple]) -> str:
+        """Mark actual selected service stops (blue) and waiting bays (green).
+
+        The markings are visual-only, in world metres, and excluded from static
+        obstacle extraction. They indicate schematic stops, not arm reachability.
         """
         import math
-        path = self._amr_prims.get(amr_id)
-        if path is None:
-            return None
+        root = f"{self.config.root_prim_path}/NavigationMarkers"
+        if self._stage.GetPrimAtPath(root):
+            self._stage.RemovePrim(root)
+        self._UsdGeom.Xform.Define(self._stage, root)
+        world_zero = self.local_point_to_world_meters((0.0, 0.0, 0.0), root)
+        world_x = self.local_point_to_world_meters((1.0, 0.0, 0.0), root)
+        world_z = self.local_point_to_world_meters((0.0, 0.0, 1.0), root)
+        xy_scale, z_scale = math.dist(world_zero, world_x), math.dist(world_zero, world_z)
+        if min(xy_scale, z_scale) <= 1e-12:
+            raise ValueError("Cannot mark a singular navigation frame")
+        rows = [(f"Dock_{i:02d}", point, (0.1, 0.45, 0.95))
+                for i, point in enumerate(docks.values())]
+        rows += [(f"Bay_{i:02d}", point, (0.1, 0.8, 0.35))
+                 for i, point in enumerate(bays.values() if isinstance(bays, dict) else bays)]
+        for name, point, color in rows:
+            path = f"{root}/{name}"
+            marker = self._UsdGeom.Cylinder.Define(self._stage, path)
+            marker.CreateAxisAttr("Z")
+            marker.CreateRadiusAttr(.1 / xy_scale)
+            marker.CreateHeightAttr(.008 / z_scale)
+            self._set_translate(path, self.world_meters_to_local_point(
+                (point[0], point[1], world_zero[2] + .035), root))
+            self._set_color(path, color)
+        return root
+
+    def _get_origin_centered_footprint(self, path: str) -> Optional[Tuple[float, float]]:
+        """Full XY size centred on the *actual world origin*, in metres."""
+        import math
+        from fdw_sim.visualization.navigation_geometry import stage_meters_per_unit
         try:
+            prim = self._stage.GetPrimAtPath(path)
+            if not prim or not prim.IsValid():
+                return None
             cache = self._UsdGeom.BBoxCache(self._Usd.TimeCode.Default(),
                 [self._UsdGeom.Tokens.default_, self._UsdGeom.Tokens.render,
                  self._UsdGeom.Tokens.proxy], useExtentsHint=False)
-            bounds = cache.ComputeWorldBound(self._stage.GetPrimAtPath(path)).ComputeAlignedRange()
+            bounds = cache.ComputeWorldBound(prim).ComputeAlignedRange()
             if bounds.IsEmpty():
                 return None
+            scale = stage_meters_per_unit(self._stage)
+            origin = self.local_point_to_world_meters((0.0, 0.0, 0.0), path)
             low, high = bounds.GetMin(), bounds.GetMax()
-            size = tuple(2 * max(abs(float(low[i]) - position[i]),
-                                 abs(float(high[i]) - position[i])) for i in range(2))
+            size = tuple(2 * max(abs(float(low[i]) * scale - origin[i]),
+                                 abs(float(high[i]) * scale - origin[i])) for i in range(2))
             return size if all(math.isfinite(v) and v > 0 for v in size) else None
         except Exception:
-            logger.exception("[VIS] cannot measure AMR footprint %s", amr_id)
+            logger.exception("[VIS] cannot measure world footprint %s", path)
             return None
+
+    def get_amr_footprint(self, amr_id: str, position: Optional[tuple] = None
+                          ) -> Optional[Tuple[float, float]]:
+        """Conservative composed world footprint about the vehicle origin.
+
+        The legacy position argument is accepted, but never used as a substitute
+        for the USD world origin. Parent translation/rotation and stage units
+        therefore cannot silently move the envelope away from the loaded asset.
+        """
+        path = self._amr_prims.get(amr_id)
+        return self._get_origin_centered_footprint(path) if path is not None else None
+
+    def get_part_footprint(self, part_id: str) -> Optional[Tuple[float, float]]:
+        path = self._part_prims.get(part_id)
+        return self._get_origin_centered_footprint(path) if path is not None else None
+
+    def _get_world_geometry_height(self, path: str, *, centered: bool) -> Optional[float]:
+        import math
+        from fdw_sim.visualization.navigation_geometry import stage_meters_per_unit
+        try:
+            prim = self._stage.GetPrimAtPath(path)
+            if not prim or not prim.IsValid():
+                return None
+            cache = self._UsdGeom.BBoxCache(self._Usd.TimeCode.Default(),
+                [self._UsdGeom.Tokens.default_, self._UsdGeom.Tokens.render,
+                 self._UsdGeom.Tokens.proxy], useExtentsHint=False)
+            bounds = cache.ComputeWorldBound(prim).ComputeAlignedRange()
+            if bounds.IsEmpty():
+                return None
+            scale = stage_meters_per_unit(self._stage)
+            origin_z = self.local_point_to_world_meters((0.0, 0.0, 0.0), path)[2]
+            low = float(bounds.GetMin()[2]) * scale - origin_z
+            high = float(bounds.GetMax()[2]) * scale - origin_z
+            height = 2 * max(abs(low), abs(high)) if centered else high
+            return height if math.isfinite(height) and height > 0 else None
+        except Exception:
+            logger.exception("[VIS] cannot measure world height %s", path)
+            return None
+
+    def get_amr_height(self, amr_id: str) -> Optional[float]:
+        """Highest point above the actual vehicle pose origin, in metres."""
+        path = self._amr_prims.get(amr_id)
+        return self._get_world_geometry_height(path, centered=False) if path else None
+
+    def get_part_height(self, part_id: str) -> Optional[float]:
+        """Full origin-centred vertical envelope, including geometry offsets."""
+        path = self._part_prims.get(part_id)
+        return self._get_world_geometry_height(path, centered=True) if path else None
+
+    def move_part_world(self, part_id: str, world_meter_target: tuple) -> None:
+        """Move a transported payload in the navigation frame (world metres)."""
+        path = self._part_prims.get(part_id)
+        if path is None:
+            raise ValueError(f"Cannot move unknown part {part_id}")
+        parent = str(self._stage.GetPrimAtPath(path).GetParent().GetPath())
+        self._set_translate(path, self.world_meters_to_local_point(world_meter_target, parent))
 
     def move_amr(self, amr_id: str, target: Tuple[float, float, float],
                  heading: float = 0.0) -> None:
+        """Render a navigation world-metre pose without changing its logical pose."""
+        import math
+        from fdw_sim.visualization.navigation_geometry import planar_parent_yaw
         path = self._amr_prims.get(amr_id)
         if path is None:
-            logger.warning("[VIS] move_amr: unknown amr %s", amr_id)
+            logger.warning("[VIS] move_amr: unknown AMR %s", amr_id)
             return
-        self._set_translate(path, target)
-        # Heading belongs to the vehicle root, separate from asset local axes.
-        import math
-        xform = self._UsdGeom.Xformable(self._stage.GetPrimAtPath(path))
+        if not math.isfinite(heading):
+            raise ValueError("AMR heading must be finite")
+        prim = self._stage.GetPrimAtPath(path)
+        parent = str(prim.GetParent().GetPath())
+        parent_yaw = planar_parent_yaw(self._stage, parent)
+        xform = self._UsdGeom.Xformable(prim)
+        ops = xform.GetOrderedXformOps()
+        # A matrix/pivot stack can move the root origin when heading changes.
+        # Explicitly refuse it instead of commanding a different world pose.
+        if (xform.GetResetXformStack()
+                or any(op.IsInverseOp() or op.GetOpType() == self._UsdGeom.XformOp.TypeTransform
+                       for op in ops)
+                or sum(op.GetOpType() == self._UsdGeom.XformOp.TypeTranslate for op in ops) > 1):
+            raise ValueError("AMR root uses an unsupported reset, matrix, or pivot transform stack")
+        # A descendant reset would leave part of the vehicle behind in world
+        # space while the logical AMR moves. Refuse that unsupported asset.
+        predicate = self._Usd.PrimIsActive & self._Usd.PrimIsDefined & ~self._Usd.PrimIsAbstract
+        for child in self._Usd.PrimRange(prim, self._Usd.TraverseInstanceProxies(predicate)):
+            child_xform = self._UsdGeom.Xformable(child)
+            if child != prim and child_xform and child_xform.GetResetXformStack():
+                raise ValueError(f"AMR descendant resets its transform stack: {child.GetPath()}")
+            if not child.IsLoaded() or child.GetPrimIndex().localErrors:
+                raise ValueError(f"AMR geometry is not fully composed: {child.GetPath()}")
+        local_target = self.world_meters_to_local_point(target, parent)
+        self._set_translate(path, local_target)
         op = next((op for op in xform.GetOrderedXformOps()
                    if op.GetOpName() == "xformOp:rotateZ:fdwHeading"), None)
         if op is None:
             op = xform.AddRotateZOp(opSuffix="fdwHeading")
-        op.Set(math.degrees(heading))
+        op.Set(math.degrees(heading - parent_yaw))
         self._enforce_xform_order(xform)
 
     # ========================================================================
@@ -2497,11 +2642,17 @@ class SceneBuilder:
         if not ops:
             return
 
-        # 우선순위: translate(0) < rotate*(1) < orient(2) < scale(3)
+        # Heading must be the outer world-planar rotation, before *all* fixed
+        # asset-axis corrections (including rotateX/orient). Otherwise turning a
+        # tilted asset can swing a long horizontal body into/out of the XY plane
+        # and invalidate the footprint measured at startup.
+        # translate(0) < fdwHeading(1) < fixed rotate*(2) < orient(3) < scale(4)
         def _rank(op) -> int:
             t = op.GetOpType()
             if t == UsdGeom.XformOp.TypeTranslate:
                 return 0
+            if op.GetOpName() == "xformOp:rotateZ:fdwHeading":
+                return 1
             if t in (UsdGeom.XformOp.TypeRotateX,
                      UsdGeom.XformOp.TypeRotateY,
                      UsdGeom.XformOp.TypeRotateZ,
@@ -2511,12 +2662,12 @@ class SceneBuilder:
                      UsdGeom.XformOp.TypeRotateYZX,
                      UsdGeom.XformOp.TypeRotateZXY,
                      UsdGeom.XformOp.TypeRotateZYX):
-                return 1
-            if t == UsdGeom.XformOp.TypeOrient:
                 return 2
-            if t == UsdGeom.XformOp.TypeScale:
+            if t == UsdGeom.XformOp.TypeOrient:
                 return 3
-            return 4
+            if t == UsdGeom.XformOp.TypeScale:
+                return 4
+            return 5
 
         sorted_ops = sorted(ops, key=_rank)
         # 변경이 없으면 set 호출도 생략 (불필요한 USD 알림 방지)

@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 import logging
+import math
 
 from fdw_sim.cells.base.cell_base import DistributedIntelligenceCell
 from fdw_sim.cells.material.material_cell import MaterialCell
@@ -86,6 +87,11 @@ class WorkshopVizConfig:
     motion_execution: str = "verified"  # verified | schematic (explicit logical demo)
     amr_footprint_size: Tuple[float, float] = (1.2, 0.8)
     amr_clearance_m: float = 0.15
+    # Maximum centered carried-load dimensions reserved even on empty trips.
+    # The default visible 0.525m pipe is smaller. Oversized parts fail closed.
+    amr_payload_footprint_size: Tuple[float, float] = (1.2, 0.8)
+    amr_payload_offset: Tuple[float, float] = (0.0, 0.0)
+    amr_payload_height_m: float = 1.0
     motion_mode: str = "auto"
 
     # 용접 스파크 파티클
@@ -218,6 +224,8 @@ class WorkshopVisualizer:
         cell.configure_transport_geometry(
             docks, footprint_size=self.config.amr_footprint_size,
             clearance=self.config.amr_clearance_m,
+            payload_footprint_size=self.config.amr_payload_footprint_size,
+            payload_offset=self.config.amr_payload_offset,
         )
         for cid, target in cell.cell_registry.items():
             if self.cell_types.get(cid) == "welding":
@@ -485,6 +493,7 @@ class WorkshopVisualizer:
 
         # AMR 배치 — 실 USD(NovaCarter 등) 우선, 실패 시 cube placeholder
         measured_footprints = []
+        measured_heights = []
         for a in self._pending_amrs:
             placed = None
             if self.config.use_real_amr:
@@ -499,20 +508,58 @@ class WorkshopVisualizer:
                     placed = None
             if placed is None:
                 self.scene.add_amr(a["amr_id"], position=a["position"])
-            self.scene.move_amr(a["amr_id"], a["position"], heading=a["heading"])
+            initial_world = self.scene.local_point_to_world_meters(a["position"])
+            self.scene.move_amr(a["amr_id"], initial_world, heading=a["heading"])
             footprint = self.scene.get_amr_footprint(a["amr_id"], a["position"])
             if footprint is None:
                 raise RuntimeError("Cannot measure loaded AMR footprint; refusing unbounded transport")
             measured_footprints.append(footprint)
+            height = self.scene.get_amr_height(a["amr_id"])
+            if height is None or not math.isfinite(height) or height <= 0:
+                raise RuntimeError("Cannot measure loaded AMR height; refusing transport")
+            measured_heights.append(height)
 
         if measured_footprints and self._material_cell is not None:
             footprint = tuple(max(self.config.amr_footprint_size[i],
                                   *(size[i] for size in measured_footprints)) for i in range(2))
+            if (not math.isfinite(self.config.amr_payload_height_m) or self.config.amr_payload_height_m <= 0
+                    or not math.isfinite(self.config.amr_deck_height) or self.config.amr_deck_height < 0):
+                raise ValueError("invalid configured payload/deck height")
+            # The scene's composed USD geometry is authoritative. Never fall
+            # back to a rack-free map if references/bounds cannot be measured.
+            navigation = self.scene.get_static_navigation_map(robot_height_m=max(
+                *measured_heights, self.config.amr_deck_height + self.config.amr_payload_height_m))
+            if navigation is None:
+                raise RuntimeError("Cannot measure static navigation map; refusing transport")
+            from fdw_sim.cells.material.navigation_setup import select_transport_positions
+            cell_centers = {cid: self.scene.get_cell_world_position(cid)[:2]
+                            for cid in self.cell_positions}
+            requested_docks = {cid: self.scene.local_point_to_world_meters(
+                (*self._amr_dock_pos(cid), self.cell_positions[cid][2]))[:2]
+                for cid in self.cell_positions}
+            radius = max(math.hypot(*footprint) / 2, math.hypot(*(
+                abs(self.config.amr_payload_offset[i]) + self.config.amr_payload_footprint_size[i] / 2
+                for i in range(2))))
+            docks, bays = select_transport_positions(requested_docks, cell_centers,
+                navigation.obstacles, navigation.bounds, radius,
+                self.config.amr_clearance_m, len(self._material_cell.amrs),
+                boundary_polygon=navigation.boundary_polygon)
             self._material_cell.configure_transport_geometry(
-                {cid: self._amr_dock_pos(cid) for cid in self.cell_positions},
-                footprint_size=footprint, clearance=self.config.amr_clearance_m)
+                docks, parking_positions=bays, footprint_size=footprint,
+                clearance=self.config.amr_clearance_m,
+                payload_footprint_size=self.config.amr_payload_footprint_size,
+                payload_offset=self.config.amr_payload_offset,
+                static_obstacles=navigation.obstacles, navigation_bounds=navigation.bounds,
+                navigation_boundary=navigation.boundary_polygon,
+                navigation_source=navigation.source)
+            self._navigation_docks = docks
+            self._navigation_floor_height = navigation.floor_height_m
+            self.scene.add_navigation_markers(docks, bays)
+            logger.warning("[VIS] static navigation source=%s obstacles=%d docks=%s bays=%s; "
+                           "service poses do not certify arm reach or physical grasp",
+                           navigation.source, len(navigation.obstacles), docks, bays)
             for amr in self._material_cell.amrs:
-                self.scene.move_amr(amr.amr_id, (*amr.position, 0.0), heading=amr.heading)
+                self.scene.move_amr(amr.amr_id, (*amr.position, getattr(self, "_navigation_floor_height", 0.0)), heading=amr.heading)
             logger.info("[VIS] measured fleet envelope=%s with %.3fm clearance", footprint,
                         self.config.amr_clearance_m)
 
@@ -596,6 +643,8 @@ class WorkshopVisualizer:
     def _amr_dock_pos(self, cell_id: str) -> Optional[Tuple[float, float]]:
         """AMR이 이 셀 옆에 정차하는 지점(바닥, 2D) — 작업대 중앙을 그대로
         관통하지 않도록 셀 중심에서 고정 오프셋만큼 떨어뜨린다."""
+        if cell_id in getattr(self, "_navigation_docks", {}):
+            return self._navigation_docks[cell_id]
         pos = self.cell_positions.get(cell_id)
         if pos is None:
             return None
@@ -620,6 +669,19 @@ class WorkshopVisualizer:
         color = PART_COLORS.get(part_type, PART_COLORS["default"])
         pos = self._input_buffer_pos(cell_id)
         self.scene.add_part(part_id, position=pos, color=color)
+        if self._material_cell is not None and callable(getattr(self.scene, "get_part_footprint", None)):
+            size = self.scene.get_part_footprint(part_id)
+            height = self.scene.get_part_height(part_id)
+            if (height is None or not math.isfinite(height) or height <= 0
+                    or height > self.config.amr_payload_height_m + 1e-8
+                    or size is None or len(size) != 2 or not all(math.isfinite(v) and v > 0 for v in size)
+                    or any(size[i] > self.config.amr_payload_footprint_size[i] + 1e-8 for i in range(2))):
+                self._material_cell.payload_geometry_issues[part_id] = (
+                    f"unmeasured or oversized payload {part_id}: measured={size}, height={height}, "
+                    f"permitted={self.config.amr_payload_footprint_size}")
+            else:
+                self._material_cell.payload_geometry_issues.pop(part_id, None)
+                self._material_cell.validated_payloads.add(part_id)
         self._part_locations[part_id] = cell_id
         self._part_types[part_id] = part_type
         self._known_rack_parts.add(part_id)
@@ -813,7 +875,8 @@ class WorkshopVisualizer:
     # ========================================================================
     def _amr_current_world_pos(self, amr) -> Tuple[float, float, float]:
         """Render the single authoritative pose, including idle and endpoints."""
-        return (float(amr.position[0]), float(amr.position[1]), 0.0)
+        return (float(amr.position[0]), float(amr.position[1]),
+                getattr(self, "_navigation_floor_height", 0.0))
 
     def _update_amr_positions(self, dt: float) -> None:
         if self._material_cell is None or self.scene is None:
@@ -822,8 +885,8 @@ class WorkshopVisualizer:
             pos = self._amr_current_world_pos(amr)
             self.scene.move_amr(amr.amr_id, pos, heading=amr.heading)
             if (amr.payload_part_id and amr.payload_part_id not in self._active_pick_place.values()):
-                self.scene.move_part(amr.payload_part_id,
-                                     (pos[0], pos[1], self.config.amr_deck_height))
+                getattr(self.scene, "move_part_world", self.scene.move_part)(amr.payload_part_id,
+                                     (pos[0], pos[1], pos[2] + self.config.amr_deck_height))
             cmd_id = amr.last_delivered_command_id
             if cmd_id and self._amr_last_seen_delivery.get(amr.amr_id) != cmd_id:
                 self._amr_last_seen_delivery[amr.amr_id] = cmd_id

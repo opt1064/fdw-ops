@@ -13,7 +13,9 @@ import logging
 import math
 
 from fdw_sim.cells.base.cell_base import CellConfig, DistributedIntelligenceCell
-from fdw_sim.cells.material.traffic import clear_route, segment_is_clear
+from fdw_sim.cells.material.traffic import (
+    StaticObstacle, blocked_obstacle_ids, clear_route, segment_is_clear,
+)
 from fdw_sim.messaging.bus import MessageBus, Topics
 from fdw_sim.messaging.schemas import DispatchCommand, MaterialTransferCommand, QualityPrediction
 
@@ -29,6 +31,9 @@ class AMR:
     heading: float = math.pi / 2             # radians, continuous/unwrapped
     turn_speed_radps: float = math.pi / 2
     footprint_size: tuple = (1.2, 0.8)
+    # Reserve the maximum permitted carried load even on empty approach/return.
+    payload_footprint_size: tuple = (0.0, 0.0)
+    payload_offset: tuple = (0.0, 0.0)
     parking_position: tuple = (0.0, 0.0)
     busy: bool = False
     phase: str = "parked"
@@ -52,7 +57,10 @@ class AMR:
 
     @property
     def footprint_radius(self) -> float:
-        return math.hypot(*self.footprint_size) / 2.0
+        chassis = math.hypot(*self.footprint_size) / 2.0
+        load = math.hypot(*(abs(self.payload_offset[i]) + self.payload_footprint_size[i] / 2
+                            for i in range(2)))
+        return max(chassis, load)
 
 
 @dataclass
@@ -81,6 +89,13 @@ class MaterialCell(DistributedIntelligenceCell):
         self.aisle_owner: Optional[str] = None
         self.aisle_y = 0.0
         self.clearance_m = 0.15
+        self.static_obstacles: tuple[StaticObstacle, ...] = ()
+        self.navigation_bounds = None
+        self.navigation_boundary = None
+        self.navigation_source = "logical-unmapped"
+        self.payload_geometry_issues: dict[str, str] = {}
+        self.validated_payloads: set[str] = set()
+        self.require_payload_geometry_validation = False
         self._geometry_explicit = False
         self._transport_started = False
         self._next_amr_index = 0
@@ -98,7 +113,11 @@ class MaterialCell(DistributedIntelligenceCell):
     def configure_transport_geometry(self, docks: dict[str, tuple], *,
                                      parking_positions=None,
                                      footprint_size=(1.2, 0.8),
-                                     clearance=0.15) -> None:
+                                     clearance=0.15, static_obstacles=(),
+                                     navigation_bounds=None, navigation_boundary=None,
+                                     navigation_source="logical-unmapped",
+                                     payload_footprint_size=(0.0, 0.0),
+                                     payload_offset=(0.0, 0.0)) -> None:
         """Set spawn/docks before first transport; never relocate a live fleet.
 
         Automatic waiting bays are one vehicle diameter below the shared aisle,
@@ -114,7 +133,25 @@ class MaterialCell(DistributedIntelligenceCell):
         converted.setdefault(self.cell_id, self._logical_docks()[self.cell_id])
         if any(len(point) != 2 or not all(math.isfinite(v) for v in point) for point in converted.values()):
             raise ValueError("dock positions must be finite XY coordinates")
-        gap = math.hypot(*footprint_size) + clearance + 0.05
+        if (len(payload_footprint_size) != 2 or len(payload_offset) != 2
+                or not all(math.isfinite(v) and v >= 0 for v in payload_footprint_size)
+                or not all(math.isfinite(v) for v in payload_offset)):
+            raise ValueError("invalid payload envelope")
+        obstacles = tuple(static_obstacles)
+        if any(not isinstance(obs, StaticObstacle) for obs in obstacles):
+            raise ValueError("invalid static navigation map: expected StaticObstacle entries")
+        radius = max(math.hypot(*footprint_size) / 2,
+                     math.hypot(*(abs(payload_offset[i]) + payload_footprint_size[i] / 2
+                                  for i in range(2))))
+        inflated = [obs.inflated(radius + clearance) for obs in obstacles]
+        bounds = self._inset_bounds(navigation_bounds, radius + clearance)
+        # Validate the complete map and every endpoint before mutating any pose.
+        for name, point in converted.items():
+            blockers = blocked_obstacle_ids(point, point, inflated, bounds=bounds,
+                convex_boundary=navigation_boundary, boundary_margin=radius + clearance)
+            if blockers:
+                raise ValueError(f"dock {name} obstructed by {', '.join(blockers)}")
+        gap = 2 * radius + clearance + 0.05
         minimum_x = min(point[0] for point in converted.values())
         minimum_y = min(point[1] for point in converted.values())
         aisle_y = minimum_y - gap
@@ -126,14 +163,23 @@ class MaterialCell(DistributedIntelligenceCell):
             positions = [tuple(point[:2]) for point in parking_positions]
         if len(positions) != len(self.amrs):
             raise ValueError("one private parking bay is required per AMR")
-        separation = math.hypot(*footprint_size) + clearance
+        separation = 2 * radius + clearance
         for index, point in enumerate(positions):
             if len(point) != 2 or not all(math.isfinite(v) for v in point):
                 raise ValueError("parking positions must be finite XY coordinates")
+            blockers = blocked_obstacle_ids(point, point, inflated, bounds=bounds,
+                convex_boundary=navigation_boundary, boundary_margin=radius + clearance)
+            if blockers:
+                raise ValueError(f"parking AMR_{index+1:02d} obstructed by {', '.join(blockers)}")
             if any(math.dist(point, other) < separation for other in positions[:index]):
                 raise ValueError("AMR parking footprints overlap")
             if any(math.dist(point, dock) < separation for dock in converted.values()):
                 raise ValueError("parking footprint intrudes on a dock")
+        self.static_obstacles = obstacles
+        self.navigation_bounds = navigation_bounds
+        self.navigation_boundary = navigation_boundary
+        self.navigation_source = navigation_source
+        self.require_payload_geometry_validation = navigation_source == "usd"
         self.dock_positions = converted
         self.aisle_y = aisle_y
         self.clearance_m = clearance
@@ -142,6 +188,27 @@ class MaterialCell(DistributedIntelligenceCell):
             amr.position = amr.parking_position = point
             amr.heading = math.pi / 2
             amr.footprint_size = tuple(footprint_size)
+            amr.payload_footprint_size = tuple(payload_footprint_size)
+            amr.payload_offset = tuple(payload_offset)
+
+    @staticmethod
+    def _inset_bounds(bounds, radius):
+        if bounds is None:
+            return None
+        if len(bounds) != 4 or not all(math.isfinite(v) for v in bounds):
+            raise ValueError("invalid navigation bounds")
+        inset = (bounds[0] + radius, bounds[1] - radius,
+                 bounds[2] + radius, bounds[3] - radius)
+        if inset[0] >= inset[1] or inset[2] >= inset[3]:
+            raise ValueError("navigation bounds too small for loaded AMR envelope")
+        return inset
+
+    def _route_bounds(self, amr):
+        return self._inset_bounds(self.navigation_bounds, amr.footprint_radius + self.clearance_m)
+
+    def _boundary_kwargs(self, amr):
+        return {"convex_boundary": self.navigation_boundary,
+                "boundary_margin": amr.footprint_radius + self.clearance_m}
 
     @staticmethod
     def _kinematic_issue(amr: AMR) -> Optional[str]:
@@ -158,8 +225,22 @@ class MaterialCell(DistributedIntelligenceCell):
             if (len(amr.footprint_size) != 2
                     or not all(math.isfinite(v) and v > 0 for v in amr.footprint_size)):
                 return "invalid footprint: expected finite positive dimensions"
+            if (len(amr.payload_footprint_size) != 2 or len(amr.payload_offset) != 2
+                    or not all(math.isfinite(v) and v >= 0 for v in amr.payload_footprint_size)
+                    or not all(math.isfinite(v) for v in amr.payload_offset)):
+                return "invalid payload envelope"
         except (TypeError, ValueError, OverflowError):
             return "invalid AMR kinematics: expected numeric pose, rates and footprint"
+        return None
+
+    def _payload_issue(self, amr: AMR) -> Optional[str]:
+        part_id = amr.payload_part_id or (amr.command.part_id if amr.command else None)
+        issue = self.payload_geometry_issues.get(part_id)
+        if issue:
+            return issue
+        if (part_id and self.require_payload_geometry_validation
+                and part_id not in self.validated_payloads):
+            return f"unmeasured payload {part_id}: successful USD geometry validation required"
         return None
 
     def _fleet_issue(self) -> Optional[str]:
@@ -269,7 +350,7 @@ class MaterialCell(DistributedIntelligenceCell):
         amr.transfer_command_id = cmd.command_id
         amr.pickup_blocked = False
         amr.blocked_reason = None
-        issue = self._fleet_issue()
+        issue = self._fleet_issue() or self._payload_issue(amr)
         if issue:
             self._block(amr, issue)
             return True
@@ -277,22 +358,34 @@ class MaterialCell(DistributedIntelligenceCell):
         return True
 
     def _obstacles(self, amr: AMR) -> list:
-        return [(other.position, amr.footprint_radius + other.footprint_radius + self.clearance_m)
-                for other in self.amrs if other is not amr]
+        return ([obs.inflated(amr.footprint_radius + self.clearance_m)
+                 for obs in self.static_obstacles] +
+                [(other.position, amr.footprint_radius + other.footprint_radius + self.clearance_m)
+                 for other in self.amrs if other is not amr])
+
+    def _clearance_issue(self, amr, start, end):
+        try:
+            ids = blocked_obstacle_ids(start, end, self._obstacles(amr),
+                                       bounds=self._route_bounds(amr),
+                                       **self._boundary_kwargs(amr))
+            return "swept envelope obstructed by " + ", ".join(ids) if ids else None
+        except (ValueError, TypeError, OverflowError, AttributeError) as exc:
+            return f"invalid navigation map: {exc}"
 
     def _set_route(self, amr: AMR, destination: tuple, phase: str) -> None:
-        # Preferred route has separate bay/dock spurs and a common horizontal
-        # aisle. Visibility routing also protects nonstandard explicit bay maps.
-        goals = [(amr.position[0], self.aisle_y), (destination[0], self.aisle_y), destination]
-        route = []
-        start = amr.position
-        for goal in goals:
-            leg = clear_route(start, goal, self._obstacles(amr))
-            if leg is None:
-                self._block(amr, "no footprint-clear route")
+        # A preferred fixed aisle may itself cross a rack. Plan in free space;
+        # one fleet reservation still serializes traffic and preserves custody.
+        try:
+            obstacles = self._obstacles(amr)
+            bounds = self._route_bounds(amr)
+            route = clear_route(amr.position, destination, obstacles, bounds=bounds, **self._boundary_kwargs(amr))
+            if route is None:
+                ids = blocked_obstacle_ids(amr.position, destination, obstacles, bounds=bounds, **self._boundary_kwargs(amr))
+                self._block(amr, "no footprint-clear route; obstacles=" + ", ".join(ids or ["disconnected free space"]))
                 return
-            route.extend(leg)
-            start = goal
+        except (ValueError, TypeError, OverflowError, AttributeError) as exc:
+            self._block(amr, f"invalid navigation map: {exc}")
+            return
         amr.phase = phase
         amr.waypoints = route
         amr.total_distance_m = amr.remaining_distance_m = sum(
@@ -302,6 +395,8 @@ class MaterialCell(DistributedIntelligenceCell):
         amr.blocked_reason = reason
         amr.phase = "blocked"
         amr.busy = True
+        if amr.awaiting_pickup:
+            amr.pickup_blocked = True
         logger.error("[%s] %s transport blocked: %s", self.cell_id, amr.amr_id, reason)
 
     def _hold_dock(self, amr: AMR, cell_id: str) -> None:
@@ -327,7 +422,7 @@ class MaterialCell(DistributedIntelligenceCell):
         if self.aisle_owner != amr.amr_id:
             self._block(amr, "missing shared-aisle reservation")
             return
-        issue = self._fleet_issue()
+        issue = self._fleet_issue() or self._payload_issue(amr)
         if issue:
             self._block(amr, issue)
             return
@@ -345,7 +440,11 @@ class MaterialCell(DistributedIntelligenceCell):
         while amr.busy and not amr.awaiting_pickup and amr.phase != "blocked":
             # Source/target callbacks may run between route legs in this tick;
             # recheck before each movement as well as on entry.
-            issue = self._fleet_issue()
+            issue = self._fleet_issue() or self._payload_issue(amr)
+            if issue:
+                self._block(amr, issue)
+                return
+            issue = self._clearance_issue(amr, amr.position, amr.position)
             if issue:
                 self._block(amr, issue)
                 return
@@ -363,6 +462,10 @@ class MaterialCell(DistributedIntelligenceCell):
                 continue
             if remaining_time <= 1e-12:
                 return
+            issue = self._clearance_issue(amr, amr.position, waypoint)
+            if issue:
+                self._block(amr, issue)
+                return
             desired = math.atan2(waypoint[1] - amr.position[1], waypoint[0] - amr.position[0])
             angle = (desired - amr.heading + math.pi) % (2 * math.pi) - math.pi
             turn_time = abs(angle) / amr.turn_speed_radps
@@ -374,9 +477,6 @@ class MaterialCell(DistributedIntelligenceCell):
                     return
             # Rotation uses the same circumscribed disk. Validate the full
             # translation segment, not only this tick's endpoint.
-            if not segment_is_clear(amr.position, waypoint, self._obstacles(amr)):
-                self._block(amr, "swept footprint obstructed")
-                return
             travel = min(distance, amr.speed_mps * remaining_time)
             ratio = travel / distance
             amr.position = (amr.position[0] + (waypoint[0] - amr.position[0]) * ratio,
@@ -456,10 +556,13 @@ class MaterialCell(DistributedIntelligenceCell):
                 amr.pickup_blocked = True
                 amr.blocked_reason = "target refused placement reservation"
             return False
-        self._finish_pickup(amr)
-        return True
+        return self._finish_pickup(amr)
 
-    def _finish_pickup(self, amr: AMR) -> None:
+    def _finish_pickup(self, amr: AMR) -> bool:
+        issue = self._payload_issue(amr)
+        if issue:
+            self._block(amr, issue)
+            return False
         self.in_transit.pop(amr.payload_part_id, None)
         self._completed_commands.add(amr.transfer_command_id)
         amr.payload_part_id = None
@@ -470,11 +573,16 @@ class MaterialCell(DistributedIntelligenceCell):
         amr.blocked_reason = None
         # Do not release the aisle/dock here: the footprint is still there.
         self._set_route(amr, amr.parking_position, "returning")
+        return True
 
     def _step_awaiting_pickup(self, amr: AMR, dt: float) -> None:
         if not math.isfinite(dt) or dt < 0:
             raise ValueError("dt must be finite and nonnegative")
         if not amr.awaiting_pickup:
+            return
+        issue = self._payload_issue(amr)
+        if issue:
+            self._block(amr, issue)
             return
         amr.pickup_wait_elapsed += dt
         if amr.pickup_wait_elapsed >= self.max_pickup_wait_sec and not amr.pickup_blocked:
@@ -498,13 +606,16 @@ class MaterialCell(DistributedIntelligenceCell):
             if (amr.amr_id == amr_id and amr.awaiting_pickup and not amr.pickup_blocked
                     and part_id is not None and part_id == amr.payload_part_id
                     and transfer_command_id is not None and transfer_command_id == amr.transfer_command_id):
+                issue = self._payload_issue(amr)
+                if issue:
+                    self._block(amr, issue)
+                    return False
                 target = self.cell_registry.get(amr.target_cell)
                 confirm_placement = getattr(target, "confirm_placement", None)
                 if confirm_placement is not None and not confirm_placement(
                         part_id, transfer_command_id, success=True):
                     return False
-                self._finish_pickup(amr)
-                return True
+                return self._finish_pickup(amr)
         return False
 
     def step_processing(self, dt: float) -> None:  # pragma: no cover
