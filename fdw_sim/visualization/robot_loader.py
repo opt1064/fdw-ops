@@ -324,8 +324,9 @@ class RobotLoader:
         Args:
             robot_name: ROBOT_CATALOG의 key
             prim_path: USD 스테이지 내 절대 prim 경로
-            position: 월드 좌표 (x, y, z)
-            orientation_deg_z: Z축 회전 (도)
+            position: 부모 prim 기준 로컬 좌표 (x, y, z). 부모가 identity일
+                때만 월드 좌표와 같다. base_offset_z는 이 로컬 Z에 더한다.
+            orientation_deg_z: 부모 prim 기준 로컬 Z축 회전 (도)
 
         Returns:
             isaacsim.core.prims.SingleArticulation 객체 (5.x) 또는 None

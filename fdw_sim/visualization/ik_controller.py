@@ -1,16 +1,8 @@
-"""IKController — 로봇팔 엔드 이펙터를 목표 위치로 이동시키는 간이 IK.
+"""Cartesian controller with explicit command/measurement separation.
 
-Isaac Sim 5.x에는 다음 IK 솔버가 내장되어 있다:
-    1) Lula Kinematics Solver       (정확, URDF/Robot Description 필요)
-    2) Motion Generation - RMPflow  (반응형, 충돌회피)
-    3) Articulation 직접 joint 제어 (수동 trajectory)
-
-본 모듈은 **간이 추적 모드**를 제공한다:
-    * 옵션 A — Lula IK가 가능하면 그것을 사용
-    * 옵션 B — 불가능하면 사전 정의된 joint waypoint trajectory를 보간
-
-용접 셀의 토치가 부품 표면의 점 → 점을 따라 움직이는
-용도로 충분한 수준이며, 정확한 충돌·동역학은 다음 단계의 RMPflow에서 다룬다.
+Lula may provide kinematic targets when an appropriate robot model is supplied.
+The fallback is only an unverified posture demonstration. Neither path verifies
+collision safety or physical grasp/attachment. Missing feedback fails closed.
 """
 from __future__ import annotations
 
@@ -18,6 +10,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 import logging
 import math
+
+from fdw_sim.visualization.robot_base_pose import RobotBasePose, read_robot_base_pose
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +94,13 @@ class _LulaIKBackend:
         )
         self.ee_frame = end_effector_frame
 
+    def set_robot_base_pose(self, pose: RobotBasePose) -> None:
+        import numpy as np  # type: ignore
+        self._solver.set_robot_base_pose(
+            np.array(pose.position, dtype=float),
+            np.array(pose.orientation, dtype=float),
+        )
+
     def compute(self, target_position: Tuple[float, float, float],
                 target_orientation_quat_wxyz: Optional[Tuple[float, float, float, float]] = None,
                 warm_start_q: Optional[List[float]] = None,
@@ -110,16 +111,237 @@ class _LulaIKBackend:
             # 기본: 토치가 아래를 향함 (Z- 방향)
             target_orientation_quat_wxyz = (0.0, 1.0, 0.0, 0.0)
         rot = np.array(target_orientation_quat_wxyz, dtype=float)
-        if warm_start_q is not None:
-            self._solver.set_warm_start(np.array(warm_start_q, dtype=float))
         joint_positions, success = self._solver.compute_inverse_kinematics(
             frame_name=self.ee_frame,
             target_position=pos,
             target_orientation=rot,
+            warm_start=(np.array(warm_start_q, dtype=float)
+                        if warm_start_q is not None else None),
         )
         if not success:
             return None
         return list(joint_positions)
+
+
+class _MotionTruthMixin:
+    """Shared command/measurement boundary; completion is never grasp evidence.
+
+    A solver result is only a command. Both controllers require measured initial
+    joints before sending drive targets and measured TCP reach before reporting
+    Cartesian completion. No current backend has validated grasp integration.
+    """
+
+    def _init_motion_truth(self) -> None:
+        self._commanded_tcp = None
+        self._measured_tcp = None
+        self._motion_status = "idle"
+        self._motion_failure = None
+        self._completion_pending = False
+        self._settle_elapsed = 0.0
+        self._blend_start_q = None
+        self._current_q = self._read_measured_joints()
+
+    @staticmethod
+    def _finite_vector(value, length=None):
+        try:
+            result = [float(v) for v in value]
+            if not result or (length is not None and len(result) != length):
+                return None
+            return result if all(math.isfinite(v) for v in result) else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _read_measured_joints(self):
+        try:
+            getter = getattr(self.articulation, "get_joint_positions", None)
+            return self._finite_vector(getter()) if callable(getter) else None
+        except Exception:
+            return None
+
+    @property
+    def supports_physical_manipulation(self) -> bool:
+        """No validated gripper/contact/attachment implementation exists here."""
+        return False
+
+    def get_capabilities(self) -> dict:
+        self._ensure_backend()
+        backend = self.backend_name
+        return {
+            "backend": backend,
+            "cartesian_target_solver": backend in ("ik", "rmpflow"),
+            "measured_tcp": self.get_measured_tcp_position() is not None,
+            "supports_physical_manipulation": False,
+            "verified_collision_safety": False,
+            "unverified_demo": backend not in ("ik", "rmpflow"),
+        }
+
+    def get_commanded_tcp_position(self):
+        """Planned world-space point, never evidence of actual robot reach."""
+        return self._commanded_tcp
+
+    def get_measured_tcp_position(self):
+        """Fresh observed end-effector world position, or None; no fallback."""
+        try:
+            actual = self._finite_vector(self._read_actual_tcp_from_articulation(), 3)
+        except Exception:
+            actual = None
+        self._measured_tcp = tuple(actual) if actual is not None else None
+        return self._measured_tcp
+
+    def has_reached_target(self, target, tolerance_m=0.03) -> bool:
+        point = self._finite_vector(target, 3)
+        actual = self.get_measured_tcp_position()
+        if point is None or actual is None or not math.isfinite(tolerance_m) or tolerance_m < 0:
+            return False
+        return math.dist(actual, point) <= tolerance_m
+
+    def get_motion_status(self) -> str:
+        """idle/running/succeeded/failed/unverified; idle alone is not success."""
+        return self._motion_status
+
+    def motion_succeeded(self) -> bool:
+        """Measured endpoint completion only; never asserts a successful grasp."""
+        return self._motion_status == "succeeded"
+
+    def get_motion_failure(self):
+        return self._motion_failure
+
+    def _begin_motion(self) -> None:
+        self._motion_status = "running"
+        self._motion_failure = None
+        self._completion_pending = False
+        self._settle_elapsed = 0.0
+        self._blend_remaining = 0.0
+        self._target_q = None
+        self._commanded_tcp = None
+        self._current_q = self._read_measured_joints()
+
+    def _fail_motion(self, reason: str) -> None:
+        self._motion_status = "failed"
+        self._motion_failure = reason
+        self._active_path = None
+        self._completion_pending = False
+        self._blend_remaining = 0.0
+        # Replace any outstanding drive target with an observed hold pose. A
+        # failed command must not leave a previous trajectory running silently.
+        measured = self._read_measured_joints()
+        if measured is not None:
+            self._apply_joints(measured)
+        logger.warning("Motion stopped: %s", reason)
+
+    def _set_target_joints(self, q: List[float], blend_time: float) -> bool:
+        target = self._finite_vector(q)
+        if target is None:
+            self._fail_motion("invalid_joint_target")
+            return False
+        self._target_q = target  # Retain the attempted command for diagnostics.
+        if self._current_q is None:
+            self._current_q = self._read_measured_joints()
+        if self._current_q is None:
+            self._fail_motion("measured_initial_joints_unavailable")
+            return False
+        if len(self._current_q) != len(target):
+            self._fail_motion("joint_count_mismatch_requires_verified_mapping")
+            return False
+        if not math.isfinite(blend_time) or blend_time < 0:
+            self._fail_motion("invalid_blend_time")
+            return False
+        self._blend_start_q = list(self._current_q)
+        self._blend_total = max(1e-3, blend_time)
+        self._blend_remaining = self._blend_total
+        return True
+
+    def _apply_joints(self, q: List[float]) -> bool:
+        """Send drive targets only. Never teleport a physical articulation."""
+        if self.articulation is None:
+            return False
+        try:
+            import numpy as np
+            arr = np.array(q, dtype=float)
+            setter = getattr(self.articulation, "set_joint_position_targets", None)
+            if callable(setter):
+                setter(arr)
+                return True
+            apply_action = getattr(self.articulation, "apply_action", None)
+            if callable(apply_action):
+                from isaacsim.core.utils.types import ArticulationAction
+                apply_action(ArticulationAction(joint_positions=arr))
+                return True
+        except Exception as exc:
+            logger.warning("Joint drive command failed: %s", exc)
+        return False
+
+    def _update_motion(self, dt: float):
+        if not math.isfinite(dt) or dt < 0:
+            self._fail_motion("invalid_time_step")
+            return None
+        try:
+            self._ensure_backend()
+        except Exception as exc:
+            self._fail_motion(f"backend_initialization_failed: {exc}")
+            return None
+        was_settling = self._completion_pending
+        target = None
+        if self._active_path is not None:
+            try:
+                target = self._finite_vector(self._active_path.update(dt), 3)
+                if target is None:
+                    raise ValueError("trajectory returned an invalid target")
+                target = tuple(target)
+                self._commanded_tcp = target
+                self._last_tcp = target  # Legacy display API, not feedback.
+                finished = not self._active_path.is_active()
+                if not self._track_target(target):
+                    if self._motion_status != "failed":
+                        self._fail_motion("target_solver_failed")
+                elif finished:
+                    self._active_path = None
+                    self._completion_pending = True
+                    self._settle_elapsed = 0.0
+            except Exception as exc:
+                self._fail_motion(f"trajectory_or_solver_error: {type(exc).__name__}: {exc}")
+
+        if self._blend_remaining > 0.0 and self._target_q is not None:
+            self._blend_remaining = max(0.0, self._blend_remaining - dt)
+            k = 1.0 - self._blend_remaining / self._blend_total
+            k = k * k * (3.0 - 2.0 * k)
+            self._current_q = [a + (b - a) * k
+                               for a, b in zip(self._blend_start_q, self._target_q)]
+            if not self._apply_joints(self._current_q):
+                self._fail_motion("joint_drive_command_unavailable_or_failed")
+
+        actual = self.get_measured_tcp_position()
+        if actual is not None:
+            self._last_tcp = actual
+        if self._completion_pending:
+            # Time before the final command was issued is not settling time.
+            if was_settling:
+                self._settle_elapsed += dt
+            if self.backend_name not in ("ik", "rmpflow"):
+                if self._blend_remaining <= 0:
+                    self._motion_status = "unverified"
+                    self._motion_failure = "heuristic_demo_has_no_cartesian_reach_guarantee"
+                    self._completion_pending = False
+            elif actual is not None and math.dist(actual, self._commanded_tcp) <= 0.03:
+                self._motion_status = "succeeded"
+                self._completion_pending = False
+                self._blend_remaining = 0.0
+            elif self._blend_remaining <= 0 and actual is None:
+                self._motion_status = "unverified"
+                self._motion_failure = "measured_tcp_unavailable"
+                self._completion_pending = False
+            elif self._settle_elapsed >= 2.0:
+                self._fail_motion("measured_tcp_did_not_reach_endpoint")
+        elif self._motion_status == "running" and self._active_path is None and self._blend_remaining <= 0:
+            # Joint-only go_home completion also requires actual readback.
+            measured = self._read_measured_joints()
+            if measured is not None and self._target_q is not None and len(measured) == len(self._target_q) and all(
+                    abs(a - b) <= 0.03 for a, b in zip(measured, self._target_q)):
+                self._motion_status = "succeeded"
+            else:
+                self._motion_status = "unverified"
+                self._motion_failure = "joint_target_not_verified"
+        return target
 
 
 # =============================================================================
@@ -134,7 +356,7 @@ class IKConfig:
     home_blend_time: float = 1.0
 
 
-class IKController:
+class IKController(_MotionTruthMixin):
     """로봇팔의 엔드 이펙터를 목표 위치로 부드럽게 이동.
 
     사용 예:
@@ -153,10 +375,16 @@ class IKController:
             ctrl.go_home()
     """
 
-    def __init__(self, articulation, spec, config: Optional[IKConfig] = None) -> None:
+    def __init__(self, articulation, spec, config: Optional[IKConfig] = None,
+                 *,
+                 base_position: Tuple[float, float, float] = (5.0, 0.0, 0.0),
+                 base_orientation: Tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
+                 ) -> None:
         self.articulation = articulation
         self.spec = spec
         self.config = config or IKConfig()
+        self.base_pose = read_robot_base_pose(
+            articulation, RobotBasePose(base_position, base_orientation))
 
         # IK 백엔드 (lazy 로드)
         self._ik_backend: Optional[_LulaIKBackend] = None
@@ -173,15 +401,14 @@ class IKController:
 
         # 현재 추적 중인 TCP(엔드이펙터) 월드 위치 — spark emitter용.
         self._last_tcp: Optional[Tuple[float, float, float]] = None
+        self._init_motion_truth()
 
     # ------------------------------------------------------------------
     def get_tcp_position(self) -> Optional[Tuple[float, float, float]]:
-        """현재 추적 중인 TCP(엔드이펙터) 월드 위치 — spark emitter용.
+        """Legacy display position, possibly a planned target when FK is absent.
 
-        가능하면 articulation의 실제 FK 결과(``_read_actual_tcp_from_articulation``)를
-        반영한 위치이며, FK를 읽을 수 없는 환경(테스트, USD 로드 실패)에서는
-        커맨드된 target 위치로 fallback 한다. RMPflowController의 동일 기능과
-        같은 전략 (Refs: 787c2a4 fix(rmpflow): override _last_tcp with actual FK).
+        Never use this value as evidence of reach, attachment, or grasp. Use
+        get_measured_tcp_position() and motion status for feedback checks.
         """
         return self._last_tcp
 
@@ -232,11 +459,10 @@ class IKController:
         try:
             candidate = pose_result
             if isinstance(pose_result, (tuple, list)) and len(pose_result) >= 1:
-                candidate = pose_result[0]
-            x = float(candidate[0])
-            y = float(candidate[1])
-            z = float(candidate[2])
-            return (x, y, z)
+                direct = self._finite_vector(pose_result, 3)
+                candidate = direct if direct is not None else pose_result[0]
+            position = self._finite_vector(candidate, 3)
+            return tuple(position) if position is not None else None
         except Exception:
             return None
 
@@ -327,142 +553,65 @@ class IKController:
         self._ik_disabled = True
 
     # ------------------------------------------------------------------
+    @property
+    def backend_name(self) -> str:
+        return "ik" if self._ik_backend is not None else "heuristic"
+
     def go_home(self) -> None:
-        if not self.spec.home_joint_positions:
+        self._active_path = None
+        self._begin_motion()
+        home = getattr(self.spec, "home_joint_positions", None)
+        if not home:
+            self._fail_motion("validated_home_configuration_unavailable")
             return
-        self._set_target_joints(self.spec.home_joint_positions,
-                                 blend_time=self.config.home_blend_time)
+        self._set_target_joints(home, blend_time=self.config.home_blend_time)
 
     def start_path(self, path: WeldingPath) -> None:
-        path.reset()
-        self._active_path = path
-        # fallback: 시작 시 home에서 살짝 내려간 자세로 prepare
-        if self.spec.home_joint_positions:
-            prepare_q = list(self.spec.home_joint_positions)
-            # joint 1을 약간 굽혀 토치를 부품 쪽으로 향하게 (Franka 기준)
-            if len(prepare_q) >= 4:
-                prepare_q[1] += 0.3       # shoulder lift
-                prepare_q[3] += -0.3      # elbow
-            self._set_target_joints(prepare_q,
-                                    blend_time=self.config.waypoint_blend_time)
+        self._begin_motion()
+        try:
+            path.reset()
+            self._active_path = path
+        except Exception as exc:
+            self._fail_motion(f"trajectory_reset_failed: {exc}")
 
     def is_idle(self) -> bool:
-        return self._active_path is None and self._blend_remaining <= 0.0
+        return self._active_path is None and not self._completion_pending and self._blend_remaining <= 0.0
 
     def get_phase(self) -> str:
+        if self._motion_status in ("failed", "unverified"):
+            return self._motion_status
         if self._active_path is not None:
             return self._active_path.phase
-        return "idle" if self._blend_remaining <= 0.0 else "moving_home"
+        return "idle" if self.is_idle() else "moving_home"
 
-    # ------------------------------------------------------------------
     def update(self, dt: float) -> Optional[Tuple[float, float, float]]:
-        """매 step 호출. 토치 목표 위치(있다면) 반환."""
-        self._ensure_backend()
-
-        target_pos: Optional[Tuple[float, float, float]] = None
-
-        # 1) 경로 추적
-        if self._active_path is not None:
-            target_pos = self._active_path.update(dt)
-            # 우선 commanded target으로 fallback 값을 채워둔다 — FK가 실패해도
-            # spark emitter가 None TCP로 끊기지 않도록 (RMPflowController와 동일 전략).
-            self._last_tcp = target_pos
-            if not self._active_path.is_active():
-                self._active_path = None
-                # 경로 끝났으면 home으로
-                self.go_home()
-            else:
-                # path 갱신: IK 시도 (fallback이면 보간만 진행)
-                self._track_target(target_pos)
-                # joint를 갱신한 뒤 end-effector의 실제 월드 좌표를 FK로 읽어
-                # _last_tcp를 덮어쓴다.
-                actual = self._read_actual_tcp_from_articulation()
-                if actual is not None:
-                    self._last_tcp = actual
-
-        # 2) joint 보간 (path가 없을 때도 home blend 진행)
-        if self._blend_remaining > 0.0 and self._target_q is not None:
-            self._blend_remaining = max(0.0, self._blend_remaining - dt)
-            if self._current_q is None:
-                self._current_q = list(self._target_q)
-            else:
-                k = 1.0 - (self._blend_remaining / self._blend_total)
-                k = max(0.0, min(1.0, k))
-                # smoothstep
-                k = k * k * (3.0 - 2.0 * k)
-                for i in range(len(self._current_q)):
-                    if i < len(self._target_q):
-                        self._current_q[i] = (
-                            self._current_q[i] * (1.0 - k)
-                            + self._target_q[i] * k
-                        )
-            self._apply_joints(self._current_q)
-
-        return target_pos
+        return self._update_motion(dt)
 
     # ------------------------------------------------------------------
-    def _track_target(self, target_pos: Tuple[float, float, float]) -> None:
-        """현재 토치 목표 → joint positions 변환."""
+    def _track_target(self, target_pos: Tuple[float, float, float]) -> bool:
+        """Solve a target; an installed solver failure never degrades to demo IK."""
+        self.base_pose = read_robot_base_pose(self.articulation, self.base_pose)
         if self._ik_backend is not None:
-            q = self._ik_backend.compute(target_pos,
-                                          warm_start_q=self._current_q)
-            if q is not None:
-                self._set_target_joints(q,
-                                        blend_time=self.config.waypoint_blend_time)
-                return
+            try:
+                self._ik_backend.set_robot_base_pose(self.base_pose)
+                q = self._ik_backend.compute(target_pos, warm_start_q=(self._current_q if self._current_q is not None else self._target_q))
+            except Exception as exc:
+                self._fail_motion(f"ik_solver_error: {exc}")
+                return False
+            if q is None:
+                self._fail_motion("ik_no_solution")
+                return False
+            return self._set_target_joints(q, self.config.waypoint_blend_time)
 
-        # ----- Fallback (analytic-ish for Franka) -----
-        # 시각적으로 그럴듯한 자세만 만들어주는 휴리스틱.
-        # 실제 IK가 아닌 demo 용도.
-        if not self.spec.home_joint_positions or len(self.spec.home_joint_positions) < 7:
-            return
-        # 부품의 y 위치에 따라 base joint를 살짝 회전
-        # (Franka의 joint0가 base yaw)
-        base = list(self.spec.home_joint_positions)
-        # 단순 매핑: y가 +면 base를 음수로 회전 (Z up, X forward 가정)
-        yaw_offset = math.atan2(target_pos[1] - 0.0, target_pos[0] - 5.0) * 0.5
-        base[0] = base[0] + max(-0.8, min(0.8, yaw_offset))
-        # shoulder/elbow를 약간 굽혀 토치를 부품 위로
-        base[1] = base[1] + 0.4
-        base[3] = base[3] + -0.5
-        self._set_target_joints(base, blend_time=self.config.waypoint_blend_time)
-
-    # ------------------------------------------------------------------
-    def _set_target_joints(self, q: List[float], blend_time: float) -> None:
-        self._target_q = list(q)
-        self._blend_total = max(1e-3, blend_time)
-        self._blend_remaining = self._blend_total
-        if self._current_q is None:
-            self._current_q = list(q)
-
-    def _apply_joints(self, q: List[float]) -> None:
-        """Articulation에 joint 적용.
-
-        set_joint_positions()만 호출하면 순간이동(kinematic)만 될 뿐, 관절에
-        물리 PD 드라이브가 붙어있으면 다음 physics step에서 바로 원래(안 바뀐)
-        드라이브 타겟으로 되돌아간다(2026-09-28 DGX Spark 실측 — RMPflowController
-        쪽에서 동일 증상 확인, 상세 경위는 rmpflow_controller.py._apply_joints
-        주석 참고). set_joint_position_targets()/apply_action()으로 드라이브
-        타겟을 같이 갱신해야 물리 스텝이 지나가도 자세가 유지된다.
-        """
-        if self.articulation is None:
-            return
-        try:
-            import numpy as np  # type: ignore
-            arr = np.array(q, dtype=float)
-
-            # 1) 순간이동 — 지연 없이 바로 반영(선택적, 실패해도 무방)
-            if hasattr(self.articulation, "set_joint_positions"):
-                try:
-                    self.articulation.set_joint_positions(arr)
-                except Exception as e:
-                    logger.debug("[IK] set_joint_positions failed: %s", e)
-
-            # 2) 드라이브 타겟 — 물리 스텝을 버텨내는 핵심
-            if hasattr(self.articulation, "set_joint_position_targets"):
-                self.articulation.set_joint_position_targets(arr)
-            elif hasattr(self.articulation, "apply_action"):
-                from isaacsim.core.utils.types import ArticulationAction  # type: ignore
-                self.articulation.apply_action(ArticulationAction(joint_positions=arr))
-        except Exception as e:
-            logger.debug("[IK] joint apply failed: %s", e)
+        # This is an unverified posture demo, not analytic IK or collision avoidance.
+        home = getattr(self.spec, "home_joint_positions", None)
+        if not home or len(home) < 7:
+            self._fail_motion("heuristic_reference_configuration_unavailable")
+            return False
+        base = list(home)
+        dx, dy, _ = self.base_pose.to_local(target_pos)
+        yaw_offset = math.atan2(dy, dx) * 0.5
+        base[0] += max(-0.8, min(0.8, yaw_offset))
+        base[1] += 0.4
+        base[3] -= 0.5
+        return self._set_target_joints(base, self.config.waypoint_blend_time)

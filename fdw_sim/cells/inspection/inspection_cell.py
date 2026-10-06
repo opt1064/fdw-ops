@@ -9,9 +9,10 @@ Level 2/3에서는 Replicator 합성데이터, 실제 카메라/Depth 센서 + M
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional
 import logging
+import math
 import random
 
 from fdw_sim.cells.base.cell_base import (
@@ -40,7 +41,12 @@ class InspectionAgent:
     pass_threshold: float = 0.85
     rework_threshold: float = 0.65
 
-    def judge(self, q: QualityPrediction, noise_std: float = 0.03) -> Dict[str, Any]:
+    def judge(self, q: Optional[QualityPrediction], noise_std: float = 0.03) -> Dict[str, Any]:
+        # Missing/invalid evidence must not inherit a previous part's PASS.
+        if not isinstance(q, QualityPrediction) or not all(isinstance(v, (int, float)) and math.isfinite(v) and 0.0 <= v <= 1.0
+                                for v in (q.score, q.defect_risk, q.confidence)) or q.confidence <= 0.0:
+            return {"verdict": "FAIL", "measured_score": 0.0,
+                    "defect_risk": 1.0, "reason": "missing_or_invalid_quality"}
         # 측정 노이즈
         measured_score = max(0.0, min(1.0, q.score + random.gauss(0.0, noise_std)))
         if measured_score >= self.pass_threshold:
@@ -72,20 +78,28 @@ class InspectionCell(DistributedIntelligenceCell):
         self.total_fail: int = 0
 
         # 입력 시점에 직전 셀로부터 받은 품질 예측을 보존
-        self._incoming_quality: QualityPrediction = QualityPrediction()
+        self._incoming_quality: Optional[QualityPrediction] = None
         self.last_verdict: Optional[str] = None
+        self.verdict_part_id: Optional[str] = None
+        self.last_verdict_reason: Optional[str] = None
 
     # ------------------------------------------------------------------ setup
     def configure(self) -> None:
         logger.info("[%s] InspectionCell configured (cycle=%.1fs)",
                     self.cell_id, self.default_cycle_time)
 
+    def receive_part(self, part_id: str) -> bool:
+        ok = super().receive_part(part_id)
+        if ok:
+            self._incoming_quality = None
+        return ok
+
     # 부품을 받을 때 직전 셀의 quality_prediction을 함께 받기 위한 확장 hook
     def receive_part_with_quality(self, part_id: str,
                                   quality: Optional[QualityPrediction]) -> bool:
         ok = self.receive_part(part_id)
-        if ok and quality is not None:
-            self._incoming_quality = quality
+        if ok and isinstance(quality, QualityPrediction):
+            self._incoming_quality = replace(quality)
         return ok
 
     # =========================================================================
@@ -126,11 +140,13 @@ class InspectionCell(DistributedIntelligenceCell):
         verdict = result["verdict"]
         measured_score = result["measured_score"]
         self.last_verdict = verdict
+        self.verdict_part_id = self.input_buffer.part_id
+        self.last_verdict_reason = result.get("reason")
 
         self.quality = QualityPrediction(
             score=measured_score,
             defect_risk=result["defect_risk"],
-            confidence=0.95,
+            confidence=0.0 if result.get("reason") else 0.95,
         )
 
         # 통계 업데이트

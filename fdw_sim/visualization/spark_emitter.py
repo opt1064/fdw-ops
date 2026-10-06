@@ -100,6 +100,14 @@ def add_sparks_pointinstancer(
 
     instancer_path = f"{parent_path}/Sparks"
     instancer = UsdGeom.PointInstancer.Define(stage, instancer_path)
+    # These particles/prototypes are visual effects, never fixed equipment.
+    # Explicit classification also covers the intentionally empty startup pool.
+    from fdw_sim.visualization.navigation_geometry import (
+        NONPHYSICAL_VFX_ROLE_ATTRIBUTE, NONPHYSICAL_VFX_ROLE,
+    )
+    instancer.GetPrim().CreateAttribute(
+        NONPHYSICAL_VFX_ROLE_ATTRIBUTE, Sdf.ValueTypeNames.Token,
+        custom=True).Set(NONPHYSICAL_VFX_ROLE)
 
     # Prototype — 작은 sphere
     proto_path = f"{instancer_path}/Proto"

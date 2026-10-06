@@ -77,6 +77,9 @@ class SimulationConfig:
     weld_path_height: float = 0.05      # 부품 위 용접 높이 (m)
 
     # Level 2.2: RMPflow + 용접 스파크
+    motion_execution: str = "verified"  # schematic explicitly allows logical demo
+    amr_footprint_size: tuple = (1.2, 0.8)
+    amr_clearance_m: float = 0.15
     motion_mode: str = "auto"           # "auto" | "rmpflow" | "ik" | "heuristic"
                                           # auto: RMPflow → IK → heuristic 자동 fallback
     enable_sparks: bool = True          # 용접 스파크 파티클 활성화
@@ -687,6 +690,9 @@ class SimulationManager:
             skip_auto_camera=self.config.skip_auto_camera,
             # Level 2.2
             motion_mode=self.config.motion_mode,
+            motion_execution=self.config.motion_execution,
+            amr_footprint_size=self.config.amr_footprint_size,
+            amr_clearance_m=self.config.amr_clearance_m,
             enable_sparks=self.config.enable_sparks,
             spark_rate=self.config.spark_rate,
             spark_lifetime_sec=self.config.spark_lifetime_sec,
@@ -713,20 +719,10 @@ class SimulationManager:
 
         # AMR 등록 (MaterialCell의 AMR들)
         if self.material_cell is not None:
-            # AMR 초기 배치 기준 위치 — 용접 셀(WELDING)이 등록되어 있으면
-            # 그 옆에 도킹시키고, 없으면 기존처럼 MaterialCell 옆에 배치
-            dock_pos = self._cell_locations.get(self.material_cell.cell_id, (0.0, 0.0, 0.0))
-            for cid, cell in self.cells.items():
-                ctype = cell.config.cell_type.value if hasattr(cell.config, "cell_type") else ""
-                if ctype == "welding":
-                    dock_pos = self._cell_locations.get(cid, dock_pos)
-                    break
-
-            for i, amr in enumerate(self.material_cell.amrs):
-                amr_id = getattr(amr, "amr_id", f"AMR_{i:02d}")
-                amr_pos = (dock_pos[0] - 1.5 + i * 0.7, dock_pos[1] - 1.5, 0.0)
-                self.visualizer.register_amr(amr_id, position=amr_pos)
             self.visualizer.attach_material_cell(self.material_cell)
+            for amr in self.material_cell.amrs:
+                self.visualizer.register_amr(amr.amr_id,
+                    position=(amr.position[0], amr.position[1], 0.0), heading=amr.heading)
 
         # USD 스테이지에 빌드
         self.visualizer.build_scene()
@@ -813,8 +809,9 @@ class SimulationManager:
                 if lag > 0:
                     time.sleep(lag)
 
-        logger.info("[SIM] run finished (sim_time=%.1fs, completed_jobs=%d)",
-                    self._sim_time, len(self.orchestrator.completed_jobs))
+        logger.info("[SIM] run finished (sim_time=%.1fs, completed_jobs=%d, quarantined_jobs=%d)",
+                    self._sim_time, len(self.orchestrator.completed_jobs),
+                    len(self.orchestrator.quarantined_jobs))
 
     def keep_viewer_alive(self) -> None:
         """모든 job이 끝난 뒤에도 창을 자동으로 닫지 않고 렌더 루프만 계속 돈다.
