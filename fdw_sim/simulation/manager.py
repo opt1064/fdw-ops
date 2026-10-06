@@ -813,8 +813,9 @@ class SimulationManager:
                 if lag > 0:
                     time.sleep(lag)
 
-        logger.info("[SIM] run finished (sim_time=%.1fs, completed_jobs=%d)",
-                    self._sim_time, len(self.orchestrator.completed_jobs))
+        logger.info("[SIM] run finished (sim_time=%.1fs, completed_jobs=%d, quarantined_jobs=%d)",
+                    self._sim_time, len(self.orchestrator.completed_jobs),
+                    len(self.orchestrator.quarantined_jobs))
 
     def keep_viewer_alive(self) -> None:
         """모든 job이 끝난 뒤에도 창을 자동으로 닫지 않고 렌더 루프만 계속 돈다.

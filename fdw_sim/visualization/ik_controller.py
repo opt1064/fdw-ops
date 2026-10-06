@@ -19,6 +19,8 @@ from typing import List, Optional, Tuple
 import logging
 import math
 
+from fdw_sim.visualization.robot_base_pose import RobotBasePose, read_robot_base_pose
+
 logger = logging.getLogger(__name__)
 
 
@@ -100,6 +102,13 @@ class _LulaIKBackend:
         )
         self.ee_frame = end_effector_frame
 
+    def set_robot_base_pose(self, pose: RobotBasePose) -> None:
+        import numpy as np  # type: ignore
+        self._solver.set_robot_base_pose(
+            np.array(pose.position, dtype=float),
+            np.array(pose.orientation, dtype=float),
+        )
+
     def compute(self, target_position: Tuple[float, float, float],
                 target_orientation_quat_wxyz: Optional[Tuple[float, float, float, float]] = None,
                 warm_start_q: Optional[List[float]] = None,
@@ -110,12 +119,12 @@ class _LulaIKBackend:
             # 기본: 토치가 아래를 향함 (Z- 방향)
             target_orientation_quat_wxyz = (0.0, 1.0, 0.0, 0.0)
         rot = np.array(target_orientation_quat_wxyz, dtype=float)
-        if warm_start_q is not None:
-            self._solver.set_warm_start(np.array(warm_start_q, dtype=float))
         joint_positions, success = self._solver.compute_inverse_kinematics(
             frame_name=self.ee_frame,
             target_position=pos,
             target_orientation=rot,
+            warm_start=(np.array(warm_start_q, dtype=float)
+                        if warm_start_q is not None else None),
         )
         if not success:
             return None
@@ -153,10 +162,16 @@ class IKController:
             ctrl.go_home()
     """
 
-    def __init__(self, articulation, spec, config: Optional[IKConfig] = None) -> None:
+    def __init__(self, articulation, spec, config: Optional[IKConfig] = None,
+                 *,
+                 base_position: Tuple[float, float, float] = (5.0, 0.0, 0.0),
+                 base_orientation: Tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
+                 ) -> None:
         self.articulation = articulation
         self.spec = spec
         self.config = config or IKConfig()
+        self.base_pose = read_robot_base_pose(
+            articulation, RobotBasePose(base_position, base_orientation))
 
         # IK 백엔드 (lazy 로드)
         self._ik_backend: Optional[_LulaIKBackend] = None
@@ -403,7 +418,9 @@ class IKController:
     # ------------------------------------------------------------------
     def _track_target(self, target_pos: Tuple[float, float, float]) -> None:
         """현재 토치 목표 → joint positions 변환."""
+        self.base_pose = read_robot_base_pose(self.articulation, self.base_pose)
         if self._ik_backend is not None:
+            self._ik_backend.set_robot_base_pose(self.base_pose)
             q = self._ik_backend.compute(target_pos,
                                           warm_start_q=self._current_q)
             if q is not None:
@@ -420,7 +437,8 @@ class IKController:
         # (Franka의 joint0가 base yaw)
         base = list(self.spec.home_joint_positions)
         # 단순 매핑: y가 +면 base를 음수로 회전 (Z up, X forward 가정)
-        yaw_offset = math.atan2(target_pos[1] - 0.0, target_pos[0] - 5.0) * 0.5
+        dx, dy, _ = self.base_pose.to_local(target_pos)
+        yaw_offset = math.atan2(dy, dx) * 0.5
         base[0] = base[0] + max(-0.8, min(0.8, yaw_offset))
         # shoulder/elbow를 약간 굽혀 토치를 부품 위로
         base[1] = base[1] + 0.4

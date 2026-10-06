@@ -70,4 +70,5 @@ class Topics:
     KPI_LOG = "/fdw/kpi_log"
     JOB_CREATED = "/fdw/job_created"
     JOB_COMPLETED = "/fdw/job_completed"
+    JOB_QUARANTINED = "/fdw/job_quarantined"
     FAULT = "/fdw/fault"

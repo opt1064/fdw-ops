@@ -9,7 +9,7 @@ PoC-1에서는 다음을 단순화한다:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional
 import logging
 import math
@@ -24,6 +24,7 @@ from fdw_sim.messaging.schemas import (
     CellType,
     DispatchCommand,
     MaterialTransferCommand,
+    QualityPrediction,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ class AMR:
     position: tuple = (0.0, 0.0)
     busy: bool = False
     payload_part_id: Optional[str] = None
+    payload_quality: Optional[QualityPrediction] = None
     from_cell: Optional[str] = None
     target_cell: Optional[str] = None
     remaining_distance_m: float = 0.0
@@ -134,6 +136,7 @@ class MaterialCell(DistributedIntelligenceCell):
             for amr in self.amrs:
                 amr.busy = False
                 amr.payload_part_id = None
+                amr.payload_quality = None
                 amr.from_cell = None
                 amr.target_cell = None
                 amr.awaiting_pickup = False
@@ -177,7 +180,17 @@ class MaterialCell(DistributedIntelligenceCell):
             self._assign_amr(amr, cmd)
 
     def _assign_amr(self, amr: AMR, cmd: MaterialTransferCommand) -> None:
+        # Reserve a free destination input before loading: otherwise every AMR
+        # can wait at a full cell while that cell needs an AMR for its output.
+        target = self.cell_registry.get(cmd.to_cell)
+        target_input = getattr(target, "input_buffer", None)
+        if (target_input is not None and target_input.occupied) or any(
+                vehicle.busy and vehicle.target_cell == cmd.to_cell
+                for vehicle in self.amrs):
+            self.transfer_queue.append(cmd)
+            return
         # 1) From cell에서 부품 takeout 시도
+        payload_quality = None
         from_cell = self.cell_registry.get(cmd.from_cell)
         if from_cell is None and cmd.from_cell == self.cell_id:
             # MaterialCell 자체에서 출고 (스마트랙)
@@ -188,6 +201,12 @@ class MaterialCell(DistributedIntelligenceCell):
             del self.smart_rack[cmd.part_id]
             taken = cmd.part_id
         elif from_cell is not None:
+            # Never remove another job's part or attach its quality to this one.
+            if not from_cell.output_buffer.occupied or from_cell.output_buffer.part_id != cmd.part_id:
+                self.transfer_queue.append(cmd)
+                return
+            source_quality = getattr(from_cell, "quality", None)
+            payload_quality = replace(source_quality) if isinstance(source_quality, QualityPrediction) else None
             taken = from_cell.takeout_part()
             if taken is None or taken != cmd.part_id:
                 # 아직 출력버퍼에 없음 → 큐 뒤로 보냄
@@ -199,6 +218,7 @@ class MaterialCell(DistributedIntelligenceCell):
 
         amr.busy = True
         amr.payload_part_id = taken
+        amr.payload_quality = payload_quality
         amr.from_cell = cmd.from_cell
         amr.target_cell = cmd.to_cell
         amr.transfer_command_id = cmd.command_id
@@ -227,7 +247,11 @@ class MaterialCell(DistributedIntelligenceCell):
         delivered_part = amr.payload_part_id
 
         if target is not None:
-            ok = target.receive_part(amr.payload_part_id)
+            receive_with_quality = getattr(target, "receive_part_with_quality", None)
+            if receive_with_quality is not None:
+                ok = receive_with_quality(amr.payload_part_id, amr.payload_quality)
+            else:
+                ok = target.receive_part(amr.payload_part_id)
             if not ok:
                 # 타겟 입력버퍼가 차있음 → 잠시 대기 후 재시도
                 amr.remaining_distance_m = 0.5
@@ -239,6 +263,7 @@ class MaterialCell(DistributedIntelligenceCell):
         amr.last_delivered_to = delivered_to
         amr.last_delivered_command_id = amr.transfer_command_id
         amr.payload_part_id = None
+        amr.payload_quality = None
         amr.from_cell = None
         amr.target_cell = None
         amr.transfer_command_id = None

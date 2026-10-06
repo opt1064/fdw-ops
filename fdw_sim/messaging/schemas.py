@@ -91,6 +91,9 @@ class CellStatusMessage:
     quality_prediction: QualityPrediction = field(default_factory=QualityPrediction)
     health: HealthStatus = field(default_factory=HealthStatus)
     timestamp: float = field(default_factory=time.time)
+    inspection_verdict: Optional[str] = None
+    verdict_part_id: Optional[str] = None
+    verdict_reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)

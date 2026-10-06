@@ -229,11 +229,12 @@ class WorkshopVisualizer:
             self.scene.add_robot_arm_placeholder(cell_id, color=color)
             return
 
+        robot_offset = (0.0, -0.3, self.config.cell_size[2] + 0.05)
         try:
             articulation = self.scene.add_real_robot_arm(
                 cell_id,
                 robot_name=self.config.robot_name,
-                offset=(0.0, -0.3, self.config.cell_size[2] + 0.05),
+                offset=robot_offset,
             )
         except Exception as e:
             logger.warning("[VIS] real robot load failed for %s: %s "
@@ -255,13 +256,36 @@ class WorkshopVisualizer:
                 spec = None
 
             if spec is not None:
+                from fdw_sim.visualization.robot_base_pose import (
+                    RobotBasePose, read_robot_base_pose,
+                )
+                # The loader's offset is parent-local. Prefer the composed USD
+                # or articulation world pose; use registered cell coordinates
+                # only before either live source is available.
+                cell_pos = self.cell_positions[cell_id]
+                fallback_pos = (
+                    cell_pos[0] + robot_offset[0],
+                    cell_pos[1] + robot_offset[1],
+                    cell_pos[2] + robot_offset[2] + spec.base_offset_z,
+                )
+                cell_root = self.scene.get_cell_path(cell_id)
+                base_pose = read_robot_base_pose(
+                    articulation, RobotBasePose(fallback_pos),
+                    stage=getattr(self.scene, "_stage", None),
+                    prim_path=f"{cell_root}/RobotArm" if cell_root else None,
+                )
+                base_kwargs = {
+                    "base_position": base_pose.position,
+                    "base_orientation": base_pose.orientation,
+                }
                 if self._motion_mode == "ik":
                     # 명시적 IK 모드
                     try:
                         from fdw_sim.visualization.ik_controller import (
                             IKConfig, IKController,
                         )
-                        ik_ctrl = IKController(articulation, spec, config=IKConfig())
+                        ik_ctrl = IKController(articulation, spec, config=IKConfig(),
+                                               **base_kwargs)
                         ik_ctrl.go_home()
                         logger.info("[VIS] IK controller attached to %s (robot=%s)",
                                     cell_id, self.config.robot_name)
@@ -280,6 +304,7 @@ class WorkshopVisualizer:
                             articulation,
                             spec,
                             config=RMPflowConfig(preferred_backend=backend),
+                            **base_kwargs,
                         )
                         rmp_ctrl.go_home()
                         logger.info("[VIS] RMPflow controller attached to %s "
@@ -293,7 +318,8 @@ class WorkshopVisualizer:
                             from fdw_sim.visualization.ik_controller import (
                                 IKConfig, IKController,
                             )
-                            ik_ctrl = IKController(articulation, spec, config=IKConfig())
+                            ik_ctrl = IKController(articulation, spec, config=IKConfig(),
+                                                   **base_kwargs)
                             ik_ctrl.go_home()
                         except Exception as e2:
                             logger.warning("[VIS] IK fallback also failed for %s: %s",

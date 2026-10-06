@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional
 import logging
 import time
@@ -211,13 +211,17 @@ class DistributedIntelligenceCell(ABC):
             cell_type=self.cell_type,
             state=self.fsm.state,
             current_job_id=self.current_job.job_id if self.current_job else None,
-            input_buffer=self.input_buffer,
-            output_buffer=self.output_buffer,
+            input_buffer=replace(self.input_buffer),
+            output_buffer=replace(self.output_buffer),
             estimated_remaining_time_sec=max(
                 0.0, self.cycle_time_estimate * (1.0 - self.progress)
             ),
-            quality_prediction=self.quality,
-            health=self.health,
+            quality_prediction=(replace(self.quality) if isinstance(self.quality, QualityPrediction)
+                                else QualityPrediction(score=0.0, defect_risk=1.0, confidence=0.0)),
+            health=replace(self.health),
+            inspection_verdict=getattr(self, "last_verdict", None),
+            verdict_part_id=getattr(self, "verdict_part_id", None),
+            verdict_reason=getattr(self, "last_verdict_reason", None),
         )
         self.bus.publish(Topics.CELL_STATUS, msg)
 

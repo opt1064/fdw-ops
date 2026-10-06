@@ -23,6 +23,8 @@ from typing import List, Optional, Tuple
 import logging
 import math
 
+from fdw_sim.visualization.robot_base_pose import RobotBasePose, read_robot_base_pose
+
 logger = logging.getLogger(__name__)
 
 _MOTION_GEN_EXTENSION = "isaacsim.robot_motion.motion_generation"
@@ -105,6 +107,9 @@ class _MotionBackendBase:
     def reset(self, current_q: Optional[List[float]] = None) -> None:
         pass
 
+    def set_robot_base_pose(self, pose: RobotBasePose) -> None:
+        raise NotImplementedError
+
     def set_target(self,
                    target_pos: Tuple[float, float, float],
                    warm_start_q: Optional[List[float]] = None,
@@ -137,6 +142,7 @@ class _HeuristicBackend(_MotionBackendBase):
         self.spec = spec
         self.config = config
         self.base_xy = base_xy
+        self.base_pose = RobotBasePose((*base_xy, 0.0))
         if spec and spec.home_joint_positions:
             self._home_q: List[float] = list(spec.home_joint_positions)
         else:
@@ -150,6 +156,10 @@ class _HeuristicBackend(_MotionBackendBase):
 
     def reset(self, current_q: Optional[List[float]] = None) -> None:
         pass
+
+    def set_robot_base_pose(self, pose: RobotBasePose) -> None:
+        self.base_pose = pose
+        self.base_xy = pose.position[:2]
 
     # ----------------------------------------------------------------------
     def _apply_obstacle_repulsion(
@@ -189,12 +199,8 @@ class _HeuristicBackend(_MotionBackendBase):
         if obstacles:
             target_pos = self._apply_obstacle_repulsion(target_pos, obstacles)
 
-        tx, ty, tz = target_pos
-        bx, by = self.base_xy
-
-        # 2) base yaw — atan2(dx, dy) 형태로 Franka base 회전
-        dx = tx - bx
-        dy = ty - by
+        # 2) Repulsion stays in world coordinates; joint yaw/reach are base-local.
+        dx, dy, _ = self.base_pose.to_local(target_pos)
         yaw = math.atan2(dy, dx if abs(dx) > 1e-3 else 1e-3) * 0.6
         yaw = max(-1.2, min(1.2, yaw))
 
@@ -239,6 +245,13 @@ class _LulaIKBackend(_MotionBackendBase):
         self.ee_frame = end_effector_frame
         self.config = config
 
+    def set_robot_base_pose(self, pose: RobotBasePose) -> None:
+        import numpy as np  # type: ignore
+        self._solver.set_robot_base_pose(
+            np.array(pose.position, dtype=float),
+            np.array(pose.orientation, dtype=float),
+        )
+
     def set_target(self,
                    target_pos: Tuple[float, float, float],
                    warm_start_q: Optional[List[float]] = None,
@@ -248,12 +261,12 @@ class _LulaIKBackend(_MotionBackendBase):
         pos = np.array(target_pos, dtype=float)
         # 토치가 아래를 향함
         rot = np.array((0.0, 1.0, 0.0, 0.0), dtype=float)
-        if warm_start_q is not None:
-            self._solver.set_warm_start(np.array(warm_start_q, dtype=float))
         joint_positions, success = self._solver.compute_inverse_kinematics(
             frame_name=self.ee_frame,
             target_position=pos,
             target_orientation=rot,
+            warm_start=(np.array(warm_start_q, dtype=float)
+                        if warm_start_q is not None else None),
         )
         if not success:
             return None
@@ -295,6 +308,13 @@ class _RmpFlowBackend(_MotionBackendBase):
         self.config = config
         self._obstacle_keys: dict = {}    # name -> obstacle handle
 
+    def set_robot_base_pose(self, pose: RobotBasePose) -> None:
+        import numpy as np  # type: ignore
+        self._policy.set_robot_base_pose(
+            np.array(pose.position, dtype=float),
+            np.array(pose.orientation, dtype=float),
+        )
+
     def _sync_obstacles(self, obstacles: Optional[List[CollisionSphere]]) -> None:
         if not obstacles:
             return
@@ -334,9 +354,10 @@ class _RmpFlowBackend(_MotionBackendBase):
                    ) -> Optional[List[float]]:
         import numpy as np  # type: ignore
         self._sync_obstacles(obstacles)
+        self._policy.update_world()
         self._policy.set_end_effector_target(
-            target_position=np.array(target_pos, dtype=float),
-            target_orientation=np.array([0.0, 1.0, 0.0, 0.0], dtype=float),
+            np.array(target_pos, dtype=float),
+            np.array([0.0, 1.0, 0.0, 0.0], dtype=float),
         )
         # 한 step 적용 — RMPflow는 articulation에 직접 명령을 쓰므로
         # joint position 리턴이 아니라 articulation 상태가 바뀜
@@ -445,10 +466,21 @@ class RMPflowController:
                  articulation,
                  spec,
                  base_xy: Tuple[float, float] = (5.0, 0.0),
-                 config: Optional[RMPflowConfig] = None) -> None:
+                 config: Optional[RMPflowConfig] = None,
+                 *,
+                 base_position: Optional[Tuple[float, float, float]] = None,
+                 base_orientation: Tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
+                 ) -> None:
         self.articulation = articulation
         self.spec = spec
-        self.base_xy = base_xy
+        # base_xy remains a compatible fallback for older callers. A live
+        # articulation/USD world pose takes precedence over either fallback.
+        fallback = RobotBasePose(
+            base_position if base_position is not None else (*base_xy, 0.0),
+            base_orientation,
+        )
+        self.base_pose = read_robot_base_pose(articulation, fallback)
+        self.base_xy = self.base_pose.position[:2]
         self.config = config or RMPflowConfig()
 
         # backend (lazy 초기화 — Isaac Sim 미설치 환경에서도 import는 가능해야 함)
@@ -1075,6 +1107,9 @@ class RMPflowController:
         """현재 TCP 목표 → joint positions 변환 (backend별)."""
         if self._backend is None:
             return
+        self.base_pose = read_robot_base_pose(self.articulation, self.base_pose)
+        self.base_xy = self.base_pose.position[:2]
+        self._backend.set_robot_base_pose(self.base_pose)
         q = self._backend.set_target(
             target_pos,
             warm_start_q=self._current_q,

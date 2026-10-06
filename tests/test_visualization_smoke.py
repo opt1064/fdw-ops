@@ -81,6 +81,8 @@ def test_discrete_still_runs() -> None:
                            input_capacity=1, output_capacity=1),
         bus=bus, default_cycle_time=4.0,
     )
+    # Happy-path fixture: do not silently pair an arc tool with 1500 W.
+    weld.gap_agent.predict_gap_mm = lambda _part_id: 0.2
     sim.register_material_cell(mat, location=(0, 0))
     sim.register_cell(weld, location=(5, 0))
     sim.register_cell(insp, location=(10, 0))

@@ -122,6 +122,7 @@ def build_simulation(cfg: Dict[str, Any], mode_override: str = None,
     orch_cfg = OrchestratorConfig(
         decision_period_sec=float(orch_d["decision_period_sec"]),
         material_cell_id=orch_d["material_cell_id"],
+        inspection_nonpass_disposition=orch_d.get("inspection_nonpass_disposition", "quarantine"),
         process_to_cell=dict(orch_d["process_to_cell"]),
     )
 
@@ -201,6 +202,10 @@ def print_report(sim: SimulationManager) -> None:
         print(f"   - {tr.job.job_id} (part={tr.job.part_id})  "
               f"makespan={ms:6.1f}s  route={tr.history}")
 
+    print(f"\n  Quarantined jobs (not shipped): {len(sim.orchestrator.quarantined_jobs)}")
+    for tr in sim.orchestrator.quarantined_jobs:
+        print(f"   - {tr.job.job_id} (part={tr.job.part_id})  reason={tr.disposition_reason}")
+
     print("\n  Active jobs (incomplete):")
     if not sim.orchestrator.active_jobs:
         print("    (none)")
@@ -213,7 +218,7 @@ def print_report(sim: SimulationManager) -> None:
     interesting = [
         "job_makespan_sec", "cycle_time", "quality_score",
         "quality_pass_rate", "predicted_gap_mm",
-        "amr_delivery_count", "rack_stock_count",
+        "amr_delivery_count", "rack_stock_count", "job_quarantined_count",
     ]
     for m in interesting:
         if m in summ:
