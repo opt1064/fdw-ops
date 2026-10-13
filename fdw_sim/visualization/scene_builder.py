@@ -136,7 +136,7 @@ class SceneBuilder:
     # ========================================================================
     def add_ground_plane(self, size: float = 50.0,
                          center: Tuple[float, float, float] = (0.0, 0.0, 0.0)) -> str:
-        """간단한 그라운드 플레인 (Isaac Lab의 기본 ground와는 별개).
+        """렌더링용 바닥 mesh (Isaac의 충돌용 ground와는 별개).
 
         Args:
             center: 플레인 중심 world 좌표. 기본은 원점이지만, 셀 배치가
@@ -145,10 +145,20 @@ class SceneBuilder:
                 되므로 건물 중심으로 옮겨줘야 한다.
         """
         path = f"{self.config.root_prim_path}/Ground"
-        plane = self._UsdGeom.Plane.Define(self._stage, path)
-        plane.CreateAxisAttr("Z")
-        plane.CreateLengthAttr(size)
-        plane.CreateWidthAttr(size)
+        # UsdGeom.Plane is not supported by Hydra rendering. Use a real quad
+        # for the visible floor; the World ground supplies collision physics.
+        plane = self._UsdGeom.Mesh.Define(self._stage, path)
+        half = size / 2.0
+        plane.CreatePointsAttr([
+            self._Gf.Vec3f(-half, -half, 0.0),
+            self._Gf.Vec3f(half, -half, 0.0),
+            self._Gf.Vec3f(half, half, 0.0),
+            self._Gf.Vec3f(-half, half, 0.0),
+        ])
+        plane.CreateFaceVertexCountsAttr([4])
+        plane.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+        plane.CreateSubdivisionSchemeAttr(self._UsdGeom.Tokens.none)
+        plane.CreateDoubleSidedAttr(True)
         if center != (0.0, 0.0, 0.0):
             self._set_translate(path, center)
         self._set_color(path, self.config.ground_color)

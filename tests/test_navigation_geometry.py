@@ -46,6 +46,26 @@ def _rect(obstacle):
     return (obstacle.xmin, obstacle.xmax, obstacle.ymin, obstacle.ymax)
 
 
+def test_visible_ground_is_a_renderable_quad_with_dark_material():
+    scene = _builder()
+    from pxr import Usd, UsdGeom, UsdShade
+    path = scene.add_ground_plane(size=44.1, center=(18.05, 6.2, 0.0))
+    prim = scene._stage.GetPrimAtPath(path)
+    assert prim.IsA(UsdGeom.Mesh)
+    mesh = UsdGeom.Mesh(prim)
+    assert list(mesh.GetFaceVertexCountsAttr().Get()) == [4]
+    assert list(mesh.GetFaceVertexIndicesAttr().Get()) == [0, 1, 2, 3]
+    assert mesh.GetSubdivisionSchemeAttr().Get() == UsdGeom.Tokens.none
+    bounds = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+    extent = bounds.ComputeWorldBound(prim).ComputeAlignedRange()
+    assert tuple(extent.GetMin()) == pytest.approx((-4.0, -15.85, 0.0), abs=1e-5)
+    assert tuple(extent.GetMax()) == pytest.approx((40.1, 28.25, 0.0), abs=1e-5)
+    material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+    assert material
+    shader = UsdShade.Shader(scene._stage.GetPrimAtPath(str(material.GetPath()) + "/PreviewSurface"))
+    assert tuple(shader.GetInput("diffuseColor").Get()) == pytest.approx((0.22, 0.22, 0.22))
+
+
 def _by_suffix(navmap, suffix):
     matches = [o for o in navmap.obstacles if o.obstacle_id.endswith(suffix)]
     assert len(matches) == 1, [o.obstacle_id for o in navmap.obstacles]

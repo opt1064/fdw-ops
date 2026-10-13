@@ -361,7 +361,11 @@ class SimulationManager:
             physics_dt=self._dt,
             rendering_dt=self._dt,
         )
-        self._isaac_world.scene.add_default_ground_plane()
+        ground = self._isaac_world.scene.add_default_ground_plane()
+        if self.config.enable_visualization:
+            # Keep its collider, but display the FDW floor material instead of
+            # the default grid. USD visibility does not disable collisions.
+            ground.set_visibility(False)
         self._isaac_world.reset()
 
         # 2.5) World 생성 후에도 한 번 더 적용 (일부 키는 reset에서 덮어쓰임)
