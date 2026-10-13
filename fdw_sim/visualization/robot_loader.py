@@ -129,17 +129,14 @@ ROBOT_CATALOG: Dict[str, RobotSpec] = {
     #    configuration/{crx10ia_base,crx10ia_physics,crx10ia_sensor}.usd
     #    variant 파일들도 존재하나, 카탈로그는 최상위 crx10ia.usd(기본 조합)를
     #    사용한다.
-    # ⚠️ end_effector_frame="tool0"은 여전히 미검증 추정치다. 실제 USD는
-    #    바이너리 crate 포맷이라 strings로 조인트/링크 이름을 완전히 확인하지
-    #    못했고("J2_link" 등 일부만 확인됨 — ROS-Industrial의 joint_N이 아니라
-    #    J1..J6/JN_link 명명 규칙으로 보인다), 정확한 end-effector 프레임
-    #    이름은 Isaac Sim에서 실제 로드된 스테이지의 prim 트리를 직접 열어
-    #    확인해야 한다. 틀려도 렌더링 자체(로봇 메쉬 표시)에는 영향 없고,
-    #    IK/RMPflow가 그 프레임을 못 찾으면 그냥 heuristic으로 fallback한다.
+    # 2026-10-13 사용자 Isaac 6.1 진단: J1~J6 피드백과 USD 관절 이름 일치.
+    # tool0는 없고, J6_link/flange/ee_link가 실제 말단 링크로 존재한다.
+    # 이는 USD 링크 이름 확인이며 그리퍼 TCP 보정이나 Lula 모델 일치의
+    # 증거는 아니다. 물리 파지 검증 전에는 verified 어댑터로 표시하지 않는다.
     "fanuc_crx10ia": RobotSpec(
         name="fanuc_crx10ia",
         usd_subpath="Isaac/Robots/Fanuc/crx10ia/crx10ia.usd",
-        end_effector_frame="tool0",
+        end_effector_frame="ee_link",
         # ❌ UR10 elbow-up 자세[0,-1.57,1.57,-1.57,-1.57,0]를 재사용했었으나
         # 2026-09-28 DGX Spark 실측 스크린샷에서 팔이 가느다란 수직 막대처럼
         # 접혀버리는 것을 확인 — CRX-10iA의 joint zero 기준이 UR10과 달라
@@ -150,8 +147,8 @@ ROBOT_CATALOG: Dict[str, RobotSpec] = {
         home_joint_positions=[],
         base_offset_z=0.0,
         description="FANUC CRX-10iA 6-DOF collaborative arm (welding cell) "
-                    "— USD 경로 확인됨(2026-09-28), end_effector_frame과 "
-                    "home_joint_positions은 여전히 미검증(현재는 강제 안 함). "
+                    "— USD 말단 ee_link 확인됨(2026-10-13), TCP 보정·Lula 매칭과 "
+                    "home_joint_positions은 미검증(홈 자세 강제 안 함). "
                     "FDW_FANUC_CRX10IA_USD로 override 가능",
     ),
 }
@@ -324,8 +321,9 @@ class RobotLoader:
         Args:
             robot_name: ROBOT_CATALOG의 key
             prim_path: USD 스테이지 내 절대 prim 경로
-            position: 월드 좌표 (x, y, z)
-            orientation_deg_z: Z축 회전 (도)
+            position: 부모 prim 기준 로컬 좌표 (x, y, z). 부모가 identity일
+                때만 월드 좌표와 같다. base_offset_z는 이 로컬 Z에 더한다.
+            orientation_deg_z: 부모 prim 기준 로컬 Z축 회전 (도)
 
         Returns:
             isaacsim.core.prims.SingleArticulation 객체 (5.x) 또는 None

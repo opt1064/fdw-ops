@@ -40,7 +40,7 @@ class TestRobotLoaderImport(unittest.TestCase):
 
         crx = ROBOT_CATALOG["fanuc_crx10ia"]
         self.assertIsInstance(crx, RobotSpec)
-        self.assertEqual(crx.end_effector_frame, "tool0")
+        self.assertEqual(crx.end_effector_frame, "ee_link")
         # home_joint_positions은 의도적으로 비워둠 — UR10 elbow-up 값을
         # 재사용했다가 실측(2026-09-28)에서 팔이 얇은 수직 막대로 접히는
         # 것을 확인해 제거함. go_home()이 no-op이 되어 로봇 자체 USD의

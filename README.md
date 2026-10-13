@@ -1,5 +1,9 @@
 # FDW-OPS Virtual Workshop
 
+> 정적 랙·설비 경로 검사 추가: [정적 관통 방지와 검증 범위](docs/STATIC_NAVIGATION_KO.md). 실제 USD 경계 기반 경로 및 도크 검사이며 Isaac GUI/접촉 검증은 별도입니다.
+
+> **2026-10-06 동작/검증 범위 정정:** 아래의 과거 GUI 동작 기록은 실제 파지·TCP 도달·충돌 안전 검증을 뜻하지 않습니다. 현재 기본 verified 모드는 검증된 파지 어댑터가 없으면 픽업을 보류합니다. 운영 데모는 명시적 `--motion-execution schematic`을 사용하며 실제 팔 집기/용접으로 표현하지 않습니다. [AMR·공정 동기화와 검증 한계](docs/MOTION_COORDINATION_KO.md)를 먼저 확인하세요.
+
 > **Isaac Sim 기반 분산지능 셀 시뮬레이터** — 시뮬레이션은 DGX Spark, 실시간 제어(HIL)는 AGX Thor
 >
 > **DGX Spark**(GB10 Grace Blackwell, RT 코어 탑재 — Isaac Sim 공식 지원 플랫폼)가
@@ -44,7 +48,7 @@ ROS 2 / DDS 등 미들웨어를 통해 전체 공정을 운영하는 구조를 �
 | **2.1. 실 로봇팔 + IK** | FANUC CRX-10iA(용접 셀 기본) / Franka Panda / UR10 USD 모델 + IK로 토치가 부품 추적 | Isaac Sim 5.x/6.x | ✅ 구현 완료 |
 | **2.2. RMPflow + 스파크** | RMPflow 충돌회피 3-tier 폴백(rmpflow→ik→heuristic) + 용접 스파크 파티클 | Isaac Sim 5.x/6.x | ✅ 구현 완료 |
 | **2.3. 실 USD 자산** | AMR(MiR100/NovaCarter 등)·Smart Rack·검사 카메라를 placeholder 대신 실 USD로 | Isaac Sim 5.x/6.x | ✅ 구현 완료 |
-| **2.4. AMR 실주행 + Pick-and-place** | AMR이 부품을 싣고 실제로 주행, 도착하면 로봇팔이 집어 작업대에 올린 뒤 용접 시작 | Isaac Sim 5.x/6.x | ✅ 구현 완료 |
+| **2.4. AMR 이동 + 공정 게이트** | 연속 위치·도크/통로 점유·명령별 배치/완료 게이트. schematic은 논리 데모, verified 물리 픽업은 검증된 어댑터까지 보류 | Isaac Sim 5.x/6.x | CPU 회귀 통과 / GUI 재검증 필요 |
 | **3. AI / Learning-in-the-loop** | RL 라우팅 / 합성데이터 / 자율복구 | Isaac Lab + SDG | 🔭 다음 단계 |
 
 ## 디렉토리 구조

@@ -1,20 +1,8 @@
-"""RMPflowController — Reactive Motion Policy(RMP)flow 기반 충돌회피 모션 컨트롤러.
+"""RMPflow/Lula controller with explicit, conservative motion evidence.
 
-Level 2.2의 핵심: Level 2.1의 IKController가 단순 joint 보간만 했다면,
-이 컨트롤러는 다음 3가지 motion backend를 지원한다.
-
-    1) "rmpflow"  — NVIDIA Lula RMPflow (정식 구현, robot description 필요)
-    2) "ik"       — 기존 Lula IK + joint 보간 (Level 2.1 호환)
-    3) "heuristic"— collision-sphere 회피 + ±법선 보정 (의존성 0, 항상 동작)
-
-용접 셀에서 토치가 부품 위 경로를 따라 움직이되, 부품/벤치/이웃 셀과
-충돌하지 않도록 동적으로 궤적을 조정한다.
-
-설계 원칙:
-- IKController와 동일한 외부 인터페이스 유지 (start_path/update/go_home/is_idle)
-- backend 선택은 lazy — Isaac Sim 런타임에서 RMP config가 발견되지 않으면
-  자동으로 heuristic으로 fallback
-- 충돌 obstacle은 add_obstacle(center, radius)로 외부 등록 가능
+The heuristic fallback is an UNVERIFIED POSTURE DEMO, not accurate IK, grasp,
+or collision validation. Never infer physical transfer from the planned TCP.
+Neither current controller provides verified gripper/contact integration.
 """
 from __future__ import annotations
 
@@ -22,6 +10,9 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 import logging
 import math
+
+from fdw_sim.visualization.ik_controller import _MotionTruthMixin
+from fdw_sim.visualization.robot_base_pose import RobotBasePose, read_robot_base_pose
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +96,9 @@ class _MotionBackendBase:
     def reset(self, current_q: Optional[List[float]] = None) -> None:
         pass
 
+    def set_robot_base_pose(self, pose: RobotBasePose) -> None:
+        raise NotImplementedError
+
     def set_target(self,
                    target_pos: Tuple[float, float, float],
                    warm_start_q: Optional[List[float]] = None,
@@ -123,33 +117,25 @@ class _HeuristicBackend(_MotionBackendBase):
     """
     name = "heuristic"
 
-    # spec에 검증된 home_joint_positions이 없는 로봇(예: fanuc_crx10ia —
-    # UR10 자세를 재사용했다가 실측에서 팔이 접히는 걸 확인하고 비워둔
-    # 상태, robot_loader.py 참고)을 위한 최후 폴백 기준 벡터. go_home()이
-    # 실제로 커맨드하는 값이 아니라, 이 heuristic이 yaw/shoulder/elbow
-    # 오프셋을 "더하는" 기준점일 뿐이라 부정확해도 로봇이 안 움직이는 것
-    # 보다 훨씬 낫다 — 완전히 편 자세(전부 0)보다 살짝 굽혀서 특이점에서
-    # 떨어뜨려 놓는다.
-    _GENERIC_6DOF_FALLBACK_Q: List[float] = [0.0, -0.5, 0.8, -0.3, 0.0, 0.0]
-
     def __init__(self, spec, config: RMPflowConfig,
                  base_xy: Tuple[float, float] = (5.0, 0.0)) -> None:
         self.spec = spec
         self.config = config
         self.base_xy = base_xy
-        if spec and spec.home_joint_positions:
-            self._home_q: List[float] = list(spec.home_joint_positions)
-        else:
-            self._home_q = list(self._GENERIC_6DOF_FALLBACK_Q)
-            logger.warning(
-                "[RMP] heuristic backend: %s에 검증된 home_joint_positions이 "
-                "없어 범용 6-DOF 폴백 자세를 기준점으로 사용합니다 — 실제 "
-                "로봇의 joint 배치와 다를 수 있어 동작이 부자연스러울 수 "
-                "있음(그래도 완전히 멈춰있는 것보다는 나음).",
-                spec.name if spec else "?")
+        self.base_pose = RobotBasePose((*base_xy, 0.0))
+        self._home_q = list(getattr(spec, "home_joint_positions", []) or [])
+        if not self._home_q:
+            logger.warning("[RMP] No validated reference configuration for %s; "
+                           "heuristic requires measured joints and remains an unverified demo.",
+                           getattr(spec, "name", "unknown"))
 
     def reset(self, current_q: Optional[List[float]] = None) -> None:
-        pass
+        if current_q is not None:
+            self._home_q = list(current_q)
+
+    def set_robot_base_pose(self, pose: RobotBasePose) -> None:
+        self.base_pose = pose
+        self.base_xy = pose.position[:2]
 
     # ----------------------------------------------------------------------
     def _apply_obstacle_repulsion(
@@ -189,12 +175,8 @@ class _HeuristicBackend(_MotionBackendBase):
         if obstacles:
             target_pos = self._apply_obstacle_repulsion(target_pos, obstacles)
 
-        tx, ty, tz = target_pos
-        bx, by = self.base_xy
-
-        # 2) base yaw — atan2(dx, dy) 형태로 Franka base 회전
-        dx = tx - bx
-        dy = ty - by
+        # 2) Repulsion stays in world coordinates; joint yaw/reach are base-local.
+        dx, dy, _ = self.base_pose.to_local(target_pos)
         yaw = math.atan2(dy, dx if abs(dx) > 1e-3 else 1e-3) * 0.6
         yaw = max(-1.2, min(1.2, yaw))
 
@@ -239,6 +221,13 @@ class _LulaIKBackend(_MotionBackendBase):
         self.ee_frame = end_effector_frame
         self.config = config
 
+    def set_robot_base_pose(self, pose: RobotBasePose) -> None:
+        import numpy as np  # type: ignore
+        self._solver.set_robot_base_pose(
+            np.array(pose.position, dtype=float),
+            np.array(pose.orientation, dtype=float),
+        )
+
     def set_target(self,
                    target_pos: Tuple[float, float, float],
                    warm_start_q: Optional[List[float]] = None,
@@ -248,12 +237,12 @@ class _LulaIKBackend(_MotionBackendBase):
         pos = np.array(target_pos, dtype=float)
         # 토치가 아래를 향함
         rot = np.array((0.0, 1.0, 0.0, 0.0), dtype=float)
-        if warm_start_q is not None:
-            self._solver.set_warm_start(np.array(warm_start_q, dtype=float))
         joint_positions, success = self._solver.compute_inverse_kinematics(
             frame_name=self.ee_frame,
             target_position=pos,
             target_orientation=rot,
+            warm_start=(np.array(warm_start_q, dtype=float)
+                        if warm_start_q is not None else None),
         )
         if not success:
             return None
@@ -295,6 +284,13 @@ class _RmpFlowBackend(_MotionBackendBase):
         self.config = config
         self._obstacle_keys: dict = {}    # name -> obstacle handle
 
+    def set_robot_base_pose(self, pose: RobotBasePose) -> None:
+        import numpy as np  # type: ignore
+        self._policy.set_robot_base_pose(
+            np.array(pose.position, dtype=float),
+            np.array(pose.orientation, dtype=float),
+        )
+
     def _sync_obstacles(self, obstacles: Optional[List[CollisionSphere]]) -> None:
         if not obstacles:
             return
@@ -334,9 +330,10 @@ class _RmpFlowBackend(_MotionBackendBase):
                    ) -> Optional[List[float]]:
         import numpy as np  # type: ignore
         self._sync_obstacles(obstacles)
+        self._policy.update_world()
         self._policy.set_end_effector_target(
-            target_position=np.array(target_pos, dtype=float),
-            target_orientation=np.array([0.0, 1.0, 0.0, 0.0], dtype=float),
+            np.array(target_pos, dtype=float),
+            np.array([0.0, 1.0, 0.0, 0.0], dtype=float),
         )
         # 한 step 적용 — RMPflow는 articulation에 직접 명령을 쓰므로
         # joint position 리턴이 아니라 articulation 상태가 바뀜
@@ -421,7 +418,7 @@ class _PathState:
 # =============================================================================
 # RMPflowController — 외부 API (IKController와 호환)
 # =============================================================================
-class RMPflowController:
+class RMPflowController(_MotionTruthMixin):
     """충돌회피 reactive motion controller.
 
     사용 예 (Level 2.2):
@@ -445,10 +442,21 @@ class RMPflowController:
                  articulation,
                  spec,
                  base_xy: Tuple[float, float] = (5.0, 0.0),
-                 config: Optional[RMPflowConfig] = None) -> None:
+                 config: Optional[RMPflowConfig] = None,
+                 *,
+                 base_position: Optional[Tuple[float, float, float]] = None,
+                 base_orientation: Tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
+                 ) -> None:
         self.articulation = articulation
         self.spec = spec
-        self.base_xy = base_xy
+        # base_xy remains a compatible fallback for older callers. A live
+        # articulation/USD world pose takes precedence over either fallback.
+        fallback = RobotBasePose(
+            base_position if base_position is not None else (*base_xy, 0.0),
+            base_orientation,
+        )
+        self.base_pose = read_robot_base_pose(articulation, fallback)
+        self.base_xy = self.base_pose.position[:2]
         self.config = config or RMPflowConfig()
 
         # backend (lazy 초기화 — Isaac Sim 미설치 환경에서도 import는 가능해야 함)
@@ -469,16 +477,7 @@ class RMPflowController:
         self._last_tcp: Optional[Tuple[float, float, float]] = None
         self._last_phase: str = "idle"
 
-        # _apply_joints 실패/무동작 케이스 최초 1회 경고용 플래그
-        self._warned_no_articulation: bool = False
-        self._warned_no_apply_method: bool = False
-        self._warned_apply_exception: bool = False
-        self._warned_backend_none_q: bool = False
-        # 2026-09-28 DGX Spark: joint 명령이 API 레벨에선 에러 없이 "성공"하는데
-        # 실제 렌더된 로봇은 프레임 처음부터 끝까지 그대로인 사례가 실측됨 —
-        # 커맨드된 값과 articulation에서 되읽은 실제 값을 비교해 명령이
-        # 물리 시뮬레이션에 실제로 반영되는지 첫 몇 번만 INFO로 확인한다.
-        self._apply_diag_count: int = 0
+        self._init_motion_truth()
 
     # ------------------------------------------------------------------
     # backend 선택 — 처음 update 호출 시 결정
@@ -512,11 +511,12 @@ class RMPflowController:
                 logger.warning("[RMP] preferred_backend=ik but solver unavailable "
                                "— falling back to heuristic")
 
-        # 3) Heuristic 항상 동작
+        # 3) Unverified posture demo; unavailable reference/feedback fails closed.
         self._backend = _HeuristicBackend(self.spec, self.config,
                                            base_xy=self.base_xy)
-        logger.info("[RMP] backend = heuristic "
-                    "(no Isaac motion-policy deps; uses collision-sphere repulsion)")
+        self._backend.reset(self._read_measured_joints())
+        logger.warning("[RMP] backend = heuristic: UNVERIFIED POSTURE DEMO; "
+                       "no accurate IK, grasp, or collision-safety guarantee")
 
     def _try_init_rmpflow(self) -> Optional[_MotionBackendBase]:
         """isaacsim.robot_motion.motion_generation.RmpFlow 시도.
@@ -832,6 +832,7 @@ class RMPflowController:
                    end: Tuple[float, float, float],
                    travel_time_sec: float = 8.0,
                    approach_height: float = 0.1) -> None:
+        self._begin_motion()
         self._active_path = _PathState(
             start=start, end=end,
             travel_time_sec=travel_time_sec,
@@ -841,26 +842,30 @@ class RMPflowController:
         self._last_phase = "approach"
 
     def go_home(self) -> None:
-        if not self.spec or not self.spec.home_joint_positions:
+        self._active_path = None
+        self._begin_motion()
+        home = getattr(self.spec, "home_joint_positions", None)
+        if not home:
+            self._fail_motion("validated_home_configuration_unavailable")
             return
-        self._set_target_joints(self.spec.home_joint_positions,
-                                blend_time=self.config.home_blend_time)
-        self._last_phase = "home"
+        if self._set_target_joints(home, blend_time=self.config.home_blend_time):
+            self._last_phase = "home"
 
     def is_idle(self) -> bool:
-        return self._active_path is None and self._blend_remaining <= 0.0
+        return self._active_path is None and not self._completion_pending and self._blend_remaining <= 0.0
 
     def get_phase(self) -> str:
+        if self._motion_status in ("failed", "unverified"):
+            return self._motion_status
         if self._active_path is not None:
             return self._active_path.phase
-        return self._last_phase
+        return "settling" if self._completion_pending else ("idle" if self.is_idle() else self._last_phase)
 
     def get_tcp_position(self) -> Optional[Tuple[float, float, float]]:
-        """현재 추적 중인 TCP(엔드이펙터) 월드 위치 — spark emitter용.
+        """Legacy display position, possibly a planned target when FK is absent.
 
-        가능하면 articulation의 실제 FK 결과(`_read_actual_tcp_from_articulation`)를
-        반영한 위치이며, FK를 읽을 수 없는 환경(테스트, USD 로드 실패)에서는
-        커맨드된 target 위치로 fallback 한다.
+        Never use this value as evidence of reach, attachment, or grasp. Use
+        get_measured_tcp_position() and motion status for feedback checks.
         """
         return self._last_tcp
 
@@ -872,12 +877,10 @@ class RMPflowController:
                (`get_link_world_pose` / `get_world_pose` on `end_effector` 핸들)
             2) USD stage에서 `<robot_prim>/<end_effector_frame>` 의 xform을
                XformCache로 읽기
-            3) 위 두 가지가 모두 실패하면 None (호출자가 target_pos로 fallback)
+            3) Neither source is available: None, never the commanded target.
 
-        주의:
-            - 동작은 모두 best-effort. 예외가 나도 절대 위로 던지지 않는다.
-            - heuristic 백엔드는 실제 IK가 아니므로, 이 함수가 None을 반환하면
-              spark emitter는 "이상적인 target" 좌표에 붙게 된다 (기존 동작).
+        The legacy display getter may retain a planned point, but the measured
+        getter always preserves this missing-feedback result.
         """
         art = getattr(self, "articulation", None)
         if art is None:
@@ -931,12 +934,10 @@ class RMPflowController:
             # 보통 (pos, orient) tuple
             candidate = pose_result
             if isinstance(pose_result, (tuple, list)) and len(pose_result) >= 1:
-                candidate = pose_result[0]
-            # numpy array / list / Gf.Vec3*
-            x = float(candidate[0])
-            y = float(candidate[1])
-            z = float(candidate[2])
-            return (x, y, z)
+                direct = self._finite_vector(pose_result, 3)
+                candidate = direct if direct is not None else pose_result[0]
+            position = self._finite_vector(candidate, 3)
+            return tuple(position) if position is not None else None
         except Exception:
             return None
 
@@ -1031,144 +1032,26 @@ class RMPflowController:
     # 매 step 호출
     # ------------------------------------------------------------------
     def update(self, dt: float) -> Optional[Tuple[float, float, float]]:
-        self._ensure_backend()
+        return self._update_motion(dt)
 
-        target_pos: Optional[Tuple[float, float, float]] = None
-
-        if self._active_path is not None:
-            target_pos = self._active_path.update(dt)
-            # 우선 commanded target으로 fallback 값을 채워둔다 — FK가 실패해도
-            # spark emitter가 None TCP로 끊기지 않도록.
-            self._last_tcp = target_pos
-            if not self._active_path.is_active():
-                self._active_path = None
-                self.go_home()
-            else:
-                self._track_target(target_pos)
-                # joint를 갱신한 뒤(=실제 articulation pose가 업데이트된 뒤)
-                # end-effector의 실제 월드 좌표를 FK로 읽어 _last_tcp를 덮어쓴다.
-                actual = self._read_actual_tcp_from_articulation()
-                if actual is not None:
-                    self._last_tcp = actual
-
-        # joint 보간 진행
-        if self._blend_remaining > 0.0 and self._target_q is not None:
-            self._blend_remaining = max(0.0, self._blend_remaining - dt)
-            if self._current_q is None:
-                self._current_q = list(self._target_q)
-            else:
-                k = 1.0 - (self._blend_remaining / self._blend_total)
-                k = max(0.0, min(1.0, k))
-                # smoothstep
-                k = k * k * (3.0 - 2.0 * k)
-                n = min(len(self._current_q), len(self._target_q))
-                for i in range(n):
-                    self._current_q[i] = (
-                        self._current_q[i] * (1.0 - k)
-                        + self._target_q[i] * k
-                    )
-            self._apply_joints(self._current_q)
-
-        return target_pos
-
-    def _track_target(self, target_pos: Tuple[float, float, float]) -> None:
-        """현재 TCP 목표 → joint positions 변환 (backend별)."""
+    def _track_target(self, target_pos: Tuple[float, float, float]) -> bool:
+        """A missing solution is a terminal failure, never successful idleness."""
         if self._backend is None:
-            return
-        q = self._backend.set_target(
-            target_pos,
-            warm_start_q=self._current_q,
-            obstacles=self._obstacles,
-        )
-        if q is None:
-            if not self._warned_backend_none_q:
-                self._warned_backend_none_q = True
-                logger.warning("[RMP] backend(%s).set_target()이 None 반환 — "
-                               "joint 명령이 계산조차 안 되고 있음(최초 1회만 경고)",
-                               getattr(self._backend, "name", type(self._backend).__name__))
-            return
-        self._set_target_joints(q, blend_time=self.config.waypoint_blend_time)
-
-    def _set_target_joints(self, q: List[float], blend_time: float) -> None:
-        self._target_q = list(q)
-        self._blend_total = max(1e-3, blend_time)
-        self._blend_remaining = self._blend_total
-        if self._current_q is None:
-            self._current_q = list(q)
-
-    def _apply_joints(self, q: List[float]) -> None:
-        """Articulation에 joint 적용 — IKController와 동일 로직.
-
-        ⚠️ 2026-09-28 DGX Spark 실측으로 확인된 근본 원인: set_joint_positions()
-        만으로는 "순간이동(kinematic)"만 될 뿐, 그 관절에 물리 PD 드라이브가
-        붙어있으면 다음 physics step에서 바로 원래(안 바뀐) 드라이브 타겟으로
-        되돌아가 버린다 — 로그는 "pick-and-place started/finished"까지 전부
-        정상인데 실측 영상에선 로봇이 AMR 도킹 전 구간 동안 한 프레임도 안
-        움직인 게 바로 이것 때문이었다(WARNING 승격 후에도 예외/None 케이스가
-        전혀 안 찍혔다 — 즉 set_joint_positions() 호출 자체는 에러 없이
-        "성공"하고 있었음). set_joint_position_targets()(드라이브 타겟)를
-        같이/우선 호출해야 물리 스텝이 지나가도 그 자세를 유지한다.
-        """
-        if self.articulation is None:
-            if not self._warned_no_articulation:
-                self._warned_no_articulation = True
-                logger.warning("[RMP] _apply_joints: self.articulation is None — "
-                               "joint 명령이 전혀 적용되지 않고 있음")
-            return
+            self._fail_motion("motion_backend_unavailable")
+            return False
+        self.base_pose = read_robot_base_pose(self.articulation, self.base_pose)
+        self.base_xy = self.base_pose.position[:2]
         try:
-            import numpy as np  # type: ignore
-            arr = np.array(q, dtype=float)
-            applied = False
-
-            # 1) 순간이동 — 블렌드 중간값을 지연 없이 바로 반영(선택적, 실패해도 무방)
-            if hasattr(self.articulation, "set_joint_positions"):
-                try:
-                    self.articulation.set_joint_positions(arr)
-                except Exception as e:
-                    logger.debug("[RMP] set_joint_positions failed: %s", e)
-
-            # 2) 드라이브 타겟 — 이게 실제로 물리 스텝을 버텨내는 핵심.
-            #    없으면 안 움직이는 것과 마찬가지이므로 반드시 시도한다.
-            if hasattr(self.articulation, "set_joint_position_targets"):
-                self.articulation.set_joint_position_targets(arr)
-                applied = True
-            elif hasattr(self.articulation, "apply_action"):
-                from isaacsim.core.utils.types import ArticulationAction  # type: ignore
-                self.articulation.apply_action(
-                    ArticulationAction(joint_positions=arr))
-                applied = True
-            elif hasattr(self.articulation, "set_joint_positions"):
-                # 최후 폴백 — 드라이브가 없는 articulation이면 이걸로도 충분
-                applied = True
-
-            if not applied and not self._warned_no_apply_method:
-                self._warned_no_apply_method = True
-                logger.warning(
-                    "[RMP] _apply_joints: articulation(%s)에 "
-                    "set_joint_position_targets/apply_action/set_joint_positions"
-                    "이 전부 없어 joint 명령이 전혀 적용되지 않고 있음",
-                    type(self.articulation).__name__)
-
-            # 커맨드가 실제로 물리 시뮬레이션에 반영되는지 첫 5회만 readback해서
-            # 확인 — API 호출은 성공("applied=True")했는데 실제 articulation이
-            # 그대로인 경우(예: initialize()는 됐지만 physics view가 아직 이
-            # 인스턴스에 안 붙어있는 경우)를 구분하기 위함.
-            if applied and self._apply_diag_count < 5:
-                self._apply_diag_count += 1
-                try:
-                    getter = getattr(self.articulation, "get_joint_positions", None)
-                    actual = getter() if callable(getter) else None
-                except Exception as e:
-                    actual = f"<readback failed: {type(e).__name__}: {e}>"
-                logger.info("[RMP] _apply_joints diag #%d: commanded=%s actual(readback)=%s",
-                           self._apply_diag_count, list(np.round(arr, 3)), actual)
-        except Exception as e:
-            if not self._warned_apply_exception:
-                self._warned_apply_exception = True
-                logger.warning("[RMP] _apply_joints: joint 적용 실패(최초 1회만 "
-                               "경고, 이후는 debug로만) — %s: %s",
-                               type(e).__name__, e)
-            logger.debug("[RMP] joint apply failed: %s", e)
+            self._backend.set_robot_base_pose(self.base_pose)
+            q = self._backend.set_target(
+                target_pos, warm_start_q=(self._current_q if self._current_q is not None else self._target_q), obstacles=self._obstacles)
+        except Exception as exc:
+            self._fail_motion(f"motion_solver_error: {exc}")
+            return False
+        if q is None:
+            self._fail_motion("motion_solver_no_solution")
+            return False
+        return self._set_target_joints(q, self.config.waypoint_blend_time)
 
     # ------------------------------------------------------------------
     # 디버깅
@@ -1188,4 +1071,9 @@ class RMPflowController:
             "active_path": self._active_path is not None,
             "phase": self.get_phase(),
             "last_tcp": self._last_tcp,
+            "commanded_tcp": self._commanded_tcp,
+            "measured_tcp": self.get_measured_tcp_position(),
+            "motion_status": self.get_motion_status(),
+            "motion_failure": self.get_motion_failure(),
+            "supports_physical_manipulation": False,
         }

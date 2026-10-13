@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 import logging
+import math
 import random
 
 from fdw_sim.cells.base.cell_base import (
@@ -111,26 +112,40 @@ class WeldingCell(DistributedIntelligenceCell):
     def on_command(self, command: DispatchCommand) -> bool:
         op = command.operation
         if op == "START_WELDING":
-            if not self.input_buffer.occupied:
-                logger.warning("[%s] cannot START_WELDING: input buffer empty", self.cell_id)
+            if not self.is_part_ready(self.input_buffer.part_id):
+                logger.warning("[%s] cannot START_WELDING: input is not placed and ready", self.cell_id)
+                return False
+            if ((self.motion_required and not command.part_id)
+                    or (command.part_id is not None
+                        and command.part_id != self.input_buffer.part_id)):
                 return False
             if self.output_buffer.occupied:
                 logger.warning("[%s] cannot START_WELDING: output buffer full", self.cell_id)
                 return False
 
-            recipe = command.recipe or {}
+            recipe = dict(command.recipe or {})
+            try:
+                speed = float(recipe.get("speed", 0.10))
+                length_mm = float(recipe.get("path_length_mm", 200.0))
+                power = recipe.get("power")
+                if power is not None:
+                    power = float(power)
+                if (not all(math.isfinite(v) and v > 0.0 for v in (speed, length_mm))
+                        or (power is not None and (not math.isfinite(power) or power <= 0.0))
+                        or recipe.get("tool") not in (None, "laser", "arc")):
+                    return False
+            except (TypeError, ValueError):
+                return False
             # 1) Gap 예측
             self.predicted_gap_mm = self.gap_agent.predict_gap_mm(self.input_buffer.part_id)
             # 2) Tool 선택 (recipe에서 강제 지정 시 우선)
             self.active_tool = recipe.get("tool") or self.tool_agent.select(self.predicted_gap_mm)
             # 3) 사이클 타임 결정 (속도/길이 기반 단순화)
-            speed = float(recipe.get("speed", 0.10))
-            length_mm = float(recipe.get("path_length_mm", 200.0))
             self.cycle_time_estimate = max(5.0, length_mm / 1000.0 / max(speed, 1e-3))
             self.active_recipe = {
                 "tool": self.active_tool,
                 "speed": speed,
-                "power": float(recipe.get("power", 1500.0 if self.active_tool == "laser" else 220.0)),
+                "power": power if power is not None else 1500.0 if self.active_tool == "laser" else 220.0,
                 "path_length_mm": length_mm,
                 "predicted_gap_mm": self.predicted_gap_mm,
             }
@@ -153,6 +168,25 @@ class WeldingCell(DistributedIntelligenceCell):
 
         return False
 
+    def get_process_motion_spec(self) -> Optional[Dict[str, Any]]:
+        """Return the locked recipe and identity for the active robot path.
+
+        Consumers must key their work by command_id/part_id and acknowledge
+        completion through confirm_process_motion. No separate visual duration
+        or cell-wide PROCESSING edge may create an additional welding path.
+        """
+        if self.current_command is None or self.fsm.state != CellState.PROCESSING:
+            return None
+        return {
+            "command_id": self.current_command.command_id,
+            "part_id": self.input_buffer.part_id,
+            "operation": self.current_command.operation,
+            "travel_time_sec": self.cycle_time_estimate,
+            "recipe": dict(self.active_recipe),
+            "motion_required": self.motion_required,
+            "motion_complete": self._process_motion_complete,
+        }
+
     # =========================================================================
     # PROCESSING 진행
     # =========================================================================
@@ -160,7 +194,7 @@ class WeldingCell(DistributedIntelligenceCell):
         if self.cycle_time_estimate <= 0:
             return
 
-        self.progress += dt / self.cycle_time_estimate
+        self.progress = min(1.0, self.progress + max(0.0, dt) / self.cycle_time_estimate)
         if self.progress < 1.0:
             return
 

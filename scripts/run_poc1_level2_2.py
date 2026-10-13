@@ -1,63 +1,21 @@
-"""PoC-1 Level 2.2 — RMPflow 충돌회피 모션 + 용접 스파크 파티클 데모.
+"""PoC-1 visualization: conservative AMR traffic and explicit motion evidence.
 
-Level 2.1의 Lula IK 컨트롤러를 Lula **RMPflow**(Reactive Motion Policy flow)로
-교체하여 작업대/부품을 장애물로 인식하고 회피 모션을 생성한다. 또한 용접
-PROCESSING 단계에서 TCP(엔드 이펙터) 위치에 PointInstancer 기반 스파크
-파티클을 분사하여 시각적 사실감을 향상시킨다.
+Default --motion-execution verified holds pickup because the shipped controllers
+have no validated gripper/contact adapter. Robot USD loading or a heuristic pose
+is not proof of physical grasp, reach, collision safety, or welding.
 
-3-tier 모션 백엔드 (자동 fallback):
+For a full, clearly labeled operations demo (logical placement/timers, no arm
+commands or sparks), choose explicitly:
+    "$ISAACSIM_PYTHON_EXE" scripts/run_poc1_level2_2.py --gui --real-robot \
+        --realtime --keep-alive --motion-execution schematic
 
-    1. rmpflow   : Lula RMPflow + ArticulationMotionPolicy (장애물 회피 O)
-    2. ik        : Lula Kinematics Solver (Level 2.1과 동일, 회피 X)
-    3. heuristic : 외부 의존 0 — 어깨/팔꿈치 휴리스틱 + ±법선 repulsion
-
-실행 예시:
-
-    # GUI에서 FANUC CRX-10iA(기본) + RMPflow + 스파크
-    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-        python scripts/run_poc1_level2_2.py --gui --real-robot
-
-    # WebRTC 스트리밍 + RMPflow 강제 (실패시 RMPflowController 내부에서 fallback)
-    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-        python scripts/run_poc1_level2_2.py --livestream 2 --real-robot \
-            --motion-mode rmpflow
-
-    # RMPflow는 끄고 Level 2.1 IK로 — 스파크는 켜둠
-    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-        python scripts/run_poc1_level2_2.py --gui --real-robot --motion-mode ik
-
-    # 스파크 비활성 + 휴리스틱 모션
-    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-        python scripts/run_poc1_level2_2.py --gui --real-robot \
-            --motion-mode heuristic --no-sparks
-
-    # 스파크 분사 비율 조정 (기본 30/s)
-    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-        python scripts/run_poc1_level2_2.py --gui --real-robot \
-            --spark-rate 60 --spark-lifetime 0.6
-
-    # Level 2.3: AMR을 NovaCarter 대신 Jetbot으로 (Props/* 404 우회)
-    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-        python scripts/run_poc1_level2_2.py --gui --real-robot \
-            --amr-asset jetbot
-
-    # Level 2.3: AMR/카메라/Rack 모두 placeholder로 (로봇팔만 실제)
-    ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
-        python scripts/run_poc1_level2_2.py --gui --real-robot \
-            --no-real-amr --no-real-smart-rack --no-real-inspection-cam
-
-전제:
-    * Isaac Sim 5.1.0 + Nucleus 접속 가능 (or 환경변수 ISAAC_ASSETS_ROOT 지정)
-    * CRX-10iA USD 경로는 미검증 추정치 (fdw_sim/visualization/robot_loader.py의
-      ROBOT_CATALOG["fanuc_crx10ia"] 주석 참고) — 404 시 FDW_FANUC_CRX10IA_USD로
-      로컬 경로 override 하거나 --robot franka_panda로 되돌릴 것
-    * RMPflow config는 franka 전용 번들만 Isaac 배포본에 포함되어 있어,
-      --robot fanuc_crx10ia 사용 시 RMPflow/IK 백엔드를 못 찾으면 자동으로
-      heuristic 모션으로 fallback한다 (크래시 아님 — 의도된 동작)
+Motion backends auto/rmpflow/ik/heuristic remain available for model diagnostics.
+Read docs/MOTION_COORDINATION_KO.md for limits and the pending Isaac GUI checks.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -66,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from scripts.run_poc1 import (
-    build_simulation, load_config, print_report, submit_jobs,
+    build_simulation, load_config, print_report, submit_jobs, validate_dispositions,
 )
 from fdw_sim.utils.logging_setup import setup_logging
 
@@ -116,6 +74,8 @@ def main() -> int:
                    help="로봇 모델 선택 (기본: fanuc_crx10ia — 용접 셀 실 기체)")
     p.add_argument("--no-ik", action="store_true",
                    help="모션 컨트롤러 전체 비활성 (홈 자세 고정)")
+    p.add_argument("--robot-diagnostics", action="store_true",
+                   help="작업 투입 없이 실제 관절·TCP 후보·좌표를 JSON으로 수집 (팔 명령 없음)")
     p.add_argument("--weld-offset", type=float, default=0.25,
                    help="용접 경로 길이의 절반 (m, 입력 버퍼 중심 ±값)")
     p.add_argument("--weld-height", type=float, default=0.05,
@@ -125,6 +85,8 @@ def main() -> int:
     p.add_argument("--motion-mode", choices=VALID_MOTION_MODES, default="auto",
                    help="모션 백엔드: auto(=rmpflow→ik→heuristic) | "
                         "rmpflow | ik | heuristic (기본: auto)")
+    p.add_argument("--motion-execution", choices=["verified", "schematic"], default="verified",
+                   help="verified: hold unless physical grasp validated; schematic: labeled logical operations demo")
     p.add_argument("--no-sparks", dest="enable_sparks",
                    action="store_false", default=True,
                    help="용접 스파크 파티클 비활성")
@@ -202,6 +164,8 @@ def main() -> int:
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
     args = p.parse_args()
+    if args.robot_diagnostics and (not args.real_robot or args.no_viz or args.single_amr_demo):
+        p.error("--robot-diagnostics requires --real-robot and visualization; omit --single-amr-demo")
     setup_logging(level=args.log_level)
 
     # RTX denoiser 환경변수 사전 설정 (SimulationApp 시작 전에 적용되어야 함)
@@ -213,6 +177,8 @@ def main() -> int:
     cfg = load_config(args.config)
 
     if args.single_amr_demo:
+        if cfg.get("validation", {}).get("expected_dispositions"):
+            p.error("--single-amr-demo cannot replace jobs in a disposition validation config")
         # AMR 1대 + part 1개, route=[welding]만 — material→welding 이동
         # 하나만 떼어서 눈으로 확인하기 위한 최소 시나리오. 두 번째 AMR이나
         # inspection행 재이송이 겹쳐서 "몇 번째 AMR이 뭘 하는지" 헷갈리는
@@ -251,13 +217,14 @@ def main() -> int:
     sim.config.realtime = args.realtime
     sim.config.use_real_robot = args.real_robot
     sim.config.robot_name = args.robot
-    sim.config.enable_ik = not args.no_ik
+    sim.config.enable_ik = not (args.no_ik or args.robot_diagnostics)
     sim.config.weld_path_offset_y = args.weld_offset
     sim.config.weld_path_height = args.weld_height
 
     # Level 2.2 옵션
     sim.config.motion_mode = args.motion_mode
-    sim.config.enable_sparks = args.enable_sparks
+    sim.config.motion_execution = args.motion_execution
+    sim.config.enable_sparks = args.enable_sparks and not args.robot_diagnostics
     sim.config.spark_rate = args.spark_rate
     sim.config.spark_lifetime_sec = args.spark_lifetime
     sim.config.rmpflow_register_obstacles = args.rmpflow_register_obstacles
@@ -301,6 +268,7 @@ def main() -> int:
     print(f" Motion enabled   : {sim.config.enable_ik}")
     print(f" Motion mode      : {sim.config.motion_mode} "
           f"(auto=rmpflow→ik→heuristic)")
+    print(f" Execution        : {sim.config.motion_execution} (schematic is not physical grasp/welding)")
     print(f" RMPflow obstacles: {sim.config.rmpflow_register_obstacles}")
     print(f" Sparks enabled   : {sim.config.enable_sparks}")
     print(f" Spark rate       : {sim.config.spark_rate:.1f} /s")
@@ -362,10 +330,34 @@ def main() -> int:
             print(f"[INFO] Native Streaming Client에서 {host_ip}로 접속\n")
 
     try:
+        if args.robot_diagnostics:
+            from fdw_sim.visualization.robot_diagnostics import collect_robot_diagnostics
+            from fdw_sim.visualization.robot_loader import ROBOT_CATALOG
+            viz = sim.visualizer
+            if viz is None or viz.scene is None:
+                raise RuntimeError("robot diagnostics requires a built scene")
+            cell_id = cfg["cells"]["welding"]["cell_id"]
+            cell_root = viz.scene.get_cell_path(cell_id)
+            robot = viz._robots.get(cell_id, {})
+            # Only app rendering updates: do not step processes or issue arm commands.
+            for _ in range(3):
+                sim._isaac_app.update()
+            report = collect_robot_diagnostics(
+                viz.scene._stage, f"{cell_root}/RobotArm", ROBOT_CATALOG[args.robot],
+                robot.get("articulation"))
+            output = sim.config.log_dir / f"{time.strftime('robot_diagnostics_%Y%m%d_%H%M%S')}.json"
+            output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+            print(f"[ROBOT DIAGNOSTICS] saved: {output}")
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            print("[ROBOT DIAGNOSTICS] No jobs or arm commands issued; TCP/grasp calibration remains unverified.")
+            if args.keep_alive:
+                sim.keep_viewer_alive()
+            return 0
         submit_jobs(sim, cfg)
         print("[INFO] 3 jobs 투입 — RMPflow 모션 + 스파크 파티클 시각화 시작\n")
         sim.run_until_done(all_jobs_done=True, extra_idle_sec=3.0)
         print_report(sim)
+        validate_dispositions(sim, cfg)
         if args.keep_alive:
             print("[INFO] --keep-alive: 창을 닫거나 터미널에서 Ctrl+C 할 때까지 "
                   "종료하지 않습니다.\n")

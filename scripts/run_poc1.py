@@ -116,12 +116,16 @@ def build_simulation(cfg: Dict[str, Any], mode_override: str = None,
         livestream=int(sim_cfg_d.get("livestream", 0)),
         log_dir=Path(sim_cfg_d["log_dir"]),
         run_name=sim_cfg_d.get("run_name"),
+        motion_execution=sim_cfg_d.get("motion_execution", "verified"),
+        amr_footprint_size=tuple(sim_cfg_d.get("amr_footprint_size", (1.2, 0.8))),
+        amr_clearance_m=float(sim_cfg_d.get("amr_clearance_m", 0.15)),
     )
 
     orch_d = cfg["orchestrator"]
     orch_cfg = OrchestratorConfig(
         decision_period_sec=float(orch_d["decision_period_sec"]),
         material_cell_id=orch_d["material_cell_id"],
+        inspection_nonpass_disposition=orch_d.get("inspection_nonpass_disposition", "quarantine"),
         process_to_cell=dict(orch_d["process_to_cell"]),
     )
 
@@ -165,6 +169,7 @@ def build_simulation(cfg: Dict[str, Any], mode_override: str = None,
         ),
         bus=bus,
         default_cycle_time=float(insp_d["default_cycle_time"]),
+        measurement_noise_std=float(insp_d.get("measurement_noise_std", 0.03)),
     )
 
     # ---- 등록 ----
@@ -188,6 +193,40 @@ def submit_jobs(sim: SimulationManager, cfg: Dict[str, Any]) -> None:
         sim.submit_job(job)
 
 
+def validate_dispositions(sim: SimulationManager, cfg: Dict[str, Any]) -> None:
+    """Check an opt-in logical scenario; this does not certify physical motion."""
+    expected = cfg.get("validation", {}).get("expected_dispositions")
+    if expected is None:
+        return
+    jobs = {j["job_id"]: j for j in cfg["jobs"]}
+    if (not isinstance(expected, dict) or not expected
+            or len(jobs) != len(cfg["jobs"]) or set(expected) != set(jobs)
+            or any(v not in ("PASS", "FAIL", "REWORK") for v in expected.values())):
+        raise ValueError("expected_dispositions must cover each unique job with PASS/FAIL/REWORK")
+    completed = sim.orchestrator.completed_jobs
+    quarantined = sim.orchestrator.quarantined_jobs
+    actual = {tr.job.job_id: "PASS" for tr in completed}
+    actual.update({tr.job.job_id: tr.disposition_reason for tr in quarantined})
+    errors = []
+    if len(actual) != len(completed) + len(quarantined):
+        errors.append("duplicate terminal job identities")
+    if actual != expected:
+        errors.append(f"expected={expected}, actual={actual}")
+    for tr in completed + quarantined:
+        job = jobs.get(tr.job.job_id)
+        if (job is None or tr.job.part_id != job["part_id"]
+                or tr.history != job["process_route"] or "inspection" not in tr.history):
+            errors.append(f"identity or inspection history mismatch: {tr.job.job_id}")
+    if sim.orchestrator.active_jobs or not sim._all_cells_quiescent():
+        errors.append("jobs or cell/transport activity remain")
+    if errors:
+        raise RuntimeError("[VALIDATION] FAILED logical disposition scenario: " + "; ".join(errors))
+    print("[VALIDATION] PASSED logical disposition scenario (not physical grasp/welding)")
+    for job_id, verdict in expected.items():
+        destination = "shipped" if verdict == "PASS" else "logically quarantined"
+        print(f"[VALIDATION] {job_id} part={jobs[job_id]['part_id']} verdict={verdict}: {destination}")
+
+
 def print_report(sim: SimulationManager) -> None:
     print("\n" + "=" * 70)
     print(" FDW-OPS PoC-1 Simulation Report")
@@ -201,6 +240,10 @@ def print_report(sim: SimulationManager) -> None:
         print(f"   - {tr.job.job_id} (part={tr.job.part_id})  "
               f"makespan={ms:6.1f}s  route={tr.history}")
 
+    print(f"\n  Quarantined jobs (not shipped): {len(sim.orchestrator.quarantined_jobs)}")
+    for tr in sim.orchestrator.quarantined_jobs:
+        print(f"   - {tr.job.job_id} (part={tr.job.part_id})  reason={tr.disposition_reason}")
+
     print("\n  Active jobs (incomplete):")
     if not sim.orchestrator.active_jobs:
         print("    (none)")
@@ -213,11 +256,15 @@ def print_report(sim: SimulationManager) -> None:
     interesting = [
         "job_makespan_sec", "cycle_time", "quality_score",
         "quality_pass_rate", "predicted_gap_mm",
-        "amr_delivery_count", "rack_stock_count",
+        "amr_delivery_count", "rack_stock_count", "job_quarantined_count",
     ]
     for m in interesting:
         if m in summ:
             s = summ[m]
+            if m == "quality_pass_rate":
+                print(f"   - final_quality_pass_rate={s['last']:.3f} "
+                      f"(cumulative-snapshot mean={s['avg']:.3f}, not final pass rate)")
+                continue
             print(f"   - {m:25s}  count={int(s['count']):3d}  "
                   f"avg={s['avg']:7.3f}  min={s['min']:7.3f}  max={s['max']:7.3f}")
 
@@ -264,6 +311,7 @@ def main() -> int:
         submit_jobs(sim, cfg)
         sim.run_until_done(all_jobs_done=True, extra_idle_sec=2.0)
         print_report(sim)
+        validate_dispositions(sim, cfg)
     finally:
         sim.stop()
 

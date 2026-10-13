@@ -50,6 +50,8 @@ def build_minimal_sim() -> SimulationManager:
         bus=bus, default_cycle_time=2.0,
     )
 
+    # Happy-path fixture: a small gap selects the laser recipe at 1500 W.
+    welding.gap_agent.predict_gap_mm = lambda _part_id: 0.2
     sim.register_material_cell(material, location=(0.0, 0.0))
     sim.register_cell(welding, location=(2.0, 0.0))
     sim.register_cell(inspection, location=(4.0, 0.0))
