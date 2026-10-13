@@ -15,6 +15,7 @@ Read docs/MOTION_COORDINATION_KO.md for limits and the pending Isaac GUI checks.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -73,6 +74,8 @@ def main() -> int:
                    help="로봇 모델 선택 (기본: fanuc_crx10ia — 용접 셀 실 기체)")
     p.add_argument("--no-ik", action="store_true",
                    help="모션 컨트롤러 전체 비활성 (홈 자세 고정)")
+    p.add_argument("--robot-diagnostics", action="store_true",
+                   help="작업 투입 없이 실제 관절·TCP 후보·좌표를 JSON으로 수집 (팔 명령 없음)")
     p.add_argument("--weld-offset", type=float, default=0.25,
                    help="용접 경로 길이의 절반 (m, 입력 버퍼 중심 ±값)")
     p.add_argument("--weld-height", type=float, default=0.05,
@@ -161,6 +164,8 @@ def main() -> int:
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
     args = p.parse_args()
+    if args.robot_diagnostics and (not args.real_robot or args.no_viz or args.single_amr_demo):
+        p.error("--robot-diagnostics requires --real-robot and visualization; omit --single-amr-demo")
     setup_logging(level=args.log_level)
 
     # RTX denoiser 환경변수 사전 설정 (SimulationApp 시작 전에 적용되어야 함)
@@ -212,14 +217,14 @@ def main() -> int:
     sim.config.realtime = args.realtime
     sim.config.use_real_robot = args.real_robot
     sim.config.robot_name = args.robot
-    sim.config.enable_ik = not args.no_ik
+    sim.config.enable_ik = not (args.no_ik or args.robot_diagnostics)
     sim.config.weld_path_offset_y = args.weld_offset
     sim.config.weld_path_height = args.weld_height
 
     # Level 2.2 옵션
     sim.config.motion_mode = args.motion_mode
     sim.config.motion_execution = args.motion_execution
-    sim.config.enable_sparks = args.enable_sparks
+    sim.config.enable_sparks = args.enable_sparks and not args.robot_diagnostics
     sim.config.spark_rate = args.spark_rate
     sim.config.spark_lifetime_sec = args.spark_lifetime
     sim.config.rmpflow_register_obstacles = args.rmpflow_register_obstacles
@@ -325,6 +330,29 @@ def main() -> int:
             print(f"[INFO] Native Streaming Client에서 {host_ip}로 접속\n")
 
     try:
+        if args.robot_diagnostics:
+            from fdw_sim.visualization.robot_diagnostics import collect_robot_diagnostics
+            from fdw_sim.visualization.robot_loader import ROBOT_CATALOG
+            viz = sim.visualizer
+            if viz is None or viz.scene is None:
+                raise RuntimeError("robot diagnostics requires a built scene")
+            cell_id = cfg["cells"]["welding"]["cell_id"]
+            cell_root = viz.scene.get_cell_path(cell_id)
+            robot = viz._robots.get(cell_id, {})
+            # Only app rendering updates: do not step processes or issue arm commands.
+            for _ in range(3):
+                sim._isaac_app.update()
+            report = collect_robot_diagnostics(
+                viz.scene._stage, f"{cell_root}/RobotArm", ROBOT_CATALOG[args.robot],
+                robot.get("articulation"))
+            output = sim.config.log_dir / f"{time.strftime('robot_diagnostics_%Y%m%d_%H%M%S')}.json"
+            output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+            print(f"[ROBOT DIAGNOSTICS] saved: {output}")
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            print("[ROBOT DIAGNOSTICS] No jobs or arm commands issued; TCP/grasp calibration remains unverified.")
+            if args.keep_alive:
+                sim.keep_viewer_alive()
+            return 0
         submit_jobs(sim, cfg)
         print("[INFO] 3 jobs 투입 — RMPflow 모션 + 스파크 파티클 시각화 시작\n")
         sim.run_until_done(all_jobs_done=True, extra_idle_sec=3.0)
