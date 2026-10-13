@@ -66,9 +66,14 @@ class InspectionCell(DistributedIntelligenceCell):
     """검사/품질판정 셀."""
 
     def __init__(self, config: CellConfig, bus: MessageBus,
-                 default_cycle_time: float = 6.0) -> None:
+                 default_cycle_time: float = 6.0,
+                 measurement_noise_std: float = 0.03) -> None:
+        measurement_noise_std = float(measurement_noise_std)
+        if not math.isfinite(measurement_noise_std) or measurement_noise_std < 0.0:
+            raise ValueError("measurement_noise_std must be finite and nonnegative")
         super().__init__(config, bus)
         self.default_cycle_time = default_cycle_time
+        self.measurement_noise_std = measurement_noise_std
         self.agent = InspectionAgent()
 
         # 누적 통계
@@ -85,8 +90,8 @@ class InspectionCell(DistributedIntelligenceCell):
 
     # ------------------------------------------------------------------ setup
     def configure(self) -> None:
-        logger.info("[%s] InspectionCell configured (cycle=%.1fs)",
-                    self.cell_id, self.default_cycle_time)
+        logger.info("[%s] InspectionCell configured (cycle=%.1fs, measurement_noise_std=%.3f)",
+                    self.cell_id, self.default_cycle_time, self.measurement_noise_std)
 
     def receive_part(self, part_id: str) -> bool:
         ok = super().receive_part(part_id)
@@ -136,7 +141,7 @@ class InspectionCell(DistributedIntelligenceCell):
             return
 
         # 검사 판정
-        result = self.agent.judge(self._incoming_quality)
+        result = self.agent.judge(self._incoming_quality, noise_std=self.measurement_noise_std)
         verdict = result["verdict"]
         measured_score = result["measured_score"]
         self.last_verdict = verdict

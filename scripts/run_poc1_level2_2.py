@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from scripts.run_poc1 import (
-    build_simulation, load_config, print_report, submit_jobs,
+    build_simulation, load_config, print_report, submit_jobs, validate_dispositions,
 )
 from fdw_sim.utils.logging_setup import setup_logging
 
@@ -172,6 +172,8 @@ def main() -> int:
     cfg = load_config(args.config)
 
     if args.single_amr_demo:
+        if cfg.get("validation", {}).get("expected_dispositions"):
+            p.error("--single-amr-demo cannot replace jobs in a disposition validation config")
         # AMR 1대 + part 1개, route=[welding]만 — material→welding 이동
         # 하나만 떼어서 눈으로 확인하기 위한 최소 시나리오. 두 번째 AMR이나
         # inspection행 재이송이 겹쳐서 "몇 번째 AMR이 뭘 하는지" 헷갈리는
@@ -327,6 +329,7 @@ def main() -> int:
         print("[INFO] 3 jobs 투입 — RMPflow 모션 + 스파크 파티클 시각화 시작\n")
         sim.run_until_done(all_jobs_done=True, extra_idle_sec=3.0)
         print_report(sim)
+        validate_dispositions(sim, cfg)
         if args.keep_alive:
             print("[INFO] --keep-alive: 창을 닫거나 터미널에서 Ctrl+C 할 때까지 "
                   "종료하지 않습니다.\n")

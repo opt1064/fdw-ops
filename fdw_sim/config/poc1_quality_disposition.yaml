@@ -1,0 +1,73 @@
+# Logical branch validation using the existing surrogate quality model.
+# These recipes are test inputs, not validated physical welding parameters.
+# Expected scores: PASS ~0.930, FAIL ~0.239, REWORK ~0.732.
+simulation:
+  mode: discrete
+  physics_hz: 60.0
+  max_sim_time_sec: 600.0
+  realtime: false
+  headless: true
+  log_dir: ./fdw_sim/logs
+  run_name: null
+  motion_execution: schematic
+  amr_footprint_size: [1.2, 0.8]
+  amr_clearance_m: 0.15
+
+orchestrator:
+  decision_period_sec: 0.2
+  inspection_nonpass_disposition: quarantine
+  material_cell_id: MATERIAL_CELL_01
+  process_to_cell:
+    welding: WELDING_CELL_01
+    inspection: INSPECTION_CELL_01
+
+cells:
+  material:
+    cell_id: MATERIAL_CELL_01
+    location: [10.3, 6.2]
+    num_amrs: 2
+    input_capacity: 8
+    output_capacity: 8
+  welding:
+    cell_id: WELDING_CELL_01
+    location: [25.1, 10.75]
+    default_cycle_time: 18.0
+    input_capacity: 1
+    output_capacity: 1
+  inspection:
+    cell_id: INSPECTION_CELL_01
+    location: [34.6, 6.45]
+    default_cycle_time: 6.0
+    input_capacity: 1
+    output_capacity: 1
+    # Disable measurement noise only in this reproducible branch scenario.
+    measurement_noise_std: 0.0
+
+jobs:
+  - job_id: JOB_DEMO_PASS
+    part_id: PART_DEMO_PASS
+    part_type: tubular_frame_A
+    process_route: [welding, inspection]
+    priority: normal
+    recipe_overrides:
+      welding: {tool: laser, speed: 0.10, power: 1500.0, path_length_mm: 220.0}
+  - job_id: JOB_DEMO_FAIL
+    part_id: PART_DEMO_FAIL
+    part_type: tubular_frame_A
+    process_route: [welding, inspection]
+    priority: normal
+    recipe_overrides:
+      welding: {tool: laser, speed: 0.30, power: 1500.0, path_length_mm: 220.0}
+  - job_id: JOB_DEMO_REWORK
+    part_id: PART_DEMO_REWORK
+    part_type: tubular_frame_B
+    process_route: [welding, inspection]
+    priority: normal
+    recipe_overrides:
+      welding: {tool: laser, speed: 0.18, power: 1500.0, path_length_mm: 220.0}
+
+validation:
+  expected_dispositions:
+    JOB_DEMO_PASS: PASS
+    JOB_DEMO_FAIL: FAIL
+    JOB_DEMO_REWORK: REWORK

@@ -169,6 +169,7 @@ def build_simulation(cfg: Dict[str, Any], mode_override: str = None,
         ),
         bus=bus,
         default_cycle_time=float(insp_d["default_cycle_time"]),
+        measurement_noise_std=float(insp_d.get("measurement_noise_std", 0.03)),
     )
 
     # ---- 등록 ----
@@ -190,6 +191,40 @@ def submit_jobs(sim: SimulationManager, cfg: Dict[str, Any]) -> None:
             priority=j.get("priority", "normal"),
         )
         sim.submit_job(job)
+
+
+def validate_dispositions(sim: SimulationManager, cfg: Dict[str, Any]) -> None:
+    """Check an opt-in logical scenario; this does not certify physical motion."""
+    expected = cfg.get("validation", {}).get("expected_dispositions")
+    if expected is None:
+        return
+    jobs = {j["job_id"]: j for j in cfg["jobs"]}
+    if (not isinstance(expected, dict) or not expected
+            or len(jobs) != len(cfg["jobs"]) or set(expected) != set(jobs)
+            or any(v not in ("PASS", "FAIL", "REWORK") for v in expected.values())):
+        raise ValueError("expected_dispositions must cover each unique job with PASS/FAIL/REWORK")
+    completed = sim.orchestrator.completed_jobs
+    quarantined = sim.orchestrator.quarantined_jobs
+    actual = {tr.job.job_id: "PASS" for tr in completed}
+    actual.update({tr.job.job_id: tr.disposition_reason for tr in quarantined})
+    errors = []
+    if len(actual) != len(completed) + len(quarantined):
+        errors.append("duplicate terminal job identities")
+    if actual != expected:
+        errors.append(f"expected={expected}, actual={actual}")
+    for tr in completed + quarantined:
+        job = jobs.get(tr.job.job_id)
+        if (job is None or tr.job.part_id != job["part_id"]
+                or tr.history != job["process_route"] or "inspection" not in tr.history):
+            errors.append(f"identity or inspection history mismatch: {tr.job.job_id}")
+    if sim.orchestrator.active_jobs or not sim._all_cells_quiescent():
+        errors.append("jobs or cell/transport activity remain")
+    if errors:
+        raise RuntimeError("[VALIDATION] FAILED logical disposition scenario: " + "; ".join(errors))
+    print("[VALIDATION] PASSED logical disposition scenario (not physical grasp/welding)")
+    for job_id, verdict in expected.items():
+        destination = "shipped" if verdict == "PASS" else "logically quarantined"
+        print(f"[VALIDATION] {job_id} part={jobs[job_id]['part_id']} verdict={verdict}: {destination}")
 
 
 def print_report(sim: SimulationManager) -> None:
@@ -276,6 +311,7 @@ def main() -> int:
         submit_jobs(sim, cfg)
         sim.run_until_done(all_jobs_done=True, extra_idle_sec=2.0)
         print_report(sim)
+        validate_dispositions(sim, cfg)
     finally:
         sim.stop()
 
