@@ -78,6 +78,8 @@ def main() -> int:
                    help="작업 투입 없이 실제 관절·TCP 후보·좌표를 JSON으로 수집 (팔 명령 없음)")
     p.add_argument("--export-robot-model", action="store_true",
                    help="--robot-diagnostics와 함께 FANUC USD를 URDF로 내보내고 모델 대조 (팔 명령 없음)")
+    p.add_argument("--validate-lula-model", action="store_true",
+                   help="내보낸 모델의 FK 전용 Lula 설정 생성 및 여러 자세 USD/URDF/Lula 계산 대조")
     p.add_argument("--weld-offset", type=float, default=0.25,
                    help="용접 경로 길이의 절반 (m, 입력 버퍼 중심 ±값)")
     p.add_argument("--weld-height", type=float, default=0.05,
@@ -168,6 +170,8 @@ def main() -> int:
     args = p.parse_args()
     if args.export_robot_model and not args.robot_diagnostics:
         p.error("--export-robot-model requires --robot-diagnostics")
+    if args.validate_lula_model and not args.export_robot_model:
+        p.error("--validate-lula-model requires --robot-diagnostics --export-robot-model")
     if args.robot_diagnostics and (not args.real_robot or args.no_viz or args.single_amr_demo):
         p.error("--robot-diagnostics requires --real-robot and visualization; omit --single-amr-demo")
     setup_logging(level=args.log_level)
@@ -362,6 +366,13 @@ def main() -> int:
                 print(f"[ROBOT MODEL] URDF saved: {exported['urdf_path']}")
                 print(f"[ROBOT MODEL] comparison saved: {model_dir / 'model_comparison.json'}")
                 print(json.dumps(exported["comparison"], ensure_ascii=False, indent=2))
+                if args.validate_lula_model:
+                    from fdw_sim.visualization.lula_model_validation import prepare_and_validate_lula
+                    validation = prepare_and_validate_lula(viz.scene._stage, f"{cell_root}/RobotArm", exported)
+                    print(f"[LULA MODEL] report saved: {model_dir / 'lula_model_validation.json'}")
+                    print(f"[LULA MODEL] status={validation['status']} checked={validation['checked_poses']} "
+                          f"passed={validation['passed_poses']} (computed poses; no robot motion)")
+                    print(json.dumps(validation["errors"], ensure_ascii=False))
             print("[ROBOT DIAGNOSTICS] No jobs or arm commands issued; TCP/grasp calibration remains unverified.")
             if args.keep_alive:
                 sim.keep_viewer_alive()

@@ -51,6 +51,11 @@ def collect_robot_diagnostics(stage, robot_path, spec, articulation=None):
             entry = {"name": name, "path": path, "type": prim.GetTypeName(),
                      "body0": list(map(str, joint.GetBody0Rel().GetTargets())),
                      "body1": list(map(str, joint.GetBody1Rel().GetTargets()))}
+            for index in (0, 1):
+                pos = joint.GetLocalPos0Attr().Get() if index == 0 else joint.GetLocalPos1Attr().Get()
+                rot = joint.GetLocalRot0Attr().Get() if index == 0 else joint.GetLocalRot1Attr().Get()
+                entry[f"localPos{index}_stage_units"] = list(map(float, pos))
+                entry[f"localRot{index}_wxyz"] = [float(rot.GetReal()), *map(float, rot.GetImaginary())]
             for key in ("axis", "lowerLimit", "upperLimit"):
                 attr = prim.GetAttribute("physics:" + key)
                 value = attr.Get() if attr and attr.HasAuthoredValueOpinion() else None
