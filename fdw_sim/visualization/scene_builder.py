@@ -38,25 +38,21 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 
-# 실사 공장 바닥(밝은 회색 에폭시) 레퍼런스에 맞춘 균일한 라이트그레이 팔레트.
-# 예전엔 구역별로 채도 높은 색(파랑/빨강/노랑 등)을 칠해 용도를 구분했지만,
-# 2026-09-28 사용자 피드백으로 "바닥은 밝은 회색 + 라인마킹, 구역 구분은
-# 경광등 색으로" 방향으로 바뀌었다 — 그래서 여기 색은 전부 옅은 회색 계열로
-# 통일하고, 구역별 아주 미세한 명도 차이만 남겨 바닥 이음매/섹션이 티 나게
-# 했다(add_floor_lane_markings의 초록/노랑 라인이 실제 구역 구분 역할을 함).
-_FLOOR_LIGHT_GRAY = (0.80, 0.80, 0.81)
+# 짙은 회색 바닥. Ground 위를 덮는 구역 타일도 같은 팔레트를 사용한다.
+# 구역 구분은 경광등과 초록/노랑 라인마킹으로 유지한다.
+_FLOOR_DARK_GRAY = (0.22, 0.22, 0.22)
 WORKSHOP_ZONES: Dict[str, Tuple[float, float, float, float,
                                  Tuple[float, float, float], str]] = {
     # 6세부 소재관리 존 — 좌측 전체 (서버실/AMR충전 포함하는 큰 사각형이므로
     # 겹치는 하위 구역보다 z를 낮게 그린다, z-fighting 방지)
-    "material_mgmt":  (0.0, 0.0, 20.6, 12.4, _FLOOR_LIGHT_GRAY, "6-material-mgmt"),
-    "server_room":    (0.0, 9.4, 3.3, 3.0, (0.76, 0.76, 0.78), "1-server-room"),
-    "amr_charge":     (3.3, 9.4, 7.6, 3.0, (0.79, 0.80, 0.79), "amr-charge"),
-    "amr_aisle":      (20.6, 0.0, 3.0, 12.4, (0.83, 0.83, 0.82), "amr-main-aisle"),
-    "welding_cell":   (23.6, 9.1, 3.0, 3.3, _FLOOR_LIGHT_GRAY, "2-welding"),
-    "additive_cell":  (28.6, 9.9, 2.5, 2.5, _FLOOR_LIGHT_GRAY, "4-additive"),
-    "machining_cell": (33.1, 8.4, 3.0, 4.0, _FLOOR_LIGHT_GRAY, "5-machining"),
-    "forming_cell":   (25.1, 0.0, 11.0, 4.5, _FLOOR_LIGHT_GRAY, "3-forming"),
+    "material_mgmt":  (0.0, 0.0, 20.6, 12.4, _FLOOR_DARK_GRAY, "6-material-mgmt"),
+    "server_room":    (0.0, 9.4, 3.3, 3.0, (0.20, 0.20, 0.20), "1-server-room"),
+    "amr_charge":     (3.3, 9.4, 7.6, 3.0, (0.23, 0.23, 0.23), "amr-charge"),
+    "amr_aisle":      (20.6, 0.0, 3.0, 12.4, (0.25, 0.25, 0.25), "amr-main-aisle"),
+    "welding_cell":   (23.6, 9.1, 3.0, 3.3, _FLOOR_DARK_GRAY, "2-welding"),
+    "additive_cell":  (28.6, 9.9, 2.5, 2.5, _FLOOR_DARK_GRAY, "4-additive"),
+    "machining_cell": (33.1, 8.4, 3.0, 4.0, _FLOOR_DARK_GRAY, "5-machining"),
+    "forming_cell":   (25.1, 0.0, 11.0, 4.5, _FLOOR_DARK_GRAY, "3-forming"),
 }
 
 # 셀 종류별 경광등(signal tower) 색 — 예전엔 작업대 몸체 색으로 구역을
@@ -81,9 +77,7 @@ FORMING_FENCE_HEIGHT_M = 1.47
 class SceneConfig:
     """SceneBuilder 동작 옵션."""
     root_prim_path: str = "/World/FDW"
-    # 실사 공장 사진(밝은 회색 에폭시 바닥) 레퍼런스에 맞춘 기본값 —
-    # 예전 어두운 회색(0.25)은 콘크리트 맨바닥에 가까웠음(2026-09-28 변경).
-    ground_color: Tuple[float, float, float] = (0.80, 0.80, 0.81)
+    ground_color: Tuple[float, float, float] = _FLOOR_DARK_GRAY
     add_default_lighting: bool = True
     cell_label_above: bool = True
 
@@ -315,9 +309,7 @@ class SceneBuilder:
         """실사 공장 사진 레퍼런스의 바닥 라인마킹 — 초록 보행/AMR 통로
         중앙선 + 노랑/검정 위험구역 경계 스트라이프.
 
-        예전엔 WORKSHOP_ZONES의 구역별 채도 높은 바닥색이 구역 경계를
-        표시했지만, 바닥을 전부 밝은 회색으로 통일한 뒤로는 이 라인들이
-        그 역할을 대신한다."""
+        바닥색 대신 이 라인들이 구역 경계를 표시한다."""
         root = f"{self.config.root_prim_path}/Layout/LaneMarkings"
         self._UsdGeom.Xform.Define(self._stage, root)
         z = 0.014  # 구역 바닥(0.011~0.013)보다 살짝 위 — z-fighting 방지
@@ -370,13 +362,22 @@ class SceneBuilder:
         통일하면서 사라진 "구역별 색 구분"을 이 등 색으로 대신한다.
 
         cell_id는 add_cell_workbench로 이미 등록돼 있어야 한다(그 Xform
-        아래 상대 좌표로 붙인다)."""
+        아래 상대 좌표로 작업대 +X/+Y 모서리에 붙인다)."""
         cell_root = self._cell_prims.get(cell_id)
         if cell_root is None:
             raise ValueError(f"cell {cell_id} not registered; call add_cell_workbench first")
 
         tower_root = f"{cell_root}/SignalTower"
         self._UsdGeom.Xform.Define(self._stage, tower_root)
+        # Workbench is a scaled/translated cube under the same cell Xform.
+        # Read its authored dimensions so non-default bench sizes also work.
+        bench = self._UsdGeom.Cube(self._stage.GetPrimAtPath(f"{cell_root}/Workbench"))
+        half_size = bench.GetSizeAttr().Get() / 2.0
+        bench_transform = self._UsdGeom.Xformable(bench.GetPrim()).GetLocalTransformation()
+        corner = bench_transform.Transform(self._Gf.Vec3d(half_size, half_size, half_size))
+        # Keep the complete 9 cm lens footprint on the workbench, clear of buffers.
+        inset = 0.10
+        self._set_translate(tower_root, (corner[0] - inset, corner[1] - inset, corner[2]))
 
         # 지지 폴 — 어두운 회색 금속
         pole_path = f"{tower_root}/Pole"
@@ -391,7 +392,7 @@ class SceneBuilder:
                                                  roughness=0.35, metallic=0.6)
         self._apply_material(pole_path, pole_mat)
 
-        # 발광 렌즈 — 지정된 셀 색으로 켜짐(emissive) + 위에 여분 2개는
+        # 발광 렌즈 — 지정된 셀 색으로 켜짐(emissive) + 아래 여분 2개는
         # 꺼진 회색으로 두어 "3단 적층 시그널 타워"의 실루엣만 재현
         lens_specs = [
             ("Lens_Active", color, True),
@@ -405,7 +406,9 @@ class SceneBuilder:
             lens.CreateRadiusAttr(0.045)
             lens.CreateHeightAttr(lens_h)
             lens.CreateAxisAttr("Z")
-            lz = height_above_workbench - i * (lens_h + 0.01)
+            # Bottom lens touches the pole tip; the active lens stays at the top.
+            lz = (height_above_workbench + lens_h / 2.0
+                  + (len(lens_specs) - 1 - i) * (lens_h + 0.01))
             self._set_translate(lens_path, (0.0, 0.0, lz))
             self._set_color(lens_path, lens_color)
             # 재질 캐시가 이름으로만 구분되므로, 색을 이름에 넣어야 셀마다
