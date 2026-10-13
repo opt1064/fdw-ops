@@ -89,3 +89,39 @@ def test_empty_robot_fails_instead_of_reporting_placeholder_success(robot):
     stage, spec, feedback = robot
     with pytest.raises(RuntimeError, match="missing or empty"):
         collect_robot_diagnostics(stage, "/Missing", spec, feedback)
+
+
+def test_observed_fanuc_nested_ee_link_is_found_without_claiming_calibration(robot):
+    from pxr import UsdGeom
+    from fdw_sim.visualization.robot_loader import ROBOT_CATALOG
+    stage, _, feedback = robot
+    path = "/Cell/RobotArm/J6_link/flange/ee_link"
+    UsdGeom.Xform.Define(stage, path)
+    report = collect_robot_diagnostics(stage, "/Cell/RobotArm", ROBOT_CATALOG["fanuc_crx10ia"], feedback)
+    assert report["configured_tcp"]["matching_paths"] == [path]
+    assert report["configured_tcp"]["status"] == "unique_link_found"
+    assert report["configured_tcp"]["calibration_verified"] is False
+
+
+def test_motion_file_discovery_never_initializes_or_validates_backend(tmp_path, monkeypatch):
+    from fdw_sim.visualization.robot_diagnostics import discover_motion_configuration
+    from fdw_sim.visualization.robot_loader import ROBOT_CATALOG
+    from fdw_sim.visualization.rmpflow_controller import RMPflowController
+    paths = {}
+    for suffix in ("URDF", "ROBOT_DESCRIPTION", "RMPFLOW_YAML"):
+        path = tmp_path / suffix
+        path.write_text("unvalidated test file", encoding="utf-8")
+        monkeypatch.setenv(f"FDW_FANUC_CRX10IA_{suffix}", str(path))
+        paths[suffix] = str(path)
+
+    def forbid_backend(self):
+        raise AssertionError("passive diagnosis must not initialize motion")
+
+    monkeypatch.setattr(RMPflowController, "_ensure_backend", forbid_backend)
+    result = discover_motion_configuration(ROBOT_CATALOG["fanuc_crx10ia"])
+    assert result["files"] == {"urdf": paths["URDF"],
+                               "robot_description": paths["ROBOT_DESCRIPTION"],
+                               "rmpflow": paths["RMPFLOW_YAML"]}
+    assert result["all_three_files_found"] is True
+    assert result["backend_initialized"] is False
+    assert result["model_frame_matching_verified"] is False

@@ -6,6 +6,21 @@ import os
 from pathlib import Path
 
 
+def discover_motion_configuration(spec):
+    """Use the controller's actual read-only file locators, without initializing a backend."""
+    from fdw_sim.visualization.rmpflow_controller import RMPflowController
+    probe = RMPflowController(None, spec)
+    rmpflow = probe._locate_rmp_config()
+    files = {
+        "urdf": probe._locate_urdf(),
+        "robot_description": probe._locate_robot_description(str(Path(rmpflow).parent) if rmpflow else None),
+        "rmpflow": rmpflow,
+    }
+    return {"files": files, "all_three_files_found": all(files.values()),
+            "backend_initialized": False, "model_frame_matching_verified": False,
+            "note": "Null means unresolved by current controller search rules, not proof the file is absent everywhere."}
+
+
 def collect_robot_diagnostics(stage, robot_path, spec, articulation=None):
     """Inspect composed USD and available feedback without issuing robot commands."""
     from pxr import Usd, UsdGeom, UsdPhysics
@@ -79,6 +94,13 @@ def collect_robot_diagnostics(stage, robot_path, spec, articulation=None):
         value = os.environ.get(key)
         config_files[key] = {"path": value, "exists": Path(value).is_file() if value else False}
 
+    try:
+        motion_configuration = discover_motion_configuration(spec)
+    except Exception as exc:
+        motion_configuration = {"error": f"{type(exc).__name__}: {exc}",
+                                "model_frame_matching_verified": False}
+        errors.append("motion configuration discovery failed")
+
     return {
         "robot": spec.name, "robot_path": robot_path,
         "diagnostic_type": "passive_inventory_no_motion_commands",
@@ -90,6 +112,7 @@ def collect_robot_diagnostics(stage, robot_path, spec, articulation=None):
                            "pose": pose(configured[0]) if len(configured) == 1 else None,
                            "calibration_verified": False},
         "tcp_candidates": candidates, "explicit_motion_config_files": config_files,
+        "controller_motion_configuration": motion_configuration,
         "errors": errors,
         "physical_grasp_verified": False,
         "next_step": "Confirm joint mapping, TCP calibration, and matching kinematics before empty-hand motion.",
