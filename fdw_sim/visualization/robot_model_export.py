@@ -91,6 +91,78 @@ def urdf_forward_kinematics(robot, q):
     return root, transforms
 
 
+def _usd_rigid_matrix(cache, prim, meters):
+    transform = cache.GetLocalToWorldTransform(prim)
+    value = np.asarray([[transform[i][j] for j in range(4)] for i in range(4)]).T.copy()
+    rotation = value[:3, :3]
+    if (not np.isfinite(value).all()
+            or not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5)
+            or not math.isclose(float(np.linalg.det(rotation)), 1.0, abs_tol=1e-5)):
+        raise ValueError("scaled/nonfinite/reflected robot frame cannot be compared as a rigid URDF pose")
+    value[:3, 3] *= meters
+    return value
+
+
+def add_fixed_end_frame(urdf_path, stage, robot_path, diagnostics):
+    """Preserve raw export; derive a missing nonphysical end frame from USD only."""
+    from pxr import Usd, UsdGeom, UsdPhysics
+
+    tree = ET.parse(urdf_path)
+    robot = tree.getroot()
+    frame = diagnostics["configured_tcp"]["frame"]
+    links = {node.get("name") for node in robot.findall("link")}
+    if frame in links:
+        return Path(urdf_path), {"status": "NOT_NEEDED"}
+    configured = diagnostics["configured_tcp"]
+    if configured["status"] != "unique_link_found" or len(configured["matching_paths"]) != 1:
+        raise ValueError("cannot add a missing or ambiguous USD end frame")
+    root = stage.GetPrimAtPath(robot_path)
+    end = stage.GetPrimAtPath(configured["matching_paths"][0])
+    if (not end or not end.GetPath().HasPrefix(root.GetPath())
+            or not end.IsA(UsdGeom.Xformable)):
+        raise ValueError("end frame must be an Xformable inside this robot")
+    parent = end
+    while parent and parent != root and parent.GetName() not in links:
+        if parent.HasAPI(UsdPhysics.RigidBodyAPI):
+            raise ValueError("cannot replace an omitted rigid body with a fixed virtual frame")
+        parent = parent.GetParent()
+    if not parent or parent.GetName() not in links:
+        raise ValueError("no exported ancestor link found for USD end frame")
+    matches = [p for p in Usd.PrimRange(root, Usd.TraverseInstanceProxies())
+               if p.GetName() == parent.GetName() and p.IsA(UsdGeom.Xformable)]
+    if len(matches) != 1:
+        raise ValueError("exported ancestor name is ambiguous in USD")
+    cache = UsdGeom.XformCache()
+    meters = diagnostics["meters_per_unit"]
+    relative = (np.linalg.inv(_usd_rigid_matrix(cache, parent, meters))
+                @ _usd_rigid_matrix(cache, end, meters))
+    rotation = relative[:3, :3]
+    pitch = math.asin(float(np.clip(-rotation[2, 0], -1, 1)))
+    if abs(math.cos(pitch)) > 1e-8:
+        roll, yaw = math.atan2(rotation[2, 1], rotation[2, 2]), math.atan2(rotation[1, 0], rotation[0, 0])
+    else:
+        roll, yaw = 0.0, math.atan2(-rotation[0, 1], rotation[1, 1])
+    rpy = [roll, pitch, yaw]
+    joint_name = f"fdw_{frame}_fixed"
+    if any(j.get("name") == joint_name for j in robot.findall("joint")):
+        raise ValueError(f"derived fixed joint name already exists: {joint_name}")
+    ET.SubElement(robot, "link", name=frame)
+    joint = ET.SubElement(robot, "joint", name=joint_name, type="fixed")
+    ET.SubElement(joint, "parent", link=parent.GetName())
+    ET.SubElement(joint, "child", link=frame)
+    ET.SubElement(joint, "origin", xyz=" ".join(format(v, ".17g") for v in relative[:3, 3]),
+                  rpy=" ".join(format(v, ".17g") for v in rpy))
+    output = Path(urdf_path).with_name(Path(urdf_path).stem + "_with_end_frame.urdf")
+    if output.exists():
+        raise FileExistsError(output)
+    ET.indent(tree)
+    tree.write(output, encoding="utf-8", xml_declaration=True)
+    return output, {"status": "ADDED_FROM_USD", "parent_link": parent.GetName(),
+                    "source_parent_path": str(parent.GetPath()), "source_end_path": str(end.GetPath()),
+                    "xyz_m": relative[:3, 3].tolist(), "rpy_rad": rpy,
+                    "calibration_verified": False, "inertial_properties_added": False}
+
+
 def compare_urdf_to_usd(urdf_path, stage, robot_path, diagnostics):
     """A single-pose consistency check, not full kinematic/contact certification."""
     from pxr import Usd, UsdGeom
@@ -141,16 +213,9 @@ def compare_urdf_to_usd(urdf_path, stage, robot_path, diagnostics):
             raise ValueError(f"URDF root link has no unique USD match: {root}")
         cache = UsdGeom.XformCache()
 
-        def matrix(prim):
-            transform = cache.GetLocalToWorldTransform(prim)
-            value = np.asarray([[transform[i][j] for j in range(4)] for i in range(4)]).T.copy()
-            if not np.isfinite(value).all() or not np.allclose(value[:3, :3].T @ value[:3, :3], np.eye(3), atol=1e-5):
-                raise ValueError("scaled/nonfinite robot frame cannot be compared as a rigid URDF pose")
-            value[:3, 3] *= diagnostics["meters_per_unit"]
-            return value
-
-        predicted = matrix(roots[0]) @ fk[frame]
-        actual = matrix(stage.GetPrimAtPath(diagnostics["configured_tcp"]["matching_paths"][0]))
+        predicted = _usd_rigid_matrix(cache, roots[0], diagnostics["meters_per_unit"]) @ fk[frame]
+        actual = _usd_rigid_matrix(cache, stage.GetPrimAtPath(diagnostics["configured_tcp"]["matching_paths"][0]),
+                                   diagnostics["meters_per_unit"])
         distance = float(np.linalg.norm(predicted[:3, 3] - actual[:3, 3]))
         cosine = (np.trace(predicted[:3, :3].T @ actual[:3, :3]) - 1) / 2
         angle = math.acos(float(np.clip(cosine, -1, 1)))
@@ -186,8 +251,16 @@ def export_robot_model(stage, robot_path, spec, diagnostics, output_dir, *, conv
             "error": f"{type(exc).__name__}: {exc}", "source_diagnostics": diagnostics},
             ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
         raise RuntimeError(f"Robot export failed; details saved to {error_path}") from exc
-    check = compare_urdf_to_usd(urdf_path, stage, robot_path, diagnostics)
-    report = {"urdf_path": str(urdf_path), "source_diagnostics": diagnostics, "comparison": check,
+    raw_urdf_path = urdf_path
+    try:
+        urdf_path, end_frame = add_fixed_end_frame(raw_urdf_path, stage, robot_path, diagnostics)
+        check = compare_urdf_to_usd(urdf_path, stage, robot_path, diagnostics)
+    except Exception as exc:
+        end_frame = {"status": "FAILED", "error": f"{type(exc).__name__}: {exc}"}
+        check = {"status": "FAILED", "errors": [end_frame["error"]],
+                 "full_kinematics_verified": False, "physical_grasp_verified": False}
+    report = {"raw_urdf_path": str(raw_urdf_path), "urdf_path": str(urdf_path),
+              "fixed_end_frame": end_frame, "source_diagnostics": diagnostics, "comparison": check,
               "controller_configuration_changed": False,
               "next_step": "Review URDF and one-pose comparison before generating a matching Lula description."}
     (output_dir / "model_comparison.json").write_text(

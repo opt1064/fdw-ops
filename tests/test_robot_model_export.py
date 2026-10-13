@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fdw_sim.visualization.robot_model_export import (
-    compare_urdf_to_usd, export_robot_model, urdf_forward_kinematics,
+    add_fixed_end_frame, compare_urdf_to_usd, export_robot_model, urdf_forward_kinematics,
 )
 
 URDF = '''<robot name="test">
@@ -131,3 +131,75 @@ def test_export_failure_preserves_evidence(model, tmp_path):
         export_robot_model(stage, "/Robot", SimpleNamespace(name="test"), diagnostics,
                            target, converter_factory=unavailable_converter)
     assert "export API unavailable" in (target / "export_error.json").read_text()
+
+
+def _remove_exporter_site_frame(path):
+    tree = ET.parse(path)
+    root = tree.getroot()
+    root.remove(root.find("link[@name='ee_link']"))
+    root.remove(root.find("joint[@name='flange']"))
+    tree.write(path)
+
+
+@pytest.mark.parametrize("pitch", [0, 35, 90, -90])
+def test_omitted_end_frame_is_derived_from_usd_even_with_rotation(model, pitch):
+    from pxr import Gf, UsdGeom
+    path, stage, diagnostics = model
+    _remove_exporter_site_frame(path)
+    raw = path.read_bytes()
+    end = UsdGeom.Xform(stage.GetPrimAtPath(diagnostics["configured_tcp"]["matching_paths"][0]))
+    q = (Gf.Rotation(Gf.Vec3d(0, 0, 1), 30).GetQuat()
+         * Gf.Rotation(Gf.Vec3d(0, 1, 0), pitch).GetQuat()
+         * Gf.Rotation(Gf.Vec3d(1, 0, 0), 20).GetQuat())
+    end.AddOrientOp().Set(Gf.Quatf(q))
+    before = stage.GetRootLayer().ExportToString()
+    derived, evidence = add_fixed_end_frame(path, stage, "/Robot", diagnostics)
+    assert path.read_bytes() == raw
+    assert stage.GetRootLayer().ExportToString() == before
+    assert derived != path
+    assert evidence["status"] == "ADDED_FROM_USD"
+    assert evidence["xyz_m"] == pytest.approx([0.2, 0, 0], abs=1e-6)
+    assert evidence["calibration_verified"] is False
+    assert ET.parse(derived).getroot().find("link[@name='ee_link']/inertial") is None
+    comparison = compare_urdf_to_usd(derived, stage, "/Robot", diagnostics)
+    assert comparison["status"] == "PASSED_SINGLE_POSE", comparison
+
+
+def test_omitted_rigid_body_is_not_replaced_with_fixed_frame(model):
+    from pxr import UsdPhysics
+    path, stage, diagnostics = model
+    _remove_exporter_site_frame(path)
+    end = stage.GetPrimAtPath(diagnostics["configured_tcp"]["matching_paths"][0])
+    UsdPhysics.RigidBodyAPI.Apply(end)
+    with pytest.raises(ValueError, match="omitted rigid body"):
+        add_fixed_end_frame(path, stage, "/Robot", diagnostics)
+
+
+def test_derived_frame_converts_stage_length_units(model):
+    from pxr import UsdGeom
+    path, stage, diagnostics = model
+    _remove_exporter_site_frame(path)
+    UsdGeom.SetStageMetersPerUnit(stage, 0.01)
+    diagnostics["meters_per_unit"] = 0.01
+    _, evidence = add_fixed_end_frame(path, stage, "/Robot", diagnostics)
+    assert evidence["xyz_m"] == pytest.approx([0.002, 0, 0], abs=1e-8)
+
+
+def test_export_workflow_preserves_raw_and_compares_derived_model(model, tmp_path):
+    path, stage, diagnostics = model
+
+    class PhysicsOnlyConverter:
+        def __init__(self, **kwargs):
+            pass
+
+        def convert(self, output_path):
+            Path(output_path).write_text(URDF, encoding="utf-8")
+            _remove_exporter_site_frame(output_path)
+            return output_path
+
+    report = export_robot_model(stage, "/Robot", SimpleNamespace(name="test"), diagnostics,
+                               tmp_path / "physics_only", converter_factory=PhysicsOnlyConverter)
+    assert report["raw_urdf_path"] != report["urdf_path"]
+    assert "ee_link" not in Path(report["raw_urdf_path"]).read_text()
+    assert report["fixed_end_frame"]["status"] == "ADDED_FROM_USD"
+    assert report["comparison"]["status"] == "PASSED_SINGLE_POSE"
