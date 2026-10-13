@@ -14,7 +14,8 @@ from fdw_sim.visualization.robot_model_export import _usd_rigid_matrix
 
 
 def run_joint_test(articulation, names, limits, step, measured_pose, predicted_pose, stop,
-                   *, dt=1/60, is_running=lambda: True, realtime=False, action_factory=None):
+                   *, dt=1/60, is_running=lambda: True, realtime=False, action_factory=None,
+                   amplitude_deg=1.0, selected_joints=None):
     """Drive targets only; callback interfaces keep the control loop testable."""
     report = {"status": "FAILED", "errors": [], "legs": [], "motion_commands_issued": False,
               "returned_to_start": False, "collision_verified": False,
@@ -23,6 +24,12 @@ def run_joint_test(articulation, names, limits, step, measured_pose, predicted_p
               "position_tolerance_m": 0.002, "orientation_tolerance_rad": 0.01}
     baseline = None
     try:
+        if not math.isfinite(amplitude_deg) or not 0 < amplitude_deg <= 5:
+            raise ValueError("joint demonstration amplitude must be in (0, 5] degrees")
+        selected = list(names) if selected_joints is None else list(selected_joints)
+        if not selected or len(set(selected)) != len(selected) or any(n not in names for n in selected):
+            raise ValueError("selected joints must be a nonempty unique subset of live joints")
+        report.update(amplitude_deg=amplitude_deg, selected_joints=selected)
         if not math.isfinite(dt) or dt <= 0 or dt > 0.1:
             raise ValueError("invalid physics timestep")
         if list(articulation.dof_names) != list(names) or len(set(names)) != len(names):
@@ -56,12 +63,15 @@ def run_joint_test(articulation, names, limits, step, measured_pose, predicted_p
         baseline = read()
         targets = []
         for index, name in enumerate(names):
+            if name not in selected:
+                continue
             for sign in (1, -1):
                 target = baseline.copy()
-                target[index] += sign * math.radians(1)
+                target[index] += sign * math.radians(amplitude_deg)
                 if any(not limits[n][0] <= target[i] <= limits[n][1] for i, n in enumerate(names)):
                     raise ValueError(f"test target exceeds joint limits: {name}")
-                targets.extend([(f"{name}_{sign:+d}deg", target), (f"{name}_{sign:+d}_return", baseline.copy())])
+                label = f"{name}_{sign*amplitude_deg:+g}deg"
+                targets.extend([(label, target), (f"{name}_{sign*amplitude_deg:+g}_return", baseline.copy())])
         initial_pose = measured_pose()
         initial_error = _pose_error(initial_pose, predicted_pose(baseline))
         if initial_error["position_error_m"] > 0.002 or initial_error["orientation_error_rad"] > 0.01:
@@ -72,14 +82,19 @@ def run_joint_test(articulation, names, limits, step, measured_pose, predicted_p
         report["planned_legs"] = len(targets)
         tolerance = math.radians(0.1)
         stable_frames = max(2, math.ceil(0.1/dt))
-        duration, settle_timeout = 2.0, 3.0
+        duration, settle_timeout = max(2.0, amplitude_deg / 0.5), 3.0
+        report["ramp_duration_sec"] = duration
+        envelope = np.array([amplitude_deg + 0.5 if n in selected else 1.5 for n in names])
+        previous_target = baseline.copy()
         for label, target in targets:
-            start = read()
+            read()  # Validate feedback without introducing a target jump between legs.
+            start = previous_target.copy()
             stable = 0
             row = {"leg": label, "target_rad": target.tolist(), "status": "FAILED",
                    "max_tracking_error_rad": 0.0, "max_position_error_m": 0.0,
                    "max_orientation_error_rad": 0.0}
             report["legs"].append(row)
+            print(f"[JOINT TEST] moving: {label} ({duration:g}s ramp)", flush=True)
             for tick in range(math.ceil((duration+settle_timeout)/dt)):
                 if not is_running():
                     raise RuntimeError("application closed or test interrupted")
@@ -90,7 +105,7 @@ def run_joint_test(articulation, names, limits, step, measured_pose, predicted_p
                 setter(command.copy())
                 step()
                 actual = read()
-                if np.max(np.abs(actual-baseline)) > math.radians(1.5):
+                if np.any(np.abs(actual-baseline) > np.deg2rad(envelope)):
                     raise RuntimeError("joint excursion exceeded small-test envelope")
                 tracking = float(np.max(np.abs(command-actual)))
                 actual_pose = measured_pose()
@@ -113,6 +128,7 @@ def run_joint_test(articulation, names, limits, step, measured_pose, predicted_p
                     time.sleep(max(0, dt-(time.monotonic()-started)))
             else:
                 raise RuntimeError(f"joint target timed out: {label}")
+            previous_target = target.copy()
         final = read()
         report["final_joints_rad"] = final.tolist()
         report["returned_to_start"] = bool(np.max(np.abs(final-baseline)) <= tolerance)
@@ -139,7 +155,7 @@ def run_joint_test(articulation, names, limits, step, measured_pose, predicted_p
     return report
 
 
-def test_live_robot_joints(sim, stage, robot_path, articulation, validation, *, output_dir):
+def test_live_robot_joints(sim, stage, robot_path, articulation, validation, *, output_dir, show_motion=False):
     """Use the model just validated in this same scene; no env/config overrides."""
     from pxr import UsdGeom
     path = Path(output_dir) / "joint_feedback_test.json"
@@ -175,11 +191,30 @@ def test_live_robot_joints(sim, stage, robot_path, articulation, validation, *, 
         robot = ET.parse(validation["urdf_path"]).getroot()
         limits = {j.get("name"): (float(j.find("limit").get("lower")), float(j.find("limit").get("upper")))
                   for j in robot.findall("joint") if j.get("type") != "fixed"}
+        if show_motion:
+            import os
+            if not sim.config.skip_auto_camera:
+                end_position = UsdGeom.XformCache().GetLocalToWorldTransform(frame).ExtractTranslation()
+                center = (np.array(transform.ExtractTranslation()) + np.array(end_position)) / 2
+                sim.visualizer.scene.frame_viewport_to_scene(
+                    center=tuple(center), distance=2.5/meters, height=1.2/meters,
+                    set_viewport_camera=os.environ.get("FDW_DISABLE_VIEWPORT_SWITCH") != "1")
+            print("[ROBOT MOTION] J1: +5 degrees, return, -5 degrees, return. Other joints hold.", flush=True)
+            for seconds in range(5, 0, -1):
+                print(f"[ROBOT MOTION] starts in {seconds}...", flush=True)
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    if not sim._isaac_app.is_running():
+                        raise RuntimeError("application closed before demonstration")
+                    sim._isaac_app.update()
+                    time.sleep(0.02)
         sim._isaac_world.play()
         result = run_joint_test(articulation, names, limits,
             lambda: sim._isaac_world.step(render=not sim.config.headless), measured, predicted,
             sim._isaac_world.pause, dt=sim._dt, is_running=sim._isaac_app.is_running,
-            realtime=sim.config.realtime)
+            realtime=sim.config.realtime, amplitude_deg=5.0 if show_motion else 1.0,
+            selected_joints=["J1"] if show_motion else None)
+        result["demonstration_mode"] = show_motion
     except (Exception, KeyboardInterrupt) as exc:
         result = {"status": "FAILED", "errors": [f"{type(exc).__name__}: {exc}"],
                   "motion_commands_issued": False, "physical_grasp_verified": False}

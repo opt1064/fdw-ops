@@ -82,6 +82,8 @@ def main() -> int:
                    help="내보낸 모델의 FK 전용 Lula 설정 생성 및 여러 자세 USD/URDF/Lula 계산 대조")
     p.add_argument("--joint-feedback-test", action="store_true",
                    help="모델 검증 후 실제 시뮬레이션 관절을 ±1도씩 구동하고 피드백 대조")
+    p.add_argument("--show-robot-motion", action="store_true",
+                   help="FANUC 근접 화면에서 J1 ±5도 저속 시연 (진단·모델 검증 포함, 생산 작업 없음)")
     p.add_argument("--weld-offset", type=float, default=0.25,
                    help="용접 경로 길이의 절반 (m, 입력 버퍼 중심 ±값)")
     p.add_argument("--weld-height", type=float, default=0.05,
@@ -170,6 +172,15 @@ def main() -> int:
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
     args = p.parse_args()
+    if args.show_robot_motion:
+        if args.headless or args.livestream:
+            p.error("--show-robot-motion requires the local GUI")
+        args.real_robot = True
+        args.robot_diagnostics = True
+        args.export_robot_model = True
+        args.validate_lula_model = True
+        args.joint_feedback_test = True
+        args.realtime = True
     if args.export_robot_model and not args.robot_diagnostics:
         p.error("--export-robot-model requires --robot-diagnostics")
     if args.validate_lula_model and not args.export_robot_model:
@@ -384,7 +395,8 @@ def main() -> int:
                     if args.joint_feedback_test:
                         from fdw_sim.visualization.joint_feedback_test import test_live_robot_joints
                         result, test_path = test_live_robot_joints(sim, viz.scene._stage, f"{cell_root}/RobotArm",
-                                                                   robot.get("articulation"), validation, output_dir=model_dir)
+                                                                   robot.get("articulation"), validation, output_dir=model_dir,
+                                                                   show_motion=args.show_robot_motion)
                         print(f"[JOINT TEST] report saved: {test_path}")
                         print(json.dumps(result, ensure_ascii=False, indent=2))
                         if result["status"] != "PASSED_SIMULATED_JOINT_FEEDBACK":

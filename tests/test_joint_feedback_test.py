@@ -210,3 +210,56 @@ def test_cli_rejects_incomplete_or_wrong_robot_flags_before_boot(monkeypatch, ar
     with pytest.raises(SystemExit) as exc:
         cli.main()
     assert exc.value.code == 2
+
+
+def test_visible_demo_moves_only_j1_five_degrees_at_original_slow_speed():
+    plant = Plant()
+    baseline = plant.q.copy()
+    result = run(plant, amplitude_deg=5, selected_joints=["J1"])
+    assert result["status"] == "PASSED_SIMULATED_JOINT_FEEDBACK"
+    assert result["planned_legs"] == result["passed_legs"] == 4
+    assert result["selected_joints"] == ["J1"]
+    assert result["amplitude_deg"] == 5 and result["ramp_duration_sec"] == 10
+    commands = np.array(plant.commands)
+    np.testing.assert_array_equal(commands[:, 1], np.full(len(commands), baseline[1]))
+    assert commands[:, 0].max() == pytest.approx(baseline[0]+math.radians(5))
+    assert commands[:, 0].min() == pytest.approx(baseline[0]-math.radians(5))
+    assert np.max(np.abs(np.diff(commands[:, 0]))) < math.radians(0.026)
+    assert result["returned_to_start"]
+
+
+@pytest.mark.parametrize("options", [
+    {"amplitude_deg": 6}, {"amplitude_deg": float("nan")}, {"amplitude_deg": 0},
+    {"selected_joints": []}, {"selected_joints": ["missing"]},
+    {"selected_joints": ["J1", "J1"]},
+])
+def test_invalid_demonstration_request_blocks_commands(options):
+    plant = Plant()
+    result = run(plant, **options)
+    assert result["status"] == "FAILED" and not plant.commands and plant.paused
+
+
+def test_demo_preflights_larger_target_against_authored_limits():
+    plant = Plant()
+    result = run(plant, amplitude_deg=5, selected_joints=["J1"],
+                 limits={"J1": (-2, 0.25), "J2": (-2, 2)})
+    assert "exceeds joint limits" in result["errors"][0]
+    assert not plant.commands and plant.paused
+
+
+def test_demo_keeps_small_envelope_on_unselected_joints():
+    plant = Plant()
+    def runaway_other_joint():
+        plant.q[1] += math.radians(2)
+    result = run(plant, amplitude_deg=5, selected_joints=["J1"], step=runaway_other_joint)
+    assert "envelope" in result["errors"][0] and plant.paused
+
+
+@pytest.mark.parametrize("args", [["--headless"], ["--robot", "ur10"], ["--no-viz"]])
+def test_demo_cli_rejects_incompatible_options_before_boot(monkeypatch, args):
+    from scripts import run_poc1_level2_2 as cli
+    monkeypatch.setattr(sys, "argv", ["run_poc1_level2_2.py", "--show-robot-motion", *args])
+    monkeypatch.setattr(cli, "load_config", lambda *a: pytest.fail("invalid demo must not boot"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 2

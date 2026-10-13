@@ -7,6 +7,31 @@
 
 ## 실행
 
+### 화면에서 팔 움직임 먼저 보기
+
+사용자 환경에서 ±1° 관절 시험이 통과한 뒤, 눈으로 움직임을 확인하려면:
+
+```bash
+"$ISAACSIM_PYTHON_EXE" scripts/run_poc1_level2_2.py \
+  --gui --show-robot-motion --keep-alive
+```
+
+이 옵션은 FANUC 진단·내보내기·Lula 검증·실시간 관절 시험을 활성화한다.
+모델 검증 통과 후 기존 SceneCamera를 로봇 base와 말단의 중간 위치에 맞춰 가까이 배치한다.
+5초 카운트다운 뒤 J1만 `+5° → 시작 자세 → -5° → 시작 자세`로 움직이며,
+각 이동은 10초, 총 약 40초다. 다른 관절은 시작 자세 목표를 유지한다.
+생산 작업과 부품 투입은 없다. 보고서의 `selected_joints`는 `["J1"]`,
+`amplitude_deg`는 5, `planned_legs` 및 `passed_legs`는 성공 시 4이다.
+이 결과로 J2~J6 시연이나 충돌 검증을 주장하지 않는다.
+선택한 관절의 허용 이탈은 시작 자세에서 5.5°, 나머지는 기존 1.5°다.
+관절 한계·추종·말단 좌표 검사와 실패 시 정지는 계속 적용한다.
+
+`--safe-mode`, `--skip-auto-camera`, `--disable-viewport-switch`의 기존 카메라
+회피 설정은 존중한다. 카메라 자동 전환을 끈 환경에서는 로봇을 수동으로 확대한다.
+GUI 전용이며 `--headless` 및 `--livestream`과 함께 사용하지 않는다.
+
+### 전체 관절 ±1° 피드백 시험
+
 검토 checkout에서 `git status -sb`로 미커밋 변경이 없고 브랜치가
 `review/fdw-pr1`인지 먼저 확인한다. 이후:
 
