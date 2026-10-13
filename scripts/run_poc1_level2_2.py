@@ -75,11 +75,13 @@ def main() -> int:
     p.add_argument("--no-ik", action="store_true",
                    help="모션 컨트롤러 전체 비활성 (홈 자세 고정)")
     p.add_argument("--robot-diagnostics", action="store_true",
-                   help="작업 투입 없이 실제 관절·TCP 후보·좌표를 JSON으로 수집 (팔 명령 없음)")
+                   help="작업 투입 없이 관절·TCP 후보·좌표 수집 (joint-feedback-test 제외 팔 명령 없음)")
     p.add_argument("--export-robot-model", action="store_true",
                    help="--robot-diagnostics와 함께 FANUC USD를 URDF로 내보내고 모델 대조 (팔 명령 없음)")
     p.add_argument("--validate-lula-model", action="store_true",
                    help="내보낸 모델의 FK 전용 Lula 설정 생성 및 여러 자세 USD/URDF/Lula 계산 대조")
+    p.add_argument("--joint-feedback-test", action="store_true",
+                   help="모델 검증 후 실제 시뮬레이션 관절을 ±1도씩 구동하고 피드백 대조")
     p.add_argument("--weld-offset", type=float, default=0.25,
                    help="용접 경로 길이의 절반 (m, 입력 버퍼 중심 ±값)")
     p.add_argument("--weld-height", type=float, default=0.05,
@@ -172,6 +174,10 @@ def main() -> int:
         p.error("--export-robot-model requires --robot-diagnostics")
     if args.validate_lula_model and not args.export_robot_model:
         p.error("--validate-lula-model requires --robot-diagnostics --export-robot-model")
+    if args.joint_feedback_test and not args.validate_lula_model:
+        p.error("--joint-feedback-test requires --validate-lula-model and diagnostic export flags")
+    if args.joint_feedback_test and args.robot != "fanuc_crx10ia":
+        p.error("--joint-feedback-test currently requires --robot fanuc_crx10ia")
     if args.robot_diagnostics and (not args.real_robot or args.no_viz or args.single_amr_demo):
         p.error("--robot-diagnostics requires --real-robot and visualization; omit --single-amr-demo")
     setup_logging(level=args.log_level)
@@ -274,6 +280,7 @@ def main() -> int:
     print(f" Real robot       : {sim.config.use_real_robot}")
     print(f" Robot model      : {sim.config.robot_name}")
     print(f" Motion enabled   : {sim.config.enable_ik}")
+    print(f" Joint drive test : {args.joint_feedback_test} (separate diagnostic drive commands)")
     print(f" Motion mode      : {sim.config.motion_mode} "
           f"(auto=rmpflow→ik→heuristic)")
     print(f" Execution        : {sim.config.motion_execution} (schematic is not physical grasp/welding)")
@@ -339,6 +346,7 @@ def main() -> int:
 
     try:
         if args.robot_diagnostics:
+            diagnostic_exit = 0
             from fdw_sim.visualization.robot_diagnostics import collect_robot_diagnostics
             from fdw_sim.visualization.robot_loader import ROBOT_CATALOG
             viz = sim.visualizer
@@ -373,10 +381,28 @@ def main() -> int:
                     print(f"[LULA MODEL] status={validation['status']} checked={validation['checked_poses']} "
                           f"passed={validation['passed_poses']} (computed poses; no robot motion)")
                     print(json.dumps(validation["errors"], ensure_ascii=False))
-            print("[ROBOT DIAGNOSTICS] No jobs or arm commands issued; TCP/grasp calibration remains unverified.")
+                    if args.joint_feedback_test:
+                        from fdw_sim.visualization.joint_feedback_test import test_live_robot_joints
+                        result, test_path = test_live_robot_joints(sim, viz.scene._stage, f"{cell_root}/RobotArm",
+                                                                   robot.get("articulation"), validation, output_dir=model_dir)
+                        print(f"[JOINT TEST] report saved: {test_path}")
+                        print(json.dumps(result, ensure_ascii=False, indent=2))
+                        if result["status"] != "PASSED_SIMULATED_JOINT_FEEDBACK":
+                            diagnostic_exit = 2
+            print("[ROBOT DIAGNOSTICS] No production jobs issued; TCP/grasp calibration remains unverified.")
+            if not args.joint_feedback_test:
+                print("[ROBOT DIAGNOSTICS] No arm commands issued.")
             if args.keep_alive:
-                sim.keep_viewer_alive()
-            return 0
+                if diagnostic_exit:
+                    print("[JOINT TEST] FAILED: paused; viewer updates only. Close window or Ctrl+C to exit.")
+                    try:
+                        while sim._isaac_app.is_running():
+                            sim._isaac_app.update()
+                    except KeyboardInterrupt:
+                        pass
+                else:
+                    sim.keep_viewer_alive()
+            return diagnostic_exit
         submit_jobs(sim, cfg)
         print("[INFO] 3 jobs 투입 — RMPflow 모션 + 스파크 파티클 시각화 시작\n")
         sim.run_until_done(all_jobs_done=True, extra_idle_sec=3.0)
