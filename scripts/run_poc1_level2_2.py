@@ -76,6 +76,8 @@ def main() -> int:
                    help="모션 컨트롤러 전체 비활성 (홈 자세 고정)")
     p.add_argument("--robot-diagnostics", action="store_true",
                    help="작업 투입 없이 실제 관절·TCP 후보·좌표를 JSON으로 수집 (팔 명령 없음)")
+    p.add_argument("--export-robot-model", action="store_true",
+                   help="--robot-diagnostics와 함께 FANUC USD를 URDF로 내보내고 모델 대조 (팔 명령 없음)")
     p.add_argument("--weld-offset", type=float, default=0.25,
                    help="용접 경로 길이의 절반 (m, 입력 버퍼 중심 ±값)")
     p.add_argument("--weld-height", type=float, default=0.05,
@@ -164,6 +166,8 @@ def main() -> int:
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
     args = p.parse_args()
+    if args.export_robot_model and not args.robot_diagnostics:
+        p.error("--export-robot-model requires --robot-diagnostics")
     if args.robot_diagnostics and (not args.real_robot or args.no_viz or args.single_amr_demo):
         p.error("--robot-diagnostics requires --real-robot and visualization; omit --single-amr-demo")
     setup_logging(level=args.log_level)
@@ -349,6 +353,15 @@ def main() -> int:
             output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
             print(f"[ROBOT DIAGNOSTICS] saved: {output}")
             print(json.dumps(report, ensure_ascii=False, indent=2))
+            if args.export_robot_model:
+                from fdw_sim.visualization.robot_model_export import export_robot_model
+                from uuid import uuid4
+                model_dir = sim.config.log_dir / (time.strftime("fanuc_model_%Y%m%d_%H%M%S_") + uuid4().hex[:8])
+                exported = export_robot_model(viz.scene._stage, f"{cell_root}/RobotArm",
+                                              ROBOT_CATALOG[args.robot], report, model_dir)
+                print(f"[ROBOT MODEL] URDF saved: {exported['urdf_path']}")
+                print(f"[ROBOT MODEL] comparison saved: {model_dir / 'model_comparison.json'}")
+                print(json.dumps(exported["comparison"], ensure_ascii=False, indent=2))
             print("[ROBOT DIAGNOSTICS] No jobs or arm commands issued; TCP/grasp calibration remains unverified.")
             if args.keep_alive:
                 sim.keep_viewer_alive()
