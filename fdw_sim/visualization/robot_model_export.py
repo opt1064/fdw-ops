@@ -92,7 +92,10 @@ def urdf_forward_kinematics(robot, q):
 
 
 def _usd_rigid_matrix(cache, prim, meters):
-    transform = cache.GetLocalToWorldTransform(prim)
+    return _gf_rigid_matrix(cache.GetLocalToWorldTransform(prim), meters)
+
+
+def _gf_rigid_matrix(transform, meters):
     value = np.asarray([[transform[i][j] for j in range(4)] for i in range(4)]).T.copy()
     rotation = value[:3, :3]
     if (not np.isfinite(value).all()
@@ -103,7 +106,19 @@ def _usd_rigid_matrix(cache, prim, meters):
     return value
 
 
-def add_fixed_end_frame(urdf_path, stage, robot_path, diagnostics):
+def exporter_link_frames(stage, robot_path):
+    """Read the installed exporter's own link-frame convention, not body frames."""
+    from pxr import UsdGeom
+    from isaacsim.asset.exporter.urdf.converter.robot_finder import find_robot
+    from isaacsim.asset.exporter.urdf.converter.urdf_frames import build_urdf_frames
+    description = find_robot(stage, robot_path)
+    frames, _ = build_urdf_frames(description)
+    robot_world = UsdGeom.XformCache().GetLocalToWorldTransform(description.root_prim)
+    meters = UsdGeom.GetStageMetersPerUnit(stage)
+    return {path: _gf_rigid_matrix(frame * robot_world, meters) for path, frame in frames.items()}
+
+
+def add_fixed_end_frame(urdf_path, stage, robot_path, diagnostics, *, link_frames=None):
     """Preserve raw export; derive a missing nonphysical end frame from USD only."""
     from pxr import Usd, UsdGeom, UsdPhysics
 
@@ -134,7 +149,16 @@ def add_fixed_end_frame(urdf_path, stage, robot_path, diagnostics):
         raise ValueError("exported ancestor name is ambiguous in USD")
     cache = UsdGeom.XformCache()
     meters = diagnostics["meters_per_unit"]
-    relative = (np.linalg.inv(_usd_rigid_matrix(cache, parent, meters))
+    parent_path = str(parent.GetPath())
+    if link_frames is None or parent_path not in link_frames:
+        raise ValueError("official exporter link frame is required; USD body frame is not a substitute")
+    parent_frame = np.asarray(link_frames[parent_path], dtype=float)
+    if (parent_frame.shape != (4, 4) or not np.isfinite(parent_frame).all()
+            or not np.allclose(parent_frame[3], [0, 0, 0, 1])
+            or not np.allclose(parent_frame[:3, :3].T @ parent_frame[:3, :3], np.eye(3), atol=1e-5)
+            or not math.isclose(float(np.linalg.det(parent_frame[:3, :3])), 1.0, abs_tol=1e-5)):
+        raise ValueError("invalid exporter link frame")
+    relative = (np.linalg.inv(parent_frame)
                 @ _usd_rigid_matrix(cache, end, meters))
     rotation = relative[:3, :3]
     pitch = math.asin(float(np.clip(-rotation[2, 0], -1, 1)))
@@ -157,9 +181,13 @@ def add_fixed_end_frame(urdf_path, stage, robot_path, diagnostics):
         raise FileExistsError(output)
     ET.indent(tree)
     tree.write(output, encoding="utf-8", xml_declaration=True)
+    body_frame = _usd_rigid_matrix(cache, parent, meters)
     return output, {"status": "ADDED_FROM_USD", "parent_link": parent.GetName(),
                     "source_parent_path": str(parent.GetPath()), "source_end_path": str(end.GetPath()),
                     "xyz_m": relative[:3, 3].tolist(), "rpy_rad": rpy,
+                    "parent_frame_source": "installed_exporter.build_urdf_frames",
+                    "exporter_parent_world_matrix_m": parent_frame.tolist(),
+                    "usd_body_parent_world_matrix_m": body_frame.tolist(),
                     "calibration_verified": False, "inertial_properties_added": False}
 
 
@@ -231,7 +259,8 @@ def compare_urdf_to_usd(urdf_path, stage, robot_path, diagnostics):
     return result
 
 
-def export_robot_model(stage, robot_path, spec, diagnostics, output_dir, *, converter_factory=None):
+def export_robot_model(stage, robot_path, spec, diagnostics, output_dir, *, converter_factory=None,
+                       frame_provider=None):
     """Write only to a fresh output directory; never alter source assets or controller settings."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -253,7 +282,11 @@ def export_robot_model(stage, robot_path, spec, diagnostics, output_dir, *, conv
         raise RuntimeError(f"Robot export failed; details saved to {error_path}") from exc
     raw_urdf_path = urdf_path
     try:
-        urdf_path, end_frame = add_fixed_end_frame(raw_urdf_path, stage, robot_path, diagnostics)
+        frame = diagnostics["configured_tcp"]["frame"]
+        needs_frame = not any(link.get("name") == frame for link in ET.parse(raw_urdf_path).getroot().findall("link"))
+        frames = (frame_provider or exporter_link_frames)(stage, robot_path) if needs_frame else None
+        urdf_path, end_frame = add_fixed_end_frame(raw_urdf_path, stage, robot_path, diagnostics,
+                                                 link_frames=frames)
         check = compare_urdf_to_usd(urdf_path, stage, robot_path, diagnostics)
     except Exception as exc:
         end_frame = {"status": "FAILED", "error": f"{type(exc).__name__}: {exc}"}

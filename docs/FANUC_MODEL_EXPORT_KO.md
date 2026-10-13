@@ -31,11 +31,15 @@ git pull --ff-only origin fix/fdw-quality-disposition-base-pose
 - `fanuc_crx10ia.urdf` 및 `meshes/`: 공식 exporter가 추출한 모델.
 - exporter가 비물리 `ee_link` 프레임을 생략하면
   `fanuc_crx10ia_with_end_frame.urdf`를 별도로 생성한다. 실제 USD에서
-  가장 가까운 내보낸 상위 링크와 `ee_link` 사이의 고정 변환을 읽어 추가한다.
+  `ee_link`를 읽고, 설치된 exporter의 `build_urdf_frames`가 정의한 상위
+  URDF 링크 좌표계와의 고정 변환을 계산해 추가한다. URDF 링크 좌표계는
+  관절 기준으로 재정의될 수 있으므로 USD 몸체 좌표계로 대체하지 않는다.
   원본 URDF는 그대로 보존하며 질량·관성·그리퍼 보정값은 추가하지 않는다.
 - `model_comparison.json`: 원본 진단, 관절 이름·종류·부모/자식·한계 대조,
   현재 피드백 관절값으로 계산한 말단 위치·방향 차이. `fixed_end_frame`에는
   고정 프레임을 만든 USD 경로·변환과 검증 한계가 기록된다.
+  `exporter_parent_world_matrix_m`과 `usd_body_parent_world_matrix_m`도 남겨
+  exporter 링크 좌표계와 USD 몸체 좌표계의 차이를 추적할 수 있다.
 - 내보내기 API 또는 변환 실패 시 `export_error.json`과 traceback을 보존한다.
 
 URDF는 미터·라디안을 사용한다. USD revolute 한계는 도에서 라디안으로
@@ -51,6 +55,10 @@ URDF는 미터·라디안을 사용한다. USD revolute 한계는 도에서 라�
 `FAILED`라면 `comparison.errors`를 검토한다. USD에서 프레임을 찾지 못하거나
 상위 링크 이름이 중복되면 자동 추가하지 않는다. 누락된 실제 rigid body도
 고정 프레임으로 대체하지 않는다. 링크·축·물성값을 임의로 보충하지 않는다.
+설치된 exporter의 링크 프레임을 읽지 못해도 USD 몸체 프레임으로 대신 계산하지 않는다.
+
+프레임 정의 참고:
+https://github.com/isaac-sim/IsaacSim/blob/main/source/extensions/isaacsim.asset.exporter.urdf/isaacsim/asset/exporter/urdf/converter/urdf_frames.py
 
 URDF와 `model_comparison.json` 및 같은 실행 로그를 확보한다. 이 결과를
 검토한 뒤 URDF와 일치하는 Lula robot description을 만들고, 다중 자세 대조와

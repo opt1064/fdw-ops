@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fdw_sim.visualization.robot_model_export import (
-    add_fixed_end_frame, compare_urdf_to_usd, export_robot_model, urdf_forward_kinematics,
+    add_fixed_end_frame, compare_urdf_to_usd, exporter_link_frames, export_robot_model, urdf_forward_kinematics,
 )
 
 URDF = '''<robot name="test">
@@ -141,6 +141,14 @@ def _remove_exporter_site_frame(path):
     tree.write(path)
 
 
+def _fixture_link_frames(stage, robot_path):
+    from pxr import UsdGeom
+    matrix = UsdGeom.XformCache().GetLocalToWorldTransform(stage.GetPrimAtPath(robot_path + "/J2_link"))
+    value = np.array([[matrix[i][j] for j in range(4)] for i in range(4)]).T.copy()
+    value[:3, 3] *= UsdGeom.GetStageMetersPerUnit(stage)
+    return {robot_path + "/J2_link": value}
+
+
 @pytest.mark.parametrize("pitch", [0, 35, 90, -90])
 def test_omitted_end_frame_is_derived_from_usd_even_with_rotation(model, pitch):
     from pxr import Gf, UsdGeom
@@ -153,7 +161,8 @@ def test_omitted_end_frame_is_derived_from_usd_even_with_rotation(model, pitch):
          * Gf.Rotation(Gf.Vec3d(1, 0, 0), 20).GetQuat())
     end.AddOrientOp().Set(Gf.Quatf(q))
     before = stage.GetRootLayer().ExportToString()
-    derived, evidence = add_fixed_end_frame(path, stage, "/Robot", diagnostics)
+    derived, evidence = add_fixed_end_frame(path, stage, "/Robot", diagnostics,
+                                           link_frames=_fixture_link_frames(stage, "/Robot"))
     assert path.read_bytes() == raw
     assert stage.GetRootLayer().ExportToString() == before
     assert derived != path
@@ -172,7 +181,8 @@ def test_omitted_rigid_body_is_not_replaced_with_fixed_frame(model):
     end = stage.GetPrimAtPath(diagnostics["configured_tcp"]["matching_paths"][0])
     UsdPhysics.RigidBodyAPI.Apply(end)
     with pytest.raises(ValueError, match="omitted rigid body"):
-        add_fixed_end_frame(path, stage, "/Robot", diagnostics)
+        add_fixed_end_frame(path, stage, "/Robot", diagnostics,
+                            link_frames=_fixture_link_frames(stage, "/Robot"))
 
 
 def test_derived_frame_converts_stage_length_units(model):
@@ -181,7 +191,8 @@ def test_derived_frame_converts_stage_length_units(model):
     _remove_exporter_site_frame(path)
     UsdGeom.SetStageMetersPerUnit(stage, 0.01)
     diagnostics["meters_per_unit"] = 0.01
-    _, evidence = add_fixed_end_frame(path, stage, "/Robot", diagnostics)
+    _, evidence = add_fixed_end_frame(path, stage, "/Robot", diagnostics,
+                                     link_frames=_fixture_link_frames(stage, "/Robot"))
     assert evidence["xyz_m"] == pytest.approx([0.002, 0, 0], abs=1e-8)
 
 
@@ -198,8 +209,52 @@ def test_export_workflow_preserves_raw_and_compares_derived_model(model, tmp_pat
             return output_path
 
     report = export_robot_model(stage, "/Robot", SimpleNamespace(name="test"), diagnostics,
-                               tmp_path / "physics_only", converter_factory=PhysicsOnlyConverter)
+                               tmp_path / "physics_only", converter_factory=PhysicsOnlyConverter,
+                               frame_provider=_fixture_link_frames)
     assert report["raw_urdf_path"] != report["urdf_path"]
     assert "ee_link" not in Path(report["raw_urdf_path"]).read_text()
     assert report["fixed_end_frame"]["status"] == "ADDED_FROM_USD"
     assert report["comparison"]["status"] == "PASSED_SINGLE_POSE"
+
+
+def test_distinct_exporter_and_body_frames_are_not_confused(model):
+    path, stage, diagnostics = model
+    _remove_exporter_site_frame(path)
+    tree = ET.parse(path)
+    joint = tree.getroot().find("joint[@name='J2']")
+    joint.find("origin").set("rpy", f"{math.pi} 0 0")
+    joint.find("axis").set("xyz", "0 -1 0")
+    tree.write(path)
+    frames = _fixture_link_frames(stage, "/Robot")
+    body = frames["/Robot/J2_link"].copy()
+    # Independently constructed exporter coordinate convention: its frame is
+    # rotated relative to the USD body, with the joint axis represented accordingly.
+    frames["/Robot/J2_link"] = body @ np.diag([1, -1, -1, 1])
+    derived, evidence = add_fixed_end_frame(path, stage, "/Robot", diagnostics, link_frames=frames)
+    assert evidence["parent_frame_source"] == "installed_exporter.build_urdf_frames"
+    report = compare_urdf_to_usd(derived, stage, "/Robot", diagnostics)
+    assert report["status"] == "PASSED_SINGLE_POSE", report
+    assert report["orientation_error_rad"] < 1e-6
+
+
+def test_missing_exporter_frame_does_not_fall_back_to_body_frame(model):
+    path, stage, diagnostics = model
+    _remove_exporter_site_frame(path)
+    with pytest.raises(ValueError, match="exporter link frame is required"):
+        add_fixed_end_frame(path, stage, "/Robot", diagnostics)
+
+
+def test_installed_exporter_frames_are_composed_with_robot_world_pose(model, monkeypatch):
+    from pxr import Gf
+    from types import ModuleType
+    path, stage, diagnostics = model
+    frame = Gf.Matrix4d(1)
+    frame.SetTranslate((0.6, 0.1, 0.2))
+    finder = ModuleType("robot_finder")
+    finder.find_robot = lambda stage, path: SimpleNamespace(root_prim=stage.GetPrimAtPath(path))
+    helper = ModuleType("urdf_frames")
+    helper.build_urdf_frames = lambda desc: ({"/Robot/J2_link": frame}, {})
+    monkeypatch.setitem(sys.modules, "isaacsim.asset.exporter.urdf.converter.robot_finder", finder)
+    monkeypatch.setitem(sys.modules, "isaacsim.asset.exporter.urdf.converter.urdf_frames", helper)
+    frames = exporter_link_frames(stage, "/Robot")
+    assert frames["/Robot/J2_link"][:3, 3] == pytest.approx([25.6, 10.1, 1.05])
