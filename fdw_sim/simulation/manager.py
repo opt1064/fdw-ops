@@ -361,12 +361,21 @@ class SimulationManager:
             physics_dt=self._dt,
             rendering_dt=self._dt,
         )
-        ground = self._isaac_world.scene.add_default_ground_plane()
-        if self.config.enable_visualization:
-            # Keep its collider, but display the FDW floor material instead of
-            # the default grid. USD visibility does not disable collisions.
-            ground.set_visibility(False)
+        ground_path = "/World/defaultGroundPlane"
+        self._isaac_world.scene.add_default_ground_plane(prim_path=ground_path)
         self._isaac_world.reset()
+
+        if self.config.enable_visualization:
+            # GroundPlane is a wrapper, not an XformPrim, and has no
+            # set_visibility method in Isaac 6.1. Hide its USD root directly;
+            # inherited render visibility leaves the collision API unchanged.
+            import omni.usd  # type: ignore
+            from pxr import UsdGeom  # type: ignore
+            stage = omni.usd.get_context().get_stage()
+            ground_prim = stage.GetPrimAtPath(ground_path)
+            if not ground_prim:
+                raise RuntimeError(f"default ground prim missing: {ground_path}")
+            UsdGeom.Imageable(ground_prim).MakeInvisible()
 
         # 2.5) World 생성 후에도 한 번 더 적용 (일부 키는 reset에서 덮어쓰임)
         self._apply_rtx_settings()
