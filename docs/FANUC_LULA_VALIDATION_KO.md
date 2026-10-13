@@ -29,10 +29,16 @@ git pull --ff-only origin fix/fdw-quality-disposition-base-pose
   이는 설정 입력이며 실제 홈 이동 명령이 아니다.
 - `lula_model_validation.json`: Lula 관절 매핑, USD 관절의 양쪽 앵커,
   자세별 관절값, 세 모델 간 위치·방향 차이와 실패 사유.
+- `*_with_velocity_limits.urdf`: exporter가 velocity를 누락한 경우에만 생성한다.
+  로드된 USD의 작성된 `physxJoint:maxJointVelocity` 값을 직접 읽어 도/초에서
+  라디안/초로 변환한다. 원본과 말단 프레임 추가 URDF는 유지한다.
+  `velocity_limit_recovery`에 출처 prim, 속성, 원본값과 변환값을 기록한다.
 
 설정은 기구학 전용이다. 충돌 구는 빈 목록이며, 근거 없는 속도·가속도·jerk
 한계나 RMPflow 정책값을 넣지 않는다. 충돌 회피가 가능한 운영 설정으로 사용하지 않는다.
 실제 Lula가 파일을 거부하면 오류를 기록하고 실패로 표시하며 heuristic으로 대체하지 않는다.
+속도 한계도 추정하지 않는다. 실제 USD에 작성된 양의 유한 값이 없으면 실패한다.
+USD의 시뮬레이션 속도 한계를 사용하며 제조사 사양 확인 완료로 표시하지 않는다.
 
 ## 계산하는 자세
 

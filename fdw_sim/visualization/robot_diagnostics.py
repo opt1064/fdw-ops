@@ -56,6 +56,12 @@ def collect_robot_diagnostics(stage, robot_path, spec, articulation=None):
                 rot = joint.GetLocalRot0Attr().Get() if index == 0 else joint.GetLocalRot1Attr().Get()
                 entry[f"localPos{index}_stage_units"] = list(map(float, pos))
                 entry[f"localRot{index}_wxyz"] = [float(rot.GetReal()), *map(float, rot.GetImaginary())]
+            velocity = prim.GetAttribute("physxJoint:maxJointVelocity")
+            value = float(velocity.Get()) if velocity and velocity.HasAuthoredValueOpinion() else None
+            entry["authored_physx_max_joint_velocity"] = str(value) if value is not None and not math.isfinite(value) else value
+            entry["physx_velocity_units"] = (
+                "degrees_per_second" if prim.IsA(UsdPhysics.RevoluteJoint)
+                else "stage_units_per_second" if prim.IsA(UsdPhysics.PrismaticJoint) else None)
             for key in ("axis", "lowerLimit", "upperLimit"):
                 attr = prim.GetAttribute("physics:" + key)
                 value = attr.Get() if attr and attr.HasAuthoredValueOpinion() else None

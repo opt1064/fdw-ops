@@ -135,6 +135,50 @@ def _pose_error(first, second):
             "orientation_error_rad": math.acos(float(np.clip(cosine, -1, 1)))}
 
 
+def add_authored_velocity_limits(urdf_path, stage, diagnostics):
+    """Recover omitted PhysX velocities from authored USD only, retaining input URDF."""
+    from pxr import UsdPhysics
+    tree = ET.parse(urdf_path)
+    entries = {j["name"]: j for j in diagnostics["usd_joints"]}
+    additions = []
+    for joint in tree.getroot().findall("joint"):
+        if joint.get("type") == "fixed":
+            continue
+        name, limit = joint.get("name"), joint.find("limit")
+        if limit is None:
+            raise ValueError(f"URDF joint limit is missing: {name}")
+        existing = limit.get("velocity")
+        if existing is not None:
+            velocity = float(existing)
+            if not math.isfinite(velocity) or velocity <= 0:
+                raise ValueError(f"invalid existing URDF velocity: {name}")
+            continue
+        entry = entries.get(name)
+        prim = stage.GetPrimAtPath(entry["path"]) if entry and entry.get("path") else None
+        if not prim or not prim.IsA(UsdPhysics.RevoluteJoint):
+            raise ValueError(f"no unique revolute USD joint for velocity recovery: {name}")
+        attr = prim.GetAttribute("physxJoint:maxJointVelocity")
+        if not attr or not attr.HasAuthoredValueOpinion():
+            raise ValueError(f"authored physxJoint:maxJointVelocity is missing for {name}; no guessed limit used")
+        source = float(attr.Get())
+        if not math.isfinite(source) or source <= 0:
+            raise ValueError(f"invalid authored PhysX velocity: {name}")
+        velocity = math.radians(source)
+        limit.set("velocity", format(velocity, ".17g"))
+        additions.append({"joint": name, "source_prim_path": str(prim.GetPath()),
+                          "source_attribute": "physxJoint:maxJointVelocity",
+                          "source_degrees_per_second": source, "urdf_radians_per_second": velocity})
+    if not additions:
+        return Path(urdf_path), {"status": "NOT_NEEDED", "added": []}
+    output = Path(urdf_path).with_name(Path(urdf_path).stem + "_with_velocity_limits.urdf")
+    if output.exists():
+        raise FileExistsError(output)
+    ET.indent(tree)
+    tree.write(output, encoding="utf-8", xml_declaration=True)
+    return output, {"status": "ADDED_FROM_AUTHORED_USD", "added": additions,
+                    "manufacturer_limits_verified": False, "source_urdf_preserved": True}
+
+
 def prepare_and_validate_lula(stage, robot_path, exported, *, solver_factory=None):
     """Save FK-only YAML, load actual Lula, compare models at bounded sample poses."""
     from pxr import UsdGeom
@@ -156,7 +200,10 @@ def prepare_and_validate_lula(stage, robot_path, exported, *, solver_factory=Non
         if feedback["status"] != "available":
             raise ValueError("joint feedback is required")
         names, current = feedback["names"], feedback["positions"]
-        robot = ET.parse(exported["urdf_path"]).getroot()
+        lula_urdf_path, velocity_evidence = add_authored_velocity_limits(exported["urdf_path"], stage, diagnostics)
+        report.update(source_urdf_path=exported["urdf_path"], urdf_path=str(lula_urdf_path),
+                      velocity_limit_recovery=velocity_evidence)
+        robot = ET.parse(lula_urdf_path).getroot()
         active = {j.get("name"): j for j in robot.findall("joint") if j.get("type") != "fixed"}
         if set(names) != set(active) or any(j.get("type") != "revolute" for j in active.values()):
             raise ValueError("URDF and feedback must contain the same revolute joints")
@@ -173,12 +220,12 @@ def prepare_and_validate_lula(stage, robot_path, exported, *, solver_factory=Non
             raise FileExistsError("use a fresh model export directory for each validation")
         yaml_path.write_text("# FK validation only. No collision/trajectory certification or home command.\n"
                              + yaml.safe_dump(description, sort_keys=False), encoding="utf-8")
-        report.update(robot_description_path=str(yaml_path), urdf_path=exported["urdf_path"],
+        report.update(robot_description_path=str(yaml_path),
                       joint_names=list(names), root_link=root, end_link=frame, planned_poses=len(samples))
         if solver_factory is None:
             from isaacsim.robot_motion.motion_generation import LulaKinematicsSolver
             solver_factory = LulaKinematicsSolver
-        solver = solver_factory(robot_description_path=str(yaml_path), urdf_path=exported["urdf_path"])
+        solver = solver_factory(robot_description_path=str(yaml_path), urdf_path=str(lula_urdf_path))
         solver_names = list(solver.get_joint_names())
         if len(set(solver_names)) != len(names) or set(solver_names) != set(names):
             raise ValueError("Lula joint mapping differs from USD/URDF")

@@ -6,17 +6,18 @@ import sys
 import numpy as np
 import pytest
 import yaml
+import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from test_robot_model_export import model
 from fdw_sim.visualization.lula_model_validation import (
-    make_pose_samples, prepare_and_validate_lula, usd_joint_forward_kinematics,
+    add_authored_velocity_limits, make_pose_samples, prepare_and_validate_lula, usd_joint_forward_kinematics,
 )
 
 
 @pytest.fixture
 def anchored_model(model):
-    from pxr import Gf, UsdGeom, UsdPhysics
+    from pxr import Gf, Sdf, UsdGeom, UsdPhysics
     path, stage, diagnostics = model
     parent = UsdGeom.Xform.Define(stage, "/Robot/J1_link")
     parent.AddTranslateOp().Set((0, 0, 0.2))
@@ -33,6 +34,10 @@ def anchored_model(model):
         joint.CreateLocalPos1Attr(Gf.Vec3f(0, 0, 0))
         joint.CreateLocalRot0Attr(Gf.Quatf(1))
         joint.CreateLocalRot1Attr(Gf.Quatf(1))
+        joint.GetPrim().CreateAttribute("physxJoint:maxJointVelocity", Sdf.ValueTypeNames.Float).Set(120)
+        for entry in diagnostics["usd_joints"]:
+            if entry["name"] == name:
+                entry["path"] = str(joint.GetPath())
     exported = {"urdf_path": str(path), "comparison": {"status": "PASSED_SINGLE_POSE"},
                 "source_diagnostics": diagnostics}
     return stage, exported
@@ -42,6 +47,10 @@ class AnalyticSolver:
     """Strict FK-only double with reversed solver joint order and analytic geometry."""
     def __init__(self, *, robot_description_path, urdf_path):
         self.description = yaml.safe_load(Path(robot_description_path).read_text())
+        for joint in ET.parse(urdf_path).getroot().findall("joint"):
+            if joint.get("type") != "fixed":
+                # Reproduce the actual urdfdom requirement that caused the startup failure.
+                assert float(joint.find("limit").get("velocity")) > 0
         self.base = np.zeros(3)
 
     def get_joint_names(self):
@@ -117,3 +126,42 @@ def test_usd_anchor_fk_uses_child_frame_inverse(anchored_model):
     pose = usd_joint_forward_kinematics(stage, "/Robot", "robot_base",
         "/Robot/J2_link/flange/ee_link", {"J1": 0, "J2": 0})
     assert pose[:3, :3] == pytest.approx(np.diag([1, -1, -1]), abs=1e-6)
+
+
+def test_velocity_recovery_converts_authored_degrees_without_changing_input(anchored_model):
+    stage, exported = anchored_model
+    source = Path(exported["urdf_path"])
+    before = source.read_bytes()
+    derived, evidence = add_authored_velocity_limits(source, stage, exported["source_diagnostics"])
+    assert source.read_bytes() == before
+    assert derived != source
+    assert evidence["status"] == "ADDED_FROM_AUTHORED_USD"
+    assert len(evidence["added"]) == 2
+    for joint in ET.parse(derived).getroot().findall("joint"):
+        if joint.get("type") != "fixed":
+            assert float(joint.find("limit").get("velocity")) == pytest.approx(2*math.pi/3)
+
+
+@pytest.mark.parametrize("value", [None, float("inf"), -1.0, 0.0])
+def test_velocity_recovery_never_guesses_missing_or_invalid_limits(anchored_model, value):
+    stage, exported = anchored_model
+    prim = stage.GetPrimAtPath("/Robot/joints/J1")
+    if value is None:
+        prim.RemoveProperty("physxJoint:maxJointVelocity")
+    else:
+        prim.GetAttribute("physxJoint:maxJointVelocity").Set(value)
+    with pytest.raises(ValueError, match="velocity|Velocity"):
+        add_authored_velocity_limits(exported["urdf_path"], stage, exported["source_diagnostics"])
+
+
+def test_existing_exported_velocity_is_preserved(anchored_model):
+    stage, exported = anchored_model
+    path = Path(exported["urdf_path"])
+    tree = ET.parse(path)
+    for joint in tree.getroot().findall("joint"):
+        if joint.get("type") != "fixed":
+            joint.find("limit").set("velocity", "1.5")
+    tree.write(path)
+    result, evidence = add_authored_velocity_limits(path, stage, exported["source_diagnostics"])
+    assert result == path
+    assert evidence["status"] == "NOT_NEEDED"
