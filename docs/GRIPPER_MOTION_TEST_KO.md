@@ -52,7 +52,11 @@ git pull --ff-only origin fix/fdw-quality-disposition-base-pose
 ## 검증 범위와 결과
 
 이번 시험은 **물체 없는 무부하·중력 0 조건**이다. 원본 자산은 저장·수정하지 않고,
-실험의 gravity·조명·카메라·표시 변경은 메모리의 session layer에 둔다.
+원본 자산 전체를 별도 메모리 스테이지의 sublayer로 읽는다. 최상위 `/FixedJoint`도
+유지한다. 실험의 gravity·물리 씬·조명·카메라·표시 변경은 별도 anonymous root layer에
+작성하며 저장하지 않는다. reset에서 지워질 수 있는 session layer에 물리 씬을 두지 않는다.
+물리 씬은 표시 root와 분리된 `/World/GripperPhysicsScene`에 두고, reset 직후와
+마지막 Play 전후에 실제 `PhysicsScene` prim이 존재하는지 검사한다.
 실제 하중·중력·파지 유지력 또는 전체 140 mm stroke를 검증하는 시험은 아니다.
 기존 drive가 목표를 추종하지 못하면 값을 임의로 키우지 않고 실패 보고서를 남긴다.
 

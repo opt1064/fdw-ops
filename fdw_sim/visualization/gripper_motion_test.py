@@ -12,11 +12,43 @@ def articulation_root_paths(stage):
             if p.HasAPI(UsdPhysics.ArticulationRootAPI)]
 
 
-def bind_live_gripper(get_stage, world, make_articulation, make_simulation_view):
+def compose_gripper_experiment(stage, source_identifier, *, meters, up_axis, default_prim_path):
+    """Keep source intact; experiment settings belong to an anonymous root, not session."""
+    from pxr import UsdGeom
+    root = stage.GetRootLayer()
+    if not root.anonymous or root.identifier == source_identifier:
+        raise ValueError("experiment must have a separate anonymous root layer")
+    if not math.isfinite(meters) or meters <= 0 or up_axis not in ("Y", "Z"):
+        raise ValueError("unsupported gripper stage units/up axis")
+    root.subLayerPaths = [source_identifier]
+    stage.SetEditTarget(root)
+    UsdGeom.SetStageMetersPerUnit(stage, meters)
+    UsdGeom.SetStageUpAxis(stage, up_axis)
+    if default_prim_path:
+        default = stage.GetPrimAtPath(default_prim_path)
+        if not default:
+            raise ValueError("source default prim missing in experiment composition")
+        stage.SetDefaultPrim(default)
+    return {"experiment_root_is_anonymous": True, "source_layer_identifier": source_identifier,
+            "experiment_edits_layer": "anonymous_root", "source_is_read_only_sublayer": True}
+
+
+def require_physics_scene(stage, path, phase):
+    from pxr import UsdPhysics
+    prim = stage.GetPrimAtPath(path)
+    if not prim or not prim.IsActive() or not prim.IsA(UsdPhysics.Scene):
+        raise ValueError(f"physics scene missing {phase}: {path}")
+
+
+def bind_live_gripper(get_stage, world, make_articulation, make_simulation_view, *, physics_scene_path=None):
     """Bind fresh tensors after all scene edits, countdown and the final play transition."""
+    if physics_scene_path:
+        require_physics_scene(get_stage(), physics_scene_path, "before final play")
     world.play()
     world.step(render=True)  # Process play/physics events before constructing any tensor view.
     stage = get_stage()
+    if physics_scene_path:
+        require_physics_scene(stage, physics_scene_path, "after final play/step")
     roots = articulation_root_paths(stage)
     default = stage.GetDefaultPrim()
     candidates = list(dict.fromkeys([str(default.GetPath()) if default else "/Robotiq_2F_140", *roots]))

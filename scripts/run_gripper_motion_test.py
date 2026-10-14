@@ -32,7 +32,10 @@ def main():
         from fdw_sim.visualization.robot_loader import get_isaac_assets_root
         from fdw_sim.visualization.tool_diagnostics import load_tool_configuration
         from fdw_sim.visualization.gripper_asset_inventory import inspect_gripper_stage
-        from fdw_sim.visualization.gripper_motion_test import inspect_motion_prerequisites, run_gripper_cycle, bind_live_gripper
+        from fdw_sim.visualization.gripper_motion_test import (
+            inspect_motion_prerequisites, run_gripper_cycle, bind_live_gripper,
+            compose_gripper_experiment, require_physics_scene,
+        )
         from fdw_sim.visualization.robot_model_export import _usd_rigid_matrix
         from fdw_sim.visualization.lula_model_validation import _pose_error
         from fdw_sim.visualization.scene_builder import SceneBuilder, SceneConfig
@@ -49,6 +52,15 @@ def main():
             if inventory["status"] == "FAILED":
                 raise ValueError(str(inventory["errors"]))
             setup = inspect_motion_prerequisites(stage)
+            source_identifier = stage.GetRootLayer().identifier
+            meters = UsdGeom.GetStageMetersPerUnit(stage)
+            up_axis = str(UsdGeom.GetStageUpAxis(stage))
+            default_path = str(stage.GetDefaultPrim().GetPath()) if stage.GetDefaultPrim() else None
+            if not omni.usd.get_context().new_stage():
+                raise RuntimeError("could not create isolated experiment stage")
+            stage = omni.usd.get_context().get_stage()
+            setup.update(compose_gripper_experiment(stage, source_identifier, meters=meters,
+                                                    up_axis=up_axis, default_prim_path=default_path))
             prims = list(Usd.PrimRange(stage.GetPseudoRoot(), Usd.TraverseInstanceProxies()))
             if any(p.GetTypeName() == "OmniGraph" for p in prims):
                 raise ValueError("asset contains an OmniGraph; inspect controller conflicts before motion")
@@ -56,16 +68,18 @@ def main():
             if len(scenes) > 1:
                 raise ValueError("multiple physics scenes are unsupported")
             del prims  # Do not retain instance-proxy handles across World/reset mutations.
-            # All experiment edits live in the transient session layer. Never save source.
-            stage.SetEditTarget(stage.GetSessionLayer())
-            meters = UsdGeom.GetStageMetersPerUnit(stage)
+            # Never save the anonymous experiment or write the referenced source layer.
+            stage.SetEditTarget(stage.GetRootLayer())
             dt = 1/120
+            physics_scene_path = scenes[0] if scenes else "/World/GripperPhysicsScene"
+            setup["physics_scene_path"] = physics_scene_path
             world = World(stage_units_in_meters=meters, physics_dt=dt, rendering_dt=dt,
-                          physics_prim_path=scenes[0] if scenes else "/World/GripperTest/PhysicsScene")
+                          physics_prim_path=physics_scene_path)
             world.get_physics_context().set_gravity(0)
             world.reset()
             stage = omni.usd.get_context().get_stage()
-            stage.SetEditTarget(stage.GetSessionLayer())
+            stage.SetEditTarget(stage.GetRootLayer())
+            require_physics_scene(stage, physics_scene_path, "after world.reset")
             setup.update(physics_dt_sec=dt, gravity_m_s2=0)
             world.pause()
             base_start = _usd_rigid_matrix(UsdGeom.XformCache(), stage.GetPrimAtPath(setup["base_path"]), meters)
@@ -112,11 +126,12 @@ def main():
                     app.update()
                     time.sleep(0.02)
             art, names, binding = bind_live_gripper(lambda: omni.usd.get_context().get_stage(), world,
-                                                    SingleArticulation, omni.physics.tensors.create_simulation_view)
+                                                    SingleArticulation, omni.physics.tensors.create_simulation_view,
+                                                    physics_scene_path=physics_scene_path)
             setup.update(binding)
             index = binding["commanded_joint_index"]
             stage = omni.usd.get_context().get_stage()
-            stage.SetEditTarget(stage.GetSessionLayer())
+            stage.SetEditTarget(stage.GetRootLayer())
             base_start = _usd_rigid_matrix(UsdGeom.XformCache(), stage.GetPrimAtPath(setup["base_path"]), meters)
             print("[GRIPPER MOTION] fresh physics view bound after scene preparation and play.", flush=True)
             def read_joint():

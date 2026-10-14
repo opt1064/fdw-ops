@@ -8,7 +8,10 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from fdw_sim.visualization.gripper_motion_test import run_gripper_cycle, inspect_motion_prerequisites, articulation_root_paths, bind_live_gripper
+from fdw_sim.visualization.gripper_motion_test import (
+    run_gripper_cycle, inspect_motion_prerequisites, articulation_root_paths,
+    bind_live_gripper, compose_gripper_experiment, require_physics_scene,
+)
 
 
 class Plant:
@@ -225,3 +228,51 @@ def test_fresh_binding_rejects_missing_runtime_feedback(usd_model):
     art = SimpleNamespace(initialize=lambda **kw: None, dof_names=["finger_joint"], get_joint_positions=lambda: None)
     with pytest.raises(ValueError, match="finite runtime feedback"):
         bind_live_gripper(lambda: usd_model, world, lambda **kw: art, lambda backend: view)
+
+
+def test_anonymous_root_preserves_scene_and_source_asset_when_session_is_cleared(usd_model):
+    from pxr import Usd, UsdGeom, UsdPhysics
+    source = usd_model
+    source.SetDefaultPrim(source.GetPrimAtPath("/Robotiq_2F_140"))
+    before = source.GetRootLayer().ExportToString()
+    stage = Usd.Stage.CreateInMemory()
+    metadata = compose_gripper_experiment(stage, source.GetRootLayer().identifier,
+                                         meters=0.01, up_axis="Z", default_prim_path="/Robotiq_2F_140")
+    scene = UsdPhysics.Scene.Define(stage, "/World/GripperPhysicsScene")
+    scene.CreateGravityMagnitudeAttr(0)
+    UsdGeom.Camera.Define(stage, "/World/GripperTest/Camera")
+    stage.SetEditTarget(stage.GetSessionLayer())
+    UsdGeom.Scope.Define(stage, "/Temporary")
+    stage.GetSessionLayer().Clear()
+    require_physics_scene(stage, "/World/GripperPhysicsScene", "after session clear")
+    assert stage.GetPrimAtPath("/World/GripperTest/Camera")
+    assert stage.GetPrimAtPath("/FixedJoint")  # Include the source's top-level world anchor too.
+    assert UsdGeom.GetStageMetersPerUnit(stage) == 0.01
+    assert stage.GetDefaultPrim().GetPath() == source.GetDefaultPrim().GetPath()
+    assert source.GetRootLayer().ExportToString() == before
+    assert metadata["experiment_root_is_anonymous"]
+
+
+def test_session_only_scene_is_lost_and_guard_rejects_it(usd_model):
+    from pxr import UsdPhysics
+    usd_model.SetEditTarget(usd_model.GetSessionLayer())
+    UsdPhysics.Scene.Define(usd_model, "/SessionPhysicsScene")
+    usd_model.GetSessionLayer().Clear()
+    with pytest.raises(ValueError, match="physics scene missing"):
+        require_physics_scene(usd_model, "/SessionPhysicsScene", "after reset")
+
+
+def test_missing_scene_blocks_tensor_creation_before_final_play(usd_model):
+    from types import SimpleNamespace
+    def forbidden(*a, **kw):
+        pytest.fail("must reject missing scene before play or tensor binding")
+    world = SimpleNamespace(play=forbidden, step=forbidden)
+    with pytest.raises(ValueError, match="before final play"):
+        bind_live_gripper(lambda: usd_model, world, forbidden, forbidden, physics_scene_path="/DeletedScene")
+
+
+def test_experiment_refuses_to_edit_file_backed_source(tmp_path):
+    from pxr import Usd
+    stage = Usd.Stage.CreateNew(str(tmp_path / "source.usda"))
+    with pytest.raises(ValueError, match="anonymous root"):
+        compose_gripper_experiment(stage, "other.usda", meters=1, up_axis="Z", default_prim_path=None)
