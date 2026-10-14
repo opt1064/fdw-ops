@@ -40,6 +40,44 @@ def require_physics_scene(stage, path, phase):
         raise ValueError(f"physics scene missing {phase}: {path}")
 
 
+class NativeGripperArticulation:
+    """Use the supplied fresh tensor view directly, without legacy global-view callbacks."""
+    def __init__(self, *, prim_path, name=None, reset_xform_properties=False):
+        if reset_xform_properties:
+            raise ValueError("native gripper adapter must not reset USD transforms")
+        self.prim_path = prim_path
+        self._view = None
+        self.dof_names = []
+
+    def initialize(self, *, physics_sim_view):
+        self._view = physics_sim_view.create_articulation_view(self.prim_path)
+        if self._view is None or self._view.count != 1 or not self._view.is_homogeneous:
+            raise ValueError("expected exactly one homogeneous native gripper articulation")
+        metadata = self._view.shared_metatype
+        if metadata is None:
+            raise ValueError("native gripper metadata unavailable")
+        self.dof_names = list(metadata.dof_names)
+        if len(self.dof_names) != self._view.max_dofs:
+            raise ValueError("native gripper DOF metadata mismatch")
+
+    def get_joint_positions(self):
+        q = np.asarray(self._view.get_dof_positions(), dtype=float)
+        if q.shape != (1, len(self.dof_names)) or not np.isfinite(q).all():
+            raise ValueError("native DOF feedback missing or nonfinite")
+        return q[0].copy()
+
+    def set_primary_target(self, q, index):
+        if (not isinstance(index, (int, np.integer)) or not 0 <= index < len(self.dof_names)
+                or not math.isfinite(float(q)) or self.dof_names[index] != "finger_joint"):
+            raise ValueError("only a finite finger_joint target is allowed")
+        targets = np.array(self._view.get_dof_position_targets(), dtype=np.float32, copy=True)
+        if targets.shape != (1, len(self.dof_names)) or not np.isfinite(targets).all():
+            raise ValueError("native drive targets unavailable; refusing to guess passive targets")
+        targets[0, index] = q
+        # Sparse DOF setters are unsupported here; preserve all existing passive targets.
+        self._view.set_dof_position_targets(np.ascontiguousarray(targets), np.array([0], dtype=np.int32))
+
+
 def ensure_physx_attachment(interface, stage_id):
     """Verify the real PhysX stage, attaching this isolated stage if currently detached."""
     stage_id = int(stage_id)

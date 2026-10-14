@@ -37,8 +37,12 @@ git pull --ff-only origin fix/fdw-quality-disposition-base-pose
 - 기존의 enabled world-to-base 고정 joint
 - live articulation의 `finger_joint` 이름·index 및 유한 피드백
 
-오른쪽 follower에는 명령을 보내지 않는다. 실제 index로 선택한 `finger_joint` 하나에
-`ArticulationAction` position target을 보낸다. USD 각도 한계는 degree, 런타임 명령과 피드백은 rad다.
+실제 index로 선택한 `finger_joint`의 목표만 변경한다. 기존 SingleArticulation 래퍼 대신
+새 `omni.physics.tensors` view의 실제 DOF 목록과 `get_dof_positions()`를 직접 사용한다.
+이 API는 DOF 일부만 쓰는 기능이 없어 현재 `get_dof_position_targets()`를 복사하고,
+primary 열 하나만 바꿔 `set_dof_position_targets()`로 보낸다. 오른쪽 follower와
+수동 관절의 기존 목표값은 보존하며, 값이 없거나 유한하지 않으면 중단한다.
+USD 각도 한계는 degree, 런타임 명령과 피드백은 rad다.
 질량·관성·한계·gain·mimic 설정을 조정하거나 `set_joint_positions`로 순간이동시키지 않는다.
 피드백의 관절 한계 경계 roundoff가 1e-4 rad 이하라면 시작 목표만 한계 안으로 제한하고 기록한다.
 5° 이상 닫혀 있는 예상 밖의 시작 상태나 목표 한계 초과는 이동 없이 실패한다.
@@ -53,6 +57,8 @@ PhysX 연결이 비어 있으면 `attach_stage()`로 현재 시험 스테이지�
 화면 준비 이전에 만든 tensor view를 재사용하지 않는다. 첫 관절 명령 전에
 이 새 연결로 이름·index와 유한 피드백을 다시 확인하며,
 보고서 `setup.fresh_physics_view_after_final_play`에 기록한다.
+`setup.control_backend`는 `direct_omni_physics_tensors`다. legacy 래퍼가 전역
+SimulationManager에 저장된 오래된 view를 조회하는 경로를 거치지 않는다.
 
 ## 검증 범위와 결과
 
@@ -88,3 +94,5 @@ CPU/OpenUSD 회귀 테스트는 제어·형상 판정과 실패 처리를 검증
 API 근거: [NVIDIA Isaac 6.1 closed-loop/mimic 구성](https://docs.isaacsim.omniverse.nvidia.com/6.1.0/robot_setup_tutorials/rig_closed_loop_structures.html),
 [그리퍼 제어 예제](https://docs.isaacsim.omniverse.nvidia.com/6.1.0/robot_setup_tutorials/tutorial_pickplace_example.html),
 [PhysX stage 연결 API](https://docs.omniverse.nvidia.com/kit/docs/omni_physics/107.3/extensions/runtime/source/omni.physx/docs/api/python.html).
+[Tensor articulation API](https://docs.omniverse.nvidia.com/kit/docs/omni_physics/108.0/extensions/runtime/source/omni.physics.tensors/docs/api/python.html),
+[legacy 래퍼의 공개 초기화 소스](https://github.com/isaac-sim/IsaacSim/blob/develop/source/deprecated/isaacsim.core.prims/python/impl/articulation.py).

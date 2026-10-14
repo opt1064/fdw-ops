@@ -28,8 +28,6 @@ def main():
         import omni.physx
         from pxr import Gf, Usd, UsdGeom, UsdLux, UsdPhysics
         from isaacsim.core.api import World
-        from isaacsim.core.prims import SingleArticulation
-        from isaacsim.core.utils.types import ArticulationAction
         from fdw_sim.visualization.robot_loader import get_isaac_assets_root
         from fdw_sim.visualization.tool_diagnostics import load_tool_configuration
         from fdw_sim.visualization.gripper_asset_inventory import inspect_gripper_stage
@@ -37,6 +35,7 @@ def main():
             inspect_motion_prerequisites, run_gripper_cycle, bind_live_gripper,
             compose_gripper_experiment, require_physics_scene,
             ensure_physx_attachment,
+            NativeGripperArticulation,
         )
         from fdw_sim.visualization.robot_model_export import _usd_rigid_matrix
         from fdw_sim.visualization.lula_model_validation import _pose_error
@@ -136,8 +135,9 @@ def main():
                 print(f"[GRIPPER MOTION] PhysX attached stage={attachment['physx_stage_id_after']} "
                       f"(explicit={attachment['physx_stage_attached_explicitly']})", flush=True)
                 return attachment
+            setup["control_backend"] = "direct_omni_physics_tensors"
             art, names, binding = bind_live_gripper(lambda: omni.usd.get_context().get_stage(), world,
-                                                    SingleArticulation, omni.physics.tensors.create_simulation_view,
+                                                    NativeGripperArticulation, omni.physics.tensors.create_simulation_view,
                                                     physics_scene_path=physics_scene_path,
                                                     prepare_attachment=prepare_attachment)
             setup.update(binding)
@@ -152,7 +152,7 @@ def main():
                     raise ValueError("runtime joint feedback lost or nonfinite")
                 return q[index]
             def command(q):
-                art.apply_action(ArticulationAction(joint_positions=np.array([q]), joint_indices=np.array([index])))
+                art.set_primary_target(q, index)
             report = run_gripper_cycle(read_joint, command, read_pads, lambda: world.step(render=True), world.pause,
                                        setup["limit_rad"], dt=dt, realtime=True, is_running=app.is_running)
         except (Exception, KeyboardInterrupt) as exc:

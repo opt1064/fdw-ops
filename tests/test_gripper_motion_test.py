@@ -12,6 +12,7 @@ from fdw_sim.visualization.gripper_motion_test import (
     run_gripper_cycle, inspect_motion_prerequisites, articulation_root_paths,
     bind_live_gripper, compose_gripper_experiment, require_physics_scene,
     ensure_physx_attachment,
+    NativeGripperArticulation,
 )
 
 
@@ -325,3 +326,63 @@ def test_failed_or_mismatched_attachment_cannot_proceed(attach_success):
                                 flush_changes=lambda: None)
     with pytest.raises(RuntimeError, match="attach|mismatch"):
         ensure_physx_attachment(interface, 42)
+
+
+@pytest.fixture
+def native_adapter():
+    from types import SimpleNamespace
+    class View:
+        count = 1
+        max_dofs = 3
+        is_homogeneous = True
+        shared_metatype = SimpleNamespace(dof_names=["passive_left", "finger_joint", "right_outer_knuckle_joint"])
+        q = np.array([[0.2, 0.01, 0.011]], dtype=np.float32)
+        targets = np.array([[0.2, 0, 0.7]], dtype=np.float32)
+        writes = []
+        def get_dof_positions(self):
+            return self.q
+        def get_dof_position_targets(self):
+            return self.targets
+        def set_dof_position_targets(self, targets, indices):
+            self.writes.append((targets.copy(), indices.copy()))
+    view = View()
+    factory = SimpleNamespace(create_articulation_view=lambda path: view)
+    adapter = NativeGripperArticulation(prim_path="/Robotiq_2F_140")
+    adapter.initialize(physics_sim_view=factory)
+    return adapter, view
+
+
+def test_native_adapter_reads_supplied_tensor_view_and_preserves_passive_targets(native_adapter):
+    adapter, view = native_adapter
+    original = view.targets.copy()
+    np.testing.assert_array_equal(adapter.get_joint_positions(), view.q[0])
+    adapter.set_primary_target(0.1, 1)
+    targets, indices = view.writes[0]
+    np.testing.assert_array_equal(indices, [0])
+    assert targets.dtype == np.float32 and indices.dtype == np.int32
+    assert targets[0, 1] == pytest.approx(0.1)
+    np.testing.assert_array_equal(targets[0, [0, 2]], original[0, [0, 2]])
+    np.testing.assert_array_equal(view.targets, original)
+
+
+@pytest.mark.parametrize("q,index", [(0.1, 0), (0.1, 2), (float("nan"), 1), (0.1, -2)])
+def test_native_adapter_rejects_follower_or_invalid_commands(native_adapter, q, index):
+    adapter, view = native_adapter
+    with pytest.raises(ValueError):
+        adapter.set_primary_target(q, index)
+    assert not view.writes
+
+
+def test_native_adapter_refuses_to_guess_missing_passive_targets(native_adapter):
+    adapter, view = native_adapter
+    view.targets = np.array([[np.nan, 0, 0]], dtype=np.float32)
+    with pytest.raises(ValueError, match="targets unavailable"):
+        adapter.set_primary_target(0.1, 1)
+    assert not view.writes
+
+
+def test_native_adapter_rejects_nonfinite_feedback(native_adapter):
+    adapter, view = native_adapter
+    view.q = np.array([[0, np.nan, 0]], dtype=np.float32)
+    with pytest.raises(ValueError, match="feedback"):
+        adapter.get_joint_positions()
