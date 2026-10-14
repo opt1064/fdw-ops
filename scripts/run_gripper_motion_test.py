@@ -24,6 +24,7 @@ def main():
     try:
         import numpy as np
         import omni.usd
+        import omni.physics.tensors
         from pxr import Gf, Usd, UsdGeom, UsdLux, UsdPhysics
         from isaacsim.core.api import World
         from isaacsim.core.prims import SingleArticulation
@@ -31,7 +32,7 @@ def main():
         from fdw_sim.visualization.robot_loader import get_isaac_assets_root
         from fdw_sim.visualization.tool_diagnostics import load_tool_configuration
         from fdw_sim.visualization.gripper_asset_inventory import inspect_gripper_stage
-        from fdw_sim.visualization.gripper_motion_test import inspect_motion_prerequisites, run_gripper_cycle, articulation_root_paths
+        from fdw_sim.visualization.gripper_motion_test import inspect_motion_prerequisites, run_gripper_cycle, bind_live_gripper
         from fdw_sim.visualization.robot_model_export import _usd_rigid_matrix
         from fdw_sim.visualization.lula_model_validation import _pose_error
         from fdw_sim.visualization.scene_builder import SceneBuilder, SceneConfig
@@ -65,31 +66,7 @@ def main():
             world.reset()
             stage = omni.usd.get_context().get_stage()
             stage.SetEditTarget(stage.GetSessionLayer())
-            roots = articulation_root_paths(stage)
-            setup["articulation_root_paths"] = roots
-            candidates = list(dict.fromkeys([str(stage.GetDefaultPrim().GetPath()) if stage.GetDefaultPrim() else "/Robotiq_2F_140", *roots]))
-            failures, art = [], None
-            for candidate in candidates:
-                try:
-                    probe = SingleArticulation(prim_path=candidate, name="standalone_gripper", reset_xform_properties=False)
-                    probe.initialize()
-                    names = list(probe.dof_names)
-                    positions = probe.get_joint_positions()
-                    if names.count("finger_joint") != 1 or positions is None or len(positions) != len(names):
-                        raise ValueError("primary joint not uniquely available in runtime feedback")
-                    if not np.isfinite(np.asarray(positions)).all():
-                        raise ValueError("nonfinite runtime joint feedback")
-                    art = probe
-                    break
-                except Exception as exc:
-                    failures.append(f"{candidate}: {exc}")
-            if art is None:
-                raise ValueError("no usable live articulation: " + "; ".join(failures))
-            index = names.index("finger_joint")
-            setup.update(live_articulation_path=candidate, live_joint_names=names,
-                         commanded_joint_index=index, wrapper_probe_failures=failures,
-                         initial_live_joint_positions_rad=np.asarray(positions, dtype=float).tolist(),
-                         physics_dt_sec=dt, gravity_m_s2=0)
+            setup.update(physics_dt_sec=dt, gravity_m_s2=0)
             world.pause()
             base_start = _usd_rigid_matrix(UsdGeom.XformCache(), stage.GetPrimAtPath(setup["base_path"]), meters)
             marker_ops = []
@@ -134,6 +111,14 @@ def main():
                         raise RuntimeError("viewer closed before test")
                     app.update()
                     time.sleep(0.02)
+            art, names, binding = bind_live_gripper(lambda: omni.usd.get_context().get_stage(), world,
+                                                    SingleArticulation, omni.physics.tensors.create_simulation_view)
+            setup.update(binding)
+            index = binding["commanded_joint_index"]
+            stage = omni.usd.get_context().get_stage()
+            stage.SetEditTarget(stage.GetSessionLayer())
+            base_start = _usd_rigid_matrix(UsdGeom.XformCache(), stage.GetPrimAtPath(setup["base_path"]), meters)
+            print("[GRIPPER MOTION] fresh physics view bound after scene preparation and play.", flush=True)
             def read_joint():
                 q = art.get_joint_positions()
                 if q is None or len(q) != len(names) or not np.isfinite(np.asarray(q)).all():
@@ -141,7 +126,6 @@ def main():
                 return q[index]
             def command(q):
                 art.apply_action(ArticulationAction(joint_positions=np.array([q]), joint_indices=np.array([index])))
-            world.play()
             report = run_gripper_cycle(read_joint, command, read_pads, lambda: world.step(render=True), world.pause,
                                        setup["limit_rad"], dt=dt, realtime=True, is_running=app.is_running)
         except (Exception, KeyboardInterrupt) as exc:

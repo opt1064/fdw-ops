@@ -43,6 +43,12 @@ git pull --ff-only origin fix/fdw-quality-disposition-base-pose
 피드백의 관절 한계 경계 roundoff가 1e-4 rad 이하라면 시작 목표만 한계 안으로 제한하고 기록한다.
 5° 이상 닫혀 있는 예상 밖의 시작 상태나 목표 한계 초과는 이동 없이 실패한다.
 
+카메라·조명·표시 생성과 카운트다운을 먼저 마친다. 마지막 Play 전환과 한 번의
+물리 step을 처리한 뒤 새 NumPy PhysX simulation view를 만들고 articulation을 연결한다.
+화면 준비 이전에 만든 tensor view를 재사용하지 않는다. 첫 관절 명령 전에
+이 새 연결로 이름·index와 유한 피드백을 다시 확인하며,
+보고서 `setup.fresh_physics_view_after_final_play`에 기록한다.
+
 ## 검증 범위와 결과
 
 이번 시험은 **물체 없는 무부하·중력 0 조건**이다. 원본 자산은 저장·수정하지 않고,

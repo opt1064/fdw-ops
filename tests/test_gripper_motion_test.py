@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from fdw_sim.visualization.gripper_motion_test import run_gripper_cycle, inspect_motion_prerequisites, articulation_root_paths
+from fdw_sim.visualization.gripper_motion_test import run_gripper_cycle, inspect_motion_prerequisites, articulation_root_paths, bind_live_gripper
 
 
 class Plant:
@@ -179,3 +179,49 @@ def test_articulation_paths_are_retraversed_after_instance_proxy_expires():
         old_proxy.GetTypeName()
     assert articulation_root_paths(stage) == ["/FixedJoint"]
     assert stage.GetPrimAtPath("/Gripper/Looks").GetTypeName() == "Scope"
+
+
+def test_binding_creates_fresh_tensor_view_only_after_final_play_and_physics_step(usd_model):
+    events = []
+    class World:
+        def play(self):
+            events.append("play")
+        def step(self, *, render):
+            assert render
+            events.append("step")
+    class View:
+        def set_subspace_roots(self, root):
+            assert root == "/"
+            events.append("subspace")
+    fresh = View()
+    def make_view(backend):
+        assert backend == "numpy" and events == ["play", "step"]
+        events.append("new_view")
+        return fresh
+    class Art:
+        dof_names = ["right_outer_knuckle_joint", "finger_joint"]
+        def __init__(self, **kwargs):
+            assert not kwargs["reset_xform_properties"]
+            events.append("new_art")
+        def initialize(self, *, physics_sim_view):
+            assert physics_sim_view is fresh
+            events.append("initialize")
+        def get_joint_positions(self):
+            assert events[-1] == "initialize"
+            events.append("read")
+            return np.array([0.011, 0.010])
+        def apply_action(self, *args):
+            pytest.fail("binding must not issue drive commands")
+    art, names, metadata = bind_live_gripper(lambda: usd_model, World(), Art, make_view)
+    assert metadata["commanded_joint_index"] == 1
+    assert metadata["fresh_physics_view_after_final_play"]
+    assert events == ["play", "step", "new_view", "subspace", "new_art", "initialize", "read"]
+
+
+def test_fresh_binding_rejects_missing_runtime_feedback(usd_model):
+    from types import SimpleNamespace
+    world = SimpleNamespace(play=lambda: None, step=lambda **kw: None)
+    view = SimpleNamespace(set_subspace_roots=lambda root: None)
+    art = SimpleNamespace(initialize=lambda **kw: None, dof_names=["finger_joint"], get_joint_positions=lambda: None)
+    with pytest.raises(ValueError, match="finite runtime feedback"):
+        bind_live_gripper(lambda: usd_model, world, lambda **kw: art, lambda backend: view)

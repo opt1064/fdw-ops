@@ -12,6 +12,36 @@ def articulation_root_paths(stage):
             if p.HasAPI(UsdPhysics.ArticulationRootAPI)]
 
 
+def bind_live_gripper(get_stage, world, make_articulation, make_simulation_view):
+    """Bind fresh tensors after all scene edits, countdown and the final play transition."""
+    world.play()
+    world.step(render=True)  # Process play/physics events before constructing any tensor view.
+    stage = get_stage()
+    roots = articulation_root_paths(stage)
+    default = stage.GetDefaultPrim()
+    candidates = list(dict.fromkeys([str(default.GetPath()) if default else "/Robotiq_2F_140", *roots]))
+    physics_view = make_simulation_view("numpy")
+    physics_view.set_subspace_roots("/")
+    failures = []
+    for candidate in candidates:
+        try:
+            art = make_articulation(prim_path=candidate, name="standalone_gripper", reset_xform_properties=False)
+            art.initialize(physics_sim_view=physics_view)
+            names = list(art.dof_names)
+            positions = art.get_joint_positions()
+            q = np.asarray(positions, dtype=float) if positions is not None else np.array([])
+            if len(set(names)) != len(names) or names.count("finger_joint") != 1 or q.shape != (len(names),) or not np.isfinite(q).all():
+                raise ValueError("primary joint mapping or finite runtime feedback unavailable")
+            metadata = {"articulation_root_paths": roots, "live_articulation_path": candidate,
+                        "live_joint_names": names, "commanded_joint_index": names.index("finger_joint"),
+                        "initial_live_joint_positions_rad": q.tolist(), "wrapper_probe_failures": failures,
+                        "fresh_physics_view_after_final_play": True}
+            return art, names, metadata
+        except Exception as exc:
+            failures.append(f"{candidate}: {exc}")
+    raise ValueError("no usable fresh live articulation: " + "; ".join(failures))
+
+
 def inspect_motion_prerequisites(stage):
     """Require authored primary drive, live mimic relationship and a world-fixed base."""
     from pxr import Usd, UsdPhysics
