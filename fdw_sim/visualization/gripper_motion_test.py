@@ -46,10 +46,14 @@ class NativeGripperArticulation:
         if reset_xform_properties:
             raise ValueError("native gripper adapter must not reset USD transforms")
         self.prim_path = prim_path
+        self._simulation_view = None
         self._view = None
         self.dof_names = []
 
     def initialize(self, *, physics_sim_view):
+        # Child views do not guarantee their parent Python owner's lifetime.
+        # Keep the parent alive after bind_live_gripper returns and throughout the cycle.
+        self._simulation_view = physics_sim_view
         self._view = physics_sim_view.create_articulation_view(self.prim_path)
         if self._view is None or self._view.count != 1 or not self._view.is_homogeneous:
             raise ValueError("expected exactly one homogeneous native gripper articulation")
@@ -128,6 +132,7 @@ def bind_live_gripper(get_stage, world, make_articulation, make_simulation_view,
                         "live_joint_names": names, "commanded_joint_index": names.index("finger_joint"),
                         "initial_live_joint_positions_rad": q.tolist(), "wrapper_probe_failures": failures,
                         "fresh_physics_view_after_final_play": True}
+            metadata["simulation_view_owner_retained"] = getattr(art, "_simulation_view", None) is physics_view
             metadata.update(attachment)
             return art, names, metadata
         except Exception as exc:

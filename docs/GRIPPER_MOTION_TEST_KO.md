@@ -59,6 +59,9 @@ PhysX 연결이 비어 있으면 `attach_stage()`로 현재 시험 스테이지�
 보고서 `setup.fresh_physics_view_after_final_play`에 기록한다.
 `setup.control_backend`는 `direct_omni_physics_tensors`다. legacy 래퍼가 전역
 SimulationManager에 저장된 오래된 view를 조회하는 경로를 거치지 않는다.
+관절 adapter가 상위 `SimulationView`와 하위 관절 view를 모두 보관해 연결 함수가
+반환된 뒤에도 객체 수명이 유지되도록 한다. 보고서
+`setup.simulation_view_owner_retained`가 true여야 한다.
 
 ## 검증 범위와 결과
 

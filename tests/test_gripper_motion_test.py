@@ -386,3 +386,47 @@ def test_native_adapter_rejects_nonfinite_feedback(native_adapter):
     view.q = np.array([[0, np.nan, 0]], dtype=np.float32)
     with pytest.raises(ValueError, match="feedback"):
         adapter.get_joint_positions()
+
+
+def test_parent_simulation_view_survives_binding_return_and_garbage_collection(usd_model):
+    import gc
+    import weakref
+    from types import SimpleNamespace
+    owners = []
+    class ChildView:
+        count = 1
+        max_dofs = 1
+        is_homogeneous = True
+        shared_metatype = SimpleNamespace(dof_names=["finger_joint"])
+        def __init__(self, parent):
+            self.parent = weakref.ref(parent)
+        def get_dof_positions(self):
+            if self.parent() is None:
+                raise RuntimeError("parent simulation view destroyed")
+            return np.array([[0.01]], dtype=np.float32)
+        def get_dof_position_targets(self):
+            assert self.parent() is not None
+            return np.array([[0.0]], dtype=np.float32)
+        def set_dof_position_targets(self, targets, indices):
+            assert self.parent() is not None
+    class ParentView:
+        def __init__(self):
+            owners.append(weakref.ref(self))
+        def set_subspace_roots(self, root):
+            pass
+        def create_articulation_view(self, path):
+            return ChildView(self)
+    world = SimpleNamespace(play=lambda: None, step=lambda **kw: None)
+    art, names, metadata = bind_live_gripper(lambda: usd_model, world, NativeGripperArticulation,
+                                            lambda backend: ParentView())
+    gc.collect()
+    assert owners[0]() is not None
+    assert metadata["simulation_view_owner_retained"]
+    assert art.get_joint_positions()[0] == pytest.approx(0.01)
+    art.set_primary_target(0.1, 0)
+    # Demonstrate the failure being guarded: losing the sole parent reference invalidates the child.
+    art._simulation_view = None
+    gc.collect()
+    assert owners[0]() is None
+    with pytest.raises(RuntimeError, match="parent simulation view destroyed"):
+        art.get_joint_positions()
