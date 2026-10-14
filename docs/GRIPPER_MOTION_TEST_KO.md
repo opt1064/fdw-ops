@@ -63,6 +63,16 @@ SimulationManager에 저장된 오래된 view를 조회하는 경로를 거치�
 반환된 뒤에도 객체 수명이 유지되도록 한다. 보고서
 `setup.simulation_view_owner_retained`가 true여야 한다.
 
+GUI의 `World.step(render=True)`는 app 갱신 경로만 호출할 수 있으므로 이번 독립 시험에서는
+최종 바인딩 전에 timeline을 pause하고 pause 이벤트를 처리한 뒤 PhysX를 연결한다.
+반복 구동은 `IPhysxSimulation.simulate(1/120, 경과시간)` → `fetch_results()` →
+`update_transformations(False, True)` → GUI 갱신 순서로 직접 진행한다.
+USD 결과는 별도 anonymous root layer로 지정하며 원본 자산을 저장하지 않는다.
+timeline이 Play 상태이거나 PhysX의 연결 stage가 바뀌면 중단하여 중복 계산을 막는다.
+`setup.physics_step_backend`, `completed_physics_steps`, `explicit_physics_time_sec`에
+계산 경로·완료한 호출 횟수·경과 시간을 기록한다. 호출 횟수만으로 실제 관절 움직임을
+통과 판정하지 않는다. 실패 구간의 `last_feedback`에도 마지막 명령·실측값·양쪽 손끝을 남긴다.
+
 ## 검증 범위와 결과
 
 이번 시험은 **물체 없는 무부하·중력 0 조건**이다. 원본 자산은 저장·수정하지 않고,

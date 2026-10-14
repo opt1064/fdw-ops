@@ -26,6 +26,7 @@ def main():
         import omni.usd
         import omni.physics.tensors
         import omni.physx
+        import omni.timeline
         from pxr import Gf, Usd, UsdGeom, UsdLux, UsdPhysics
         from isaacsim.core.api import World
         from fdw_sim.visualization.robot_loader import get_isaac_assets_root
@@ -36,6 +37,7 @@ def main():
             compose_gripper_experiment, require_physics_scene,
             ensure_physx_attachment,
             NativeGripperArticulation,
+            ManualPhysxStepper,
         )
         from fdw_sim.visualization.robot_model_export import _usd_rigid_matrix
         from fdw_sim.visualization.lula_model_validation import _pose_error
@@ -127,10 +129,16 @@ def main():
                     app.update()
                     time.sleep(0.02)
             def prepare_attachment():
+                # Drain pause events before attaching and creating the final tensor view.
+                # Keep timeline paused: only our explicit simulate/fetch advances physics.
+                world.pause()
+                app.update()
                 interface = omni.physx.get_physx_simulation_interface()
                 stage_id = omni.usd.get_context().get_stage_id()
                 setup.update(usd_stage_id=int(stage_id), physx_stage_id_before=int(interface.get_attached_stage()))
                 attachment = ensure_physx_attachment(interface, stage_id)
+                omni.physx.get_physx_interface().set_simulation_layer(
+                    omni.usd.get_context().get_stage().GetRootLayer().identifier)
                 setup.update(attachment)
                 print(f"[GRIPPER MOTION] PhysX attached stage={attachment['physx_stage_id_after']} "
                       f"(explicit={attachment['physx_stage_attached_explicitly']})", flush=True)
@@ -145,7 +153,7 @@ def main():
             stage = omni.usd.get_context().get_stage()
             stage.SetEditTarget(stage.GetRootLayer())
             base_start = _usd_rigid_matrix(UsdGeom.XformCache(), stage.GetPrimAtPath(setup["base_path"]), meters)
-            print("[GRIPPER MOTION] fresh physics view bound after scene preparation and play.", flush=True)
+            print("[GRIPPER MOTION] fresh physics view bound; timeline paused, explicit PhysX stepping enabled.", flush=True)
             def read_joint():
                 q = art.get_joint_positions()
                 if q is None or len(q) != len(names) or not np.isfinite(np.asarray(q)).all():
@@ -153,8 +161,13 @@ def main():
                 return q[index]
             def command(q):
                 art.set_primary_target(q, index)
-            report = run_gripper_cycle(read_joint, command, read_pads, lambda: world.step(render=True), world.pause,
+            stepper = ManualPhysxStepper(omni.physx.get_physx_simulation_interface(),
+                                        lambda: omni.physx.get_physx_interface().update_transformations(False, True),
+                                        app.update, omni.timeline.get_timeline_interface().is_playing,
+                                        stage_id=setup["usd_stage_id"], dt=dt)
+            report = run_gripper_cycle(read_joint, command, read_pads, stepper.step, world.pause,
                                        setup["limit_rad"], dt=dt, realtime=True, is_running=app.is_running)
+            setup.update(stepper.diagnostics())
         except (Exception, KeyboardInterrupt) as exc:
             report = {"status": "FAILED", "errors": [f"{type(exc).__name__}: {exc}"],
                       "motion_commands_issued": False, "physical_grasp_verified": False}

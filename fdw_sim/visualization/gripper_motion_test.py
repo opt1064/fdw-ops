@@ -102,6 +102,41 @@ def ensure_physx_attachment(interface, stage_id):
             "physx_stage_id_after": after, "physx_stage_attached_explicitly": attached_explicitly}
 
 
+class ManualPhysxStepper:
+    """Advance an explicitly attached scene; GUI updates are not physics steps."""
+    def __init__(self, interface, writeback, render, is_playing, *, stage_id, dt):
+        if not math.isfinite(dt) or not 0 < dt <= 1/60 or int(stage_id) <= 0:
+            raise ValueError("invalid manual PhysX stage/timestep")
+        self.interface, self.writeback, self.render = interface, writeback, render
+        self.is_playing = is_playing
+        self.stage_id, self.dt = int(stage_id), float(dt)
+        self.steps = 0
+        self.failed = False
+
+    def step(self):
+        if self.failed:
+            raise RuntimeError("manual physics stepping stopped after an error")
+        try:
+            if self.is_playing():
+                raise RuntimeError("timeline must be paused during manual physics stepping")
+            if int(self.interface.get_attached_stage()) != self.stage_id:
+                raise RuntimeError("manual PhysX stage attachment changed")
+            self.interface.flush_changes()
+            self.interface.simulate(self.dt, self.steps*self.dt)
+            self.interface.fetch_results()
+            self.steps += 1
+            self.writeback()
+            self.render()
+        except Exception:
+            self.failed = True
+            raise
+
+    def diagnostics(self):
+        return {"physics_step_backend": "direct_physx_simulate_fetch",
+                "completed_physics_steps": self.steps, "explicit_physics_time_sec": self.steps*self.dt,
+                "manual_step_failed": self.failed}
+
+
 def bind_live_gripper(get_stage, world, make_articulation, make_simulation_view, *, physics_scene_path=None,
                       prepare_attachment=None):
     """Bind fresh tensors after all scene edits, countdown and the final play transition."""
@@ -247,6 +282,9 @@ def run_gripper_cycle(read_joint, command, read_pads, step, stop, limits, *, dt=
                     q, pads = read()
                     tracking = abs(requested-q)
                     row["max_tracking_error_rad"] = max(row["max_tracking_error_rad"], tracking)
+                    row["last_feedback"] = {"time_sec": (tick+1)*dt, "command_rad": requested,
+                                            "measured_rad": q, "pad_positions_m": pads.tolist(),
+                                            "pad_span_m": float(np.linalg.norm(pads[1]-pads[0]))}
                     if abs(q-baseline) > math.radians(15) or tracking > math.radians(8):
                         raise RuntimeError("excessive primary joint excursion/tracking error")
                     if tick % max(1, round(0.1/dt)) == 0:

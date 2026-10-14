@@ -13,6 +13,7 @@ from fdw_sim.visualization.gripper_motion_test import (
     bind_live_gripper, compose_gripper_experiment, require_physics_scene,
     ensure_physx_attachment,
     NativeGripperArticulation,
+    ManualPhysxStepper,
 )
 
 
@@ -80,6 +81,9 @@ def test_frozen_joint_feedback_times_out_and_pauses():
     result = run(plant)
     assert result["status"] == "FAILED" and plant.paused
     assert result["passed_legs"] == 0
+    feedback = result["legs"][0]["last_feedback"]
+    assert feedback["measured_rad"] == 0
+    assert feedback["command_rad"] > math.radians(8)
 
 
 def test_static_usd_geometry_cannot_pass_even_if_joint_feedback_tracks():
@@ -430,3 +434,83 @@ def test_parent_simulation_view_survives_binding_return_and_garbage_collection(u
     assert owners[0]() is None
     with pytest.raises(RuntimeError, match="parent simulation view destroyed"):
         art.get_joint_positions()
+
+
+class ManualInterface:
+    def __init__(self, plant=None):
+        self.stage_id = 42
+        self.events = []
+        self.plant = plant
+        self.fetch_failed = False
+
+    def get_attached_stage(self):
+        return self.stage_id
+
+    def flush_changes(self):
+        self.events.append("flush")
+
+    def simulate(self, dt, time_sec):
+        self.events.append(("simulate", dt, time_sec))
+
+    def fetch_results(self):
+        self.events.append("fetch")
+        if self.fetch_failed:
+            raise RuntimeError("fetch failed")
+        if self.plant:
+            self.plant.step()
+
+
+def manual_stepper(interface, is_playing=lambda: False):
+    return ManualPhysxStepper(interface, lambda: interface.events.append("writeback"),
+                             lambda: interface.events.append("render"), is_playing,
+                             stage_id=42, dt=1/120)
+
+
+def test_manual_step_fetches_before_geometry_and_render_and_advances_clock():
+    interface = ManualInterface()
+    stepper = manual_stepper(interface)
+    stepper.step()
+    stepper.step()
+    assert interface.events == ["flush", ("simulate", 1/120, 0), "fetch", "writeback", "render",
+                                "flush", ("simulate", 1/120, 1/120), "fetch", "writeback", "render"]
+    assert stepper.diagnostics()["completed_physics_steps"] == 2
+    assert stepper.diagnostics()["explicit_physics_time_sec"] == pytest.approx(2/120)
+
+
+@pytest.mark.parametrize("playing,stage_id", [(True, 42), (False, 43), (False, 0)])
+def test_manual_step_refuses_double_stepping_or_changed_stage(playing, stage_id):
+    interface = ManualInterface()
+    interface.stage_id = stage_id
+    stepper = manual_stepper(interface, lambda: playing)
+    with pytest.raises(RuntimeError):
+        stepper.step()
+    assert not interface.events and stepper.steps == 0 and stepper.failed
+
+
+def test_manual_fetch_failure_does_not_render_or_advance_and_blocks_retries():
+    interface = ManualInterface()
+    interface.fetch_failed = True
+    stepper = manual_stepper(interface)
+    with pytest.raises(RuntimeError, match="fetch failed"):
+        stepper.step()
+    assert interface.events == ["flush", ("simulate", 1/120, 0), "fetch"]
+    assert stepper.steps == 0 and stepper.failed
+    with pytest.raises(RuntimeError, match="stopped after an error"):
+        stepper.step()
+    assert len(interface.events) == 3
+
+
+@pytest.mark.parametrize("dt,stage_id", [(0, 42), (float("nan"), 42), (0.1, 42), (1/120, 0)])
+def test_manual_step_rejects_invalid_setup(dt, stage_id):
+    with pytest.raises(ValueError):
+        ManualPhysxStepper(None, None, None, None, stage_id=stage_id, dt=dt)
+
+
+def test_cycle_uses_explicit_simulate_fetch_for_joint_feedback():
+    plant = Plant()
+    interface = ManualInterface(plant)
+    stepper = manual_stepper(interface)
+    result = run(plant, step=stepper.step, dt=stepper.dt)
+    assert result["status"] == "PASSED_UNLOADED_GRIPPER_CYCLE"
+    assert stepper.steps == plant.steps and stepper.steps > 0
+    assert len(interface.events) == stepper.steps*5
