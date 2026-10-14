@@ -514,3 +514,122 @@ def test_cycle_uses_explicit_simulate_fetch_for_joint_feedback():
     assert result["status"] == "PASSED_UNLOADED_GRIPPER_CYCLE"
     assert stepper.steps == plant.steps and stepper.steps > 0
     assert len(interface.events) == stepper.steps*5
+
+
+@pytest.fixture
+def damping_adapter(native_adapter):
+    adapter, view = native_adapter
+    view.stiffness = np.array([[0, 6.4, 0]], dtype=np.float32)
+    view.damping = np.array([[0, 0.057, 0]], dtype=np.float32)
+    view.force = np.array([[np.inf, 10, np.inf]], dtype=np.float32)
+    view.velocity_targets = np.array([[0.2, 0.1, -0.3]], dtype=np.float32)
+    view.velocity = np.zeros((1, 3), dtype=np.float32)
+    view.gain_writes = []
+    view.get_dof_stiffnesses = lambda: view.stiffness
+    view.get_dof_dampings = lambda: view.damping
+    view.get_dof_max_forces = lambda: view.force
+    view.get_dof_velocity_targets = lambda: view.velocity_targets
+    view.get_dof_velocities = lambda: view.velocity
+    def setter(field):
+        def write(data, indices):
+            view.gain_writes.append((field, data.copy(), indices.copy()))
+            setattr(view, field, data.copy())
+        return write
+    view.set_dof_dampings = setter("damping")
+    view.set_dof_velocity_targets = setter("velocity_targets")
+    return adapter, view
+
+
+def test_damping_experiment_changes_only_primary_damping_and_velocity_target(damping_adapter):
+    adapter, view = damping_adapter
+    before = view.damping.copy()
+    velocities = view.velocity_targets.copy()
+    report = adapter.configure_primary_damping(1, 10)
+    assert view.damping[0, 1] == pytest.approx(before[0, 1]*10)
+    np.testing.assert_array_equal(view.damping[0, [0, 2]], before[0, [0, 2]])
+    assert view.velocity_targets[0, 1] == 0
+    np.testing.assert_array_equal(view.velocity_targets[0, [0, 2]], velocities[0, [0, 2]])
+    assert report["max_forces_unchanged"] == ["inf", 10, "inf"]
+    json.dumps(report, allow_nan=False)
+
+
+@pytest.mark.parametrize("index,scale", [(0, 10), (1, 0), (1, 101), (1, float("nan"))])
+def test_invalid_damping_experiment_does_not_modify_settings(damping_adapter, index, scale):
+    adapter, view = damping_adapter
+    with pytest.raises(ValueError):
+        adapter.configure_primary_damping(index, scale)
+    assert not view.gain_writes
+
+
+@pytest.mark.parametrize("field,value", [("damping", 0), ("stiffness", 0), ("force", np.inf), ("damping", np.nan)])
+def test_experiment_refuses_missing_authored_primary_gains(damping_adapter, field, value):
+    adapter, view = damping_adapter
+    getattr(view, field)[0, 1] = value
+    with pytest.raises(ValueError):
+        adapter.configure_primary_damping(1, 10)
+    assert not view.gain_writes
+
+
+def test_damping_experiment_checks_readback(damping_adapter):
+    adapter, view = damping_adapter
+    view.set_dof_dampings = lambda data, indices: None
+    with pytest.raises(RuntimeError, match="readback mismatch"):
+        adapter.configure_primary_damping(1, 10)
+
+
+def test_native_velocity_feedback_is_copied_and_must_be_finite(damping_adapter):
+    adapter, view = damping_adapter
+    feedback = adapter.get_joint_velocities()
+    feedback[0] = 2
+    assert view.velocity[0, 0] == 0
+    view.velocity[0, 1] = np.nan
+    with pytest.raises(ValueError, match="velocity feedback"):
+        adapter.get_joint_velocities()
+
+
+def test_high_velocity_cannot_pass_even_with_position_at_target():
+    plant = Plant()
+    report = run(plant, read_velocity=lambda: math.radians(2))
+    assert report["status"] == "FAILED" and report["passed_legs"] == 0
+    assert "timed out" in report["errors"][0]
+    assert report["legs"][0]["last_feedback"]["velocity_rad_sec"] == pytest.approx(math.radians(2))
+
+
+def test_initial_stabilization_precedes_four_measured_legs():
+    plant = Plant()
+    report = run(plant, read_velocity=lambda: 0, settle_initial=True)
+    assert report["initial_stabilization"]["status"] == "PASSED"
+    assert report["initial_stabilization"]["elapsed_sec"] >= 0.5
+    assert report["passed_legs"] == 4
+
+
+def test_initial_velocity_failure_blocks_cycle_and_holds_feedback():
+    plant = Plant()
+    report = run(plant, read_velocity=lambda: math.radians(2), settle_initial=True)
+    assert report["status"] == "FAILED" and not report["legs"] and plant.paused
+    assert "initial position/velocity" in report["errors"][0]
+    assert report["abort_hold_joint_rad"] == plant.q
+
+
+def test_nonfinite_velocity_aborts_cycle():
+    plant = Plant()
+    report = run(plant, read_velocity=lambda: float("nan"))
+    assert report["status"] == "FAILED" and plant.paused
+    assert "nonfinite primary joint velocity" in report["errors"][0]
+
+
+def test_damped_spring_control_fixture_closes_and_returns_twice():
+    # Numerical controller fixture only; this does not model or validate Robotiq PhysX.
+    class SpringPlant(Plant):
+        def __init__(self):
+            super().__init__()
+            self.q = math.radians(1)
+            self.v = 0
+        def step(self):
+            self.steps += 1
+            self.v += (25*(self.target-self.q)-5*self.v)/120
+            self.q += self.v/120
+    plant = SpringPlant()
+    report = run(plant, dt=1/120, read_velocity=lambda: plant.v, settle_initial=True)
+    assert report["status"] == "PASSED_UNLOADED_GRIPPER_CYCLE"
+    assert report["passed_legs"] == 4 and report["returned_to_start"]

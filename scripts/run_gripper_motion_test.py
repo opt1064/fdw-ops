@@ -16,7 +16,11 @@ def main():
     parser.add_argument("--keep-alive", action="store_true")
     parser.add_argument("--skip-auto-camera", action="store_true")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "fdw_sim/logs")
+    parser.add_argument("--drive-damping-scale", type=float, default=10.0,
+                        help="Runtime-only primary damping multiplier (1=authored baseline; default=10)")
     args = parser.parse_args()
+    if not 1 <= args.drive_damping_scale <= 100:
+        parser.error("--drive-damping-scale must be finite and between 1 and 100")
     from isaacsim import SimulationApp
     app = SimulationApp({"headless": False})
     world, source = None, args.usd
@@ -161,12 +165,18 @@ def main():
                 return q[index]
             def command(q):
                 art.set_primary_target(q, index)
+            setup["drive_experiment"] = art.configure_primary_damping(index, args.drive_damping_scale)
+            print(f"[GRIPPER MOTION] runtime primary damping scale={args.drive_damping_scale}; "
+                  "stiffness/maxForce/passive gains unchanged.", flush=True)
+            def read_velocity():
+                return art.get_joint_velocities()[index]
             stepper = ManualPhysxStepper(omni.physx.get_physx_simulation_interface(),
                                         lambda: omni.physx.get_physx_interface().update_transformations(False, True),
                                         app.update, omni.timeline.get_timeline_interface().is_playing,
                                         stage_id=setup["usd_stage_id"], dt=dt)
             report = run_gripper_cycle(read_joint, command, read_pads, stepper.step, world.pause,
-                                       setup["limit_rad"], dt=dt, realtime=True, is_running=app.is_running)
+                                       setup["limit_rad"], dt=dt, realtime=True, is_running=app.is_running,
+                                       read_velocity=read_velocity, settle_initial=True)
             setup.update(stepper.diagnostics())
         except (Exception, KeyboardInterrupt) as exc:
             report = {"status": "FAILED", "errors": [f"{type(exc).__name__}: {exc}"],

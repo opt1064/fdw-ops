@@ -81,6 +81,52 @@ class NativeGripperArticulation:
         # Sparse DOF setters are unsupported here; preserve all existing passive targets.
         self._view.set_dof_position_targets(np.ascontiguousarray(targets), np.array([0], dtype=np.int32))
 
+    def get_joint_velocities(self):
+        velocities = np.asarray(self._view.get_dof_velocities(), dtype=float)
+        if velocities.shape != (1, len(self.dof_names)) or not np.isfinite(velocities).all():
+            raise ValueError("native DOF velocity feedback missing or nonfinite")
+        return velocities[0].copy()
+
+    def configure_primary_damping(self, index, scale):
+        """Runtime-only experiment: retain authored stiffness, limits and passive gains."""
+        if (not isinstance(index, (int, np.integer)) or not 0 <= index < len(self.dof_names)
+                or self.dof_names[index] != "finger_joint" or not math.isfinite(scale) or not 1 <= scale <= 100):
+            raise ValueError("invalid primary joint/damping experiment")
+        def read(name, finite=True):
+            values = np.array(getattr(self._view, name)(), dtype=np.float32, copy=True)
+            if (values.shape != (1, len(self.dof_names)) or np.isnan(values).any()
+                    or (finite and not np.isfinite(values).all())):
+                raise ValueError(f"finite runtime drive settings unavailable: {name}")
+            return values
+        stiffness = read("get_dof_stiffnesses")
+        damping = read("get_dof_dampings")
+        forces = read("get_dof_max_forces", finite=False)
+        velocity_targets = read("get_dof_velocity_targets")
+        if stiffness[0, index] <= 0 or damping[0, index] <= 0 or not np.isfinite(forces[0, index]) or forces[0, index] <= 0:
+            raise ValueError("positive authored primary stiffness/damping/force required; refusing guessed gains")
+        modified = damping.copy()
+        modified[0, index] *= scale
+        if not np.isfinite(modified).all():
+            raise ValueError("scaled damping is nonfinite")
+        stationary = velocity_targets.copy()
+        stationary[0, index] = 0  # Position hold must not retain a nonzero velocity drive target.
+        rows = np.array([0], dtype=np.int32)
+        self._view.set_dof_dampings(np.ascontiguousarray(modified), rows)
+        self._view.set_dof_velocity_targets(np.ascontiguousarray(stationary), rows)
+        after = read("get_dof_dampings")
+        if (not np.allclose(after, modified, rtol=1e-5, atol=0)
+                or not np.array_equal(read("get_dof_stiffnesses"), stiffness)
+                or not np.array_equal(read("get_dof_max_forces", finite=False), forces)
+                or not np.allclose(read("get_dof_velocity_targets"), stationary, rtol=1e-5, atol=0)):
+            raise RuntimeError("runtime drive experiment readback mismatch")
+        return {"scope": "runtime-only unloaded damping experiment; not calibrated hardware gains",
+                "primary_damping_scale": scale, "joint_names": list(self.dof_names),
+                "stiffness_unchanged": stiffness[0].tolist(),
+                "max_forces_unchanged": [float(x) if np.isfinite(x) else str(float(x)) for x in forces[0]],
+                "damping_before": damping[0].tolist(), "damping_after": after[0].tolist(),
+                "velocity_targets_before": velocity_targets[0].tolist(),
+                "velocity_targets_after": stationary[0].tolist()}
+
 
 def ensure_physx_attachment(interface, stage_id):
     """Verify the real PhysX stage, attaching this isolated stage if currently detached."""
@@ -230,7 +276,8 @@ def inspect_motion_prerequisites(stage):
 
 
 def run_gripper_cycle(read_joint, command, read_pads, step, stop, limits, *, dt=1/60,
-                       realtime=False, is_running=lambda: True):
+                       realtime=False, is_running=lambda: True, read_velocity=None,
+                       settle_initial=False):
     """Commands only one measured joint; pad positions are measured in the base frame."""
     report = {"status": "FAILED", "errors": [], "legs": [], "samples": [],
               "motion_commands_issued": False, "physical_grasp_verified": False,
@@ -251,6 +298,41 @@ def run_gripper_cycle(read_joint, command, read_pads, step, stop, limits, *, dt=
                 raise ValueError("measured primary joint exceeds limits")
             return q, pads
         baseline, initial = read()
+        def velocity():
+            v = float(read_velocity()) if read_velocity is not None else None
+            if v is not None and not math.isfinite(v):
+                raise ValueError("nonfinite primary joint velocity")
+            return v
+        if settle_initial:
+            if read_velocity is None:
+                raise ValueError("initial stabilization requires measured velocity")
+            hold_target = float(np.clip(baseline, limits[0], limits[1]))
+            if abs(baseline) > math.radians(5):
+                raise ValueError("unexpected initial posture before stabilization")
+            report["initial_stabilization"] = {"status": "FAILED", "hold_target_rad": hold_target}
+            stable = 0
+            print("[GRIPPER MOTION] stabilizing initial position with measured velocity...", flush=True)
+            for tick in range(math.ceil(8/dt)):
+                if not is_running():
+                    raise RuntimeError("viewer closed during initial stabilization")
+                started = time.monotonic()
+                report["motion_commands_issued"] = True
+                command(hold_target)
+                step()
+                q, pads = read()
+                v = velocity()
+                if abs(q-baseline) > math.radians(5):
+                    raise RuntimeError("excessive initial stabilization excursion")
+                report["initial_stabilization"].update(measured_rad=q, velocity_rad_sec=v, elapsed_sec=(tick+1)*dt)
+                stable = stable+1 if abs(q-hold_target) <= math.radians(0.5) and abs(v) <= math.radians(0.5) else 0
+                if stable >= math.ceil(0.5/dt):
+                    report["initial_stabilization"]["status"] = "PASSED"
+                    baseline, initial = q, pads
+                    break
+                if realtime:
+                    time.sleep(max(0, dt-(time.monotonic()-started)))
+            else:
+                raise RuntimeError("initial position/velocity stabilization timed out")
         # Permit <=1e-4 rad constraint roundoff in feedback, but all targets stay inside limits.
         open_target = float(np.clip(baseline, limits[0], limits[1]))
         closed = open_target + math.radians(10)
@@ -280,19 +362,23 @@ def run_gripper_cycle(read_joint, command, read_pads, step, stop, limits, *, dt=
                     command(requested)
                     step()
                     q, pads = read()
+                    v = velocity()
                     tracking = abs(requested-q)
                     row["max_tracking_error_rad"] = max(row["max_tracking_error_rad"], tracking)
                     row["last_feedback"] = {"time_sec": (tick+1)*dt, "command_rad": requested,
                                             "measured_rad": q, "pad_positions_m": pads.tolist(),
+                                            "velocity_rad_sec": v,
                                             "pad_span_m": float(np.linalg.norm(pads[1]-pads[0]))}
                     if abs(q-baseline) > math.radians(15) or tracking > math.radians(8):
                         raise RuntimeError("excessive primary joint excursion/tracking error")
                     if tick % max(1, round(0.1/dt)) == 0:
                         report["samples"].append({"cycle": cycle, "leg": label, "time_sec": (tick+1)*dt,
                                                   "command_rad": requested, "measured_rad": q,
+                                                  "velocity_rad_sec": v,
                                                   "pad_positions_m": pads.tolist(),
                                                   "pad_span_m": float(np.linalg.norm(pads[1]-pads[0]))})
-                    at_target = alpha == 1 and abs(q-target) <= math.radians(0.5)
+                    at_target = (alpha == 1 and abs(q-target) <= math.radians(0.5)
+                                 and (v is None or abs(v) <= math.radians(0.5)))
                     stable = stable+1 if at_target else 0
                     dwell = dwell+1 if stable >= max(2, math.ceil(0.2/dt)) else 0
                     if dwell >= math.ceil(1.5/dt):
