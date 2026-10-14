@@ -5,12 +5,19 @@ mounting_frame: flange
 reference_end_frame: ee_link
 active_tool: null
 tool_changer:
+  candidate_model: ATI QC-11
+  candidate_source: https://www.ati-ia.com/products/toolchanger/qc.aspx?id=qc-11
+  selection_status: CAD_and_adapter_review_pending
   asset_path: null
   mounting_joint_path: null
   lock_feedback_source: null
 tools:
   welding_torch:
     kind: welding_torch
+    candidate_model: Precitec YW30
+    process: laser
+    candidate_source: https://www.precitec.com/laser-welding/products/processing-heads/yw30/
+    selection_status: CAD_and_optical_TCP_review_pending
     asset_path: null
     root_prim_path: null
     tcp_frame: null
@@ -18,7 +25,11 @@ tools:
     calibration_evidence: null
   gripper:
     kind: gripper
-    gripper_type: null  # parallel / suction / other: identify from the actual model
+    candidate_model: Robotiq 2F-140
+    candidate_usd_subpath: Isaac/Robots/Robotiq/2F-140/Robotiq_2F_140_physics_edit.usd
+    candidate_source: https://docs.isaacsim.omniverse.nvidia.com/6.1.0/assets/usd_assets_robots_manipulator.html
+    selection_status: standalone_asset_inventory_pending
+    gripper_type: parallel  # Candidate type; live joint mapping remains unverified.
     asset_path: null
     root_prim_path: null
     tcp_frame: null
