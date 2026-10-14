@@ -32,6 +32,8 @@ def inspect_gripper_stage(stage):
             joints.append({"name": prim.GetName(), "path": path, "type": prim.GetTypeName(),
                            "body0": list(map(str, j.GetBody0Rel().GetTargets())),
                            "body1": list(map(str, j.GetBody1Rel().GetTargets())),
+                           "mimic_relationships": {r.GetName(): list(map(str, r.GetTargets()))
+                                                   for r in prim.GetRelationships() if r.GetName().startswith("physxMimicJoint:")},
                            "attributes": {a.GetName(): {"value": value(a.Get()), "authored": a.HasAuthoredValueOpinion()}
                                           for a in prim.GetAttributes() if a.GetName().startswith(
                                               ("physics:", "drive:", "physxJoint:", "physxMimicJoint:"))}})
