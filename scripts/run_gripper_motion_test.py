@@ -25,6 +25,7 @@ def main():
         import numpy as np
         import omni.usd
         import omni.physics.tensors
+        import omni.physx
         from pxr import Gf, Usd, UsdGeom, UsdLux, UsdPhysics
         from isaacsim.core.api import World
         from isaacsim.core.prims import SingleArticulation
@@ -35,6 +36,7 @@ def main():
         from fdw_sim.visualization.gripper_motion_test import (
             inspect_motion_prerequisites, run_gripper_cycle, bind_live_gripper,
             compose_gripper_experiment, require_physics_scene,
+            ensure_physx_attachment,
         )
         from fdw_sim.visualization.robot_model_export import _usd_rigid_matrix
         from fdw_sim.visualization.lula_model_validation import _pose_error
@@ -125,9 +127,19 @@ def main():
                         raise RuntimeError("viewer closed before test")
                     app.update()
                     time.sleep(0.02)
+            def prepare_attachment():
+                interface = omni.physx.get_physx_simulation_interface()
+                stage_id = omni.usd.get_context().get_stage_id()
+                setup.update(usd_stage_id=int(stage_id), physx_stage_id_before=int(interface.get_attached_stage()))
+                attachment = ensure_physx_attachment(interface, stage_id)
+                setup.update(attachment)
+                print(f"[GRIPPER MOTION] PhysX attached stage={attachment['physx_stage_id_after']} "
+                      f"(explicit={attachment['physx_stage_attached_explicitly']})", flush=True)
+                return attachment
             art, names, binding = bind_live_gripper(lambda: omni.usd.get_context().get_stage(), world,
                                                     SingleArticulation, omni.physics.tensors.create_simulation_view,
-                                                    physics_scene_path=physics_scene_path)
+                                                    physics_scene_path=physics_scene_path,
+                                                    prepare_attachment=prepare_attachment)
             setup.update(binding)
             index = binding["commanded_joint_index"]
             stage = omni.usd.get_context().get_stage()

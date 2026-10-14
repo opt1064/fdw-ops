@@ -45,6 +45,11 @@ git pull --ff-only origin fix/fdw-quality-disposition-base-pose
 
 카메라·조명·표시 생성과 카운트다운을 먼저 마친다. 마지막 Play 전환과 한 번의
 물리 step을 처리한 뒤 새 NumPy PhysX simulation view를 만들고 articulation을 연결한다.
+이때 `IPhysxSimulation.get_attached_stage()`와 현재 USD stage ID를 대조한다.
+PhysX 연결이 비어 있으면 `attach_stage()`로 현재 시험 스테이지를 파싱하고
+`flush_changes()` 후 ID가 일치하는지 확인한다. 다른 스테이지가 이미 연결됐거나
+연결 실패·ID 불일치가 발생하면 중단한다. 새 관절 view는 이 확인 뒤에 만든다.
+로그 `PhysX attached stage=...`와 보고서의 연결 전후 ID에 실제 상태를 기록한다.
 화면 준비 이전에 만든 tensor view를 재사용하지 않는다. 첫 관절 명령 전에
 이 새 연결로 이름·index와 유한 피드백을 다시 확인하며,
 보고서 `setup.fresh_physics_view_after_final_play`에 기록한다.
@@ -81,4 +86,5 @@ CPU/OpenUSD 회귀 테스트는 제어·형상 판정과 실패 처리를 검증
 사용자 spark에서의 실제 PhysX 구동 결과는 실행 로그·영상으로 별도 확인해야 한다.
 
 API 근거: [NVIDIA Isaac 6.1 closed-loop/mimic 구성](https://docs.isaacsim.omniverse.nvidia.com/6.1.0/robot_setup_tutorials/rig_closed_loop_structures.html),
-[그리퍼 제어 예제](https://docs.isaacsim.omniverse.nvidia.com/6.1.0/robot_setup_tutorials/tutorial_pickplace_example.html).
+[그리퍼 제어 예제](https://docs.isaacsim.omniverse.nvidia.com/6.1.0/robot_setup_tutorials/tutorial_pickplace_example.html),
+[PhysX stage 연결 API](https://docs.omniverse.nvidia.com/kit/docs/omni_physics/107.3/extensions/runtime/source/omni.physx/docs/api/python.html).

@@ -40,7 +40,28 @@ def require_physics_scene(stage, path, phase):
         raise ValueError(f"physics scene missing {phase}: {path}")
 
 
-def bind_live_gripper(get_stage, world, make_articulation, make_simulation_view, *, physics_scene_path=None):
+def ensure_physx_attachment(interface, stage_id):
+    """Verify the real PhysX stage, attaching this isolated stage if currently detached."""
+    stage_id = int(stage_id)
+    if stage_id <= 0:
+        raise ValueError("invalid current USD stage id")
+    before = int(interface.get_attached_stage())
+    attached_explicitly = before != stage_id
+    if attached_explicitly:
+        if before > 0 and before != 2**64-1:
+            raise ValueError(f"PhysX attached to another stage ({before}); current stage is {stage_id}")
+        if not interface.attach_stage(stage_id):
+            raise RuntimeError(f"PhysX failed to attach current USD stage {stage_id}")
+    interface.flush_changes()
+    after = int(interface.get_attached_stage())
+    if after != stage_id:
+        raise RuntimeError(f"PhysX stage attachment mismatch: expected {stage_id}, got {after}")
+    return {"usd_stage_id": stage_id, "physx_stage_id_before": before,
+            "physx_stage_id_after": after, "physx_stage_attached_explicitly": attached_explicitly}
+
+
+def bind_live_gripper(get_stage, world, make_articulation, make_simulation_view, *, physics_scene_path=None,
+                      prepare_attachment=None):
     """Bind fresh tensors after all scene edits, countdown and the final play transition."""
     if physics_scene_path:
         require_physics_scene(get_stage(), physics_scene_path, "before final play")
@@ -49,6 +70,7 @@ def bind_live_gripper(get_stage, world, make_articulation, make_simulation_view,
     stage = get_stage()
     if physics_scene_path:
         require_physics_scene(stage, physics_scene_path, "after final play/step")
+    attachment = prepare_attachment() if prepare_attachment is not None else {}
     roots = articulation_root_paths(stage)
     default = stage.GetDefaultPrim()
     candidates = list(dict.fromkeys([str(default.GetPath()) if default else "/Robotiq_2F_140", *roots]))
@@ -68,6 +90,7 @@ def bind_live_gripper(get_stage, world, make_articulation, make_simulation_view,
                         "live_joint_names": names, "commanded_joint_index": names.index("finger_joint"),
                         "initial_live_joint_positions_rad": q.tolist(), "wrapper_probe_failures": failures,
                         "fresh_physics_view_after_final_play": True}
+            metadata.update(attachment)
             return art, names, metadata
         except Exception as exc:
             failures.append(f"{candidate}: {exc}")

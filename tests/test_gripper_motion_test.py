@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fdw_sim.visualization.gripper_motion_test import (
     run_gripper_cycle, inspect_motion_prerequisites, articulation_root_paths,
     bind_live_gripper, compose_gripper_experiment, require_physics_scene,
+    ensure_physx_attachment,
 )
 
 
@@ -198,9 +199,13 @@ def test_binding_creates_fresh_tensor_view_only_after_final_play_and_physics_ste
             events.append("subspace")
     fresh = View()
     def make_view(backend):
-        assert backend == "numpy" and events == ["play", "step"]
+        assert backend == "numpy" and events == ["play", "step", "attach"]
         events.append("new_view")
         return fresh
+    def prepare_attachment():
+        assert events == ["play", "step"]
+        events.append("attach")
+        return {"usd_stage_id": 42, "physx_stage_id_after": 42}
     class Art:
         dof_names = ["right_outer_knuckle_joint", "finger_joint"]
         def __init__(self, **kwargs):
@@ -215,10 +220,12 @@ def test_binding_creates_fresh_tensor_view_only_after_final_play_and_physics_ste
             return np.array([0.011, 0.010])
         def apply_action(self, *args):
             pytest.fail("binding must not issue drive commands")
-    art, names, metadata = bind_live_gripper(lambda: usd_model, World(), Art, make_view)
+    art, names, metadata = bind_live_gripper(lambda: usd_model, World(), Art, make_view,
+                                            prepare_attachment=prepare_attachment)
     assert metadata["commanded_joint_index"] == 1
     assert metadata["fresh_physics_view_after_final_play"]
-    assert events == ["play", "step", "new_view", "subspace", "new_art", "initialize", "read"]
+    assert metadata["usd_stage_id"] == metadata["physx_stage_id_after"] == 42
+    assert events == ["play", "step", "attach", "new_view", "subspace", "new_art", "initialize", "read"]
 
 
 def test_fresh_binding_rejects_missing_runtime_feedback(usd_model):
@@ -276,3 +283,45 @@ def test_experiment_refuses_to_edit_file_backed_source(tmp_path):
     stage = Usd.Stage.CreateNew(str(tmp_path / "source.usda"))
     with pytest.raises(ValueError, match="anonymous root"):
         compose_gripper_experiment(stage, "other.usda", meters=1, up_axis="Z", default_prim_path=None)
+
+
+@pytest.mark.parametrize("initial", [0, -1, 2**64-1])
+def test_detached_physx_stage_is_explicitly_attached_and_verified(initial):
+    class Interface:
+        attached = initial
+        def get_attached_stage(self):
+            return self.attached
+        def attach_stage(self, stage_id):
+            self.attached = stage_id
+            return True
+        def flush_changes(self):
+            assert self.attached == 42
+    result = ensure_physx_attachment(Interface(), 42)
+    assert result["physx_stage_id_after"] == result["usd_stage_id"] == 42
+    assert result["physx_stage_attached_explicitly"]
+
+
+def test_valid_physx_attachment_is_not_detached_or_replaced():
+    from types import SimpleNamespace
+    def forbidden(*args):
+        pytest.fail("must not replace an already valid physics attachment")
+    interface = SimpleNamespace(get_attached_stage=lambda: 42, attach_stage=forbidden, flush_changes=lambda: None)
+    assert not ensure_physx_attachment(interface, 42)["physx_stage_attached_explicitly"]
+
+
+def test_other_attached_stage_is_rejected_before_replacing_it():
+    from types import SimpleNamespace
+    def forbidden(*args):
+        pytest.fail("must not detach another stage")
+    interface = SimpleNamespace(get_attached_stage=lambda: 15, attach_stage=forbidden)
+    with pytest.raises(ValueError, match="another stage"):
+        ensure_physx_attachment(interface, 42)
+
+
+@pytest.mark.parametrize("attach_success", [False, True])
+def test_failed_or_mismatched_attachment_cannot_proceed(attach_success):
+    from types import SimpleNamespace
+    interface = SimpleNamespace(get_attached_stage=lambda: 0, attach_stage=lambda stage_id: attach_success,
+                                flush_changes=lambda: None)
+    with pytest.raises(RuntimeError, match="attach|mismatch"):
+        ensure_physx_attachment(interface, 42)
