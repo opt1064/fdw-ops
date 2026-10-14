@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from fdw_sim.visualization.gripper_motion_test import run_gripper_cycle, inspect_motion_prerequisites
+from fdw_sim.visualization.gripper_motion_test import run_gripper_cycle, inspect_motion_prerequisites, articulation_root_paths
 
 
 class Plant:
@@ -161,3 +161,21 @@ def test_bad_mimic_or_mount_configuration_blocks_test(usd_model, fault):
         usd_model.RemovePrim("/FixedJoint")
     with pytest.raises(ValueError):
         inspect_motion_prerequisites(usd_model)
+
+
+def test_articulation_paths_are_retraversed_after_instance_proxy_expires():
+    from pxr import Usd, UsdGeom, UsdPhysics
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.Xform.Define(stage, "/Template")
+    UsdGeom.Scope.Define(stage, "/Template/Looks")
+    instance = UsdGeom.Xform.Define(stage, "/Gripper").GetPrim()
+    instance.GetReferences().AddInternalReference("/Template")
+    instance.SetInstanceable(True)
+    old_proxy = stage.GetPrimAtPath("/Gripper/Looks")
+    assert old_proxy.IsInstanceProxy()
+    UsdPhysics.ArticulationRootAPI.Apply(UsdPhysics.FixedJoint.Define(stage, "/FixedJoint").GetPrim())
+    instance.SetInstanceable(False)
+    with pytest.raises(RuntimeError, match="expired"):
+        old_proxy.GetTypeName()
+    assert articulation_root_paths(stage) == ["/FixedJoint"]
+    assert stage.GetPrimAtPath("/Gripper/Looks").GetTypeName() == "Scope"

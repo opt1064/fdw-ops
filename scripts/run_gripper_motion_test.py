@@ -31,7 +31,7 @@ def main():
         from fdw_sim.visualization.robot_loader import get_isaac_assets_root
         from fdw_sim.visualization.tool_diagnostics import load_tool_configuration
         from fdw_sim.visualization.gripper_asset_inventory import inspect_gripper_stage
-        from fdw_sim.visualization.gripper_motion_test import inspect_motion_prerequisites, run_gripper_cycle
+        from fdw_sim.visualization.gripper_motion_test import inspect_motion_prerequisites, run_gripper_cycle, articulation_root_paths
         from fdw_sim.visualization.robot_model_export import _usd_rigid_matrix
         from fdw_sim.visualization.lula_model_validation import _pose_error
         from fdw_sim.visualization.scene_builder import SceneBuilder, SceneConfig
@@ -51,18 +51,21 @@ def main():
             prims = list(Usd.PrimRange(stage.GetPseudoRoot(), Usd.TraverseInstanceProxies()))
             if any(p.GetTypeName() == "OmniGraph" for p in prims):
                 raise ValueError("asset contains an OmniGraph; inspect controller conflicts before motion")
-            scenes = [p for p in prims if p.IsA(UsdPhysics.Scene)]
+            scenes = [str(p.GetPath()) for p in prims if p.IsA(UsdPhysics.Scene)]
             if len(scenes) > 1:
                 raise ValueError("multiple physics scenes are unsupported")
+            del prims  # Do not retain instance-proxy handles across World/reset mutations.
             # All experiment edits live in the transient session layer. Never save source.
             stage.SetEditTarget(stage.GetSessionLayer())
             meters = UsdGeom.GetStageMetersPerUnit(stage)
             dt = 1/120
             world = World(stage_units_in_meters=meters, physics_dt=dt, rendering_dt=dt,
-                          physics_prim_path=str(scenes[0].GetPath()) if scenes else "/World/GripperTest/PhysicsScene")
+                          physics_prim_path=scenes[0] if scenes else "/World/GripperTest/PhysicsScene")
             world.get_physics_context().set_gravity(0)
             world.reset()
-            roots = [str(p.GetPath()) for p in prims if p.HasAPI(UsdPhysics.ArticulationRootAPI)]
+            stage = omni.usd.get_context().get_stage()
+            stage.SetEditTarget(stage.GetSessionLayer())
+            roots = articulation_root_paths(stage)
             setup["articulation_root_paths"] = roots
             candidates = list(dict.fromkeys([str(stage.GetDefaultPrim().GetPath()) if stage.GetDefaultPrim() else "/Robotiq_2F_140", *roots]))
             failures, art = [], None
@@ -88,8 +91,7 @@ def main():
                          initial_live_joint_positions_rad=np.asarray(positions, dtype=float).tolist(),
                          physics_dt_sec=dt, gravity_m_s2=0)
             world.pause()
-            base = stage.GetPrimAtPath(setup["base_path"])
-            base_start = _usd_rigid_matrix(UsdGeom.XformCache(), base, meters)
+            base_start = _usd_rigid_matrix(UsdGeom.XformCache(), stage.GetPrimAtPath(setup["base_path"]), meters)
             marker_ops = []
             for side, color in (("LeftBlue", (0.1, 0.4, 1)), ("RightOrange", (1, 0.4, 0.1))):
                 marker = UsdGeom.Sphere.Define(stage, "/World/GripperTest/" + side)
@@ -98,7 +100,7 @@ def main():
                 marker_ops.append(UsdGeom.Xformable(marker.GetPrim()).AddTranslateOp())
             def read_pads():
                 cache = UsdGeom.XformCache()
-                base_now = _usd_rigid_matrix(cache, base, meters)
+                base_now = _usd_rigid_matrix(cache, stage.GetPrimAtPath(setup["base_path"]), meters)
                 error = _pose_error(base_now, base_start)
                 if error["position_error_m"] > 0.002 or error["orientation_error_rad"] > 0.01:
                     raise RuntimeError("fixed gripper base moved unexpectedly")

@@ -5,6 +5,13 @@ import time
 import numpy as np
 
 
+def articulation_root_paths(stage):
+    """Fresh traversal: prim/proxy handles cannot survive physics scene initialization."""
+    from pxr import Usd, UsdPhysics
+    return [str(p.GetPath()) for p in Usd.PrimRange(stage.GetPseudoRoot(), Usd.TraverseInstanceProxies())
+            if p.HasAPI(UsdPhysics.ArticulationRootAPI)]
+
+
 def inspect_motion_prerequisites(stage):
     """Require authored primary drive, live mimic relationship and a world-fixed base."""
     from pxr import Usd, UsdPhysics
