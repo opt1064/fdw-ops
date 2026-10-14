@@ -148,6 +148,39 @@ def ensure_physx_attachment(interface, stage_id):
             "physx_stage_id_after": after, "physx_stage_attached_explicitly": attached_explicitly}
 
 
+class PrimaryPositionServo:
+    """Bounded integral drive-target trim; desired measured posture remains the test target."""
+    def __init__(self, read_joint, write_target, limits, dt):
+        if (len(limits) != 2 or not all(map(math.isfinite, limits)) or limits[0] >= limits[1]
+                or not math.isfinite(dt) or not 0 < dt <= 1/60):
+            raise ValueError("invalid primary servo bounds/timestep")
+        self.read_joint, self.write_target = read_joint, write_target
+        self.limits, self.dt = limits, dt
+        self.trim = 0.0
+        self.last = {}
+
+    def command(self, desired):
+        measured = float(self.read_joint())
+        if not math.isfinite(desired) or not math.isfinite(measured) or not self.limits[0] <= desired <= self.limits[1]:
+            raise ValueError("invalid primary servo desired/measured position")
+        error = desired-measured
+        candidate = float(np.clip(self.trim + error*self.dt, -math.radians(5), math.radians(5)))
+        raw = desired+candidate
+        # Do not accumulate error when it would push further beyond authored target limits.
+        if not ((raw < self.limits[0] and error < 0) or (raw > self.limits[1] and error > 0)):
+            self.trim = candidate
+        applied = float(np.clip(desired+self.trim, *self.limits))
+        self.last = {"desired_rad": desired, "measured_before_step_rad": measured,
+                     "drive_target_rad": applied, "trim_rad": self.trim,
+                     "drive_target_clipped": applied != desired+self.trim}
+        self.write_target(applied)
+
+    def diagnostics(self):
+        return {"mode": "bounded_integral_drive_target_trim", "integral_gain_per_sec": 1,
+                "max_trim_deg": 5, "last_command": self.last,
+                "scope": "unloaded simulation position control; not hardware calibration"}
+
+
 class ManualPhysxStepper:
     """Advance an explicitly attached scene; GUI updates are not physics steps."""
     def __init__(self, interface, writeback, render, is_playing, *, stage_id, dt):
@@ -277,7 +310,7 @@ def inspect_motion_prerequisites(stage):
 
 def run_gripper_cycle(read_joint, command, read_pads, step, stop, limits, *, dt=1/60,
                        realtime=False, is_running=lambda: True, read_velocity=None,
-                       settle_initial=False):
+                       settle_initial=False, initial_target=None, read_command=None):
     """Commands only one measured joint; pad positions are measured in the base frame."""
     report = {"status": "FAILED", "errors": [], "legs": [], "samples": [],
               "motion_commands_issued": False, "physical_grasp_verified": False,
@@ -306,7 +339,9 @@ def run_gripper_cycle(read_joint, command, read_pads, step, stop, limits, *, dt=
         if settle_initial:
             if read_velocity is None:
                 raise ValueError("initial stabilization requires measured velocity")
-            hold_target = float(np.clip(baseline, limits[0], limits[1]))
+            hold_target = float(np.clip(baseline, limits[0], limits[1])) if initial_target is None else float(initial_target)
+            if not math.isfinite(hold_target) or not limits[0] <= hold_target <= limits[1] or abs(hold_target) > math.radians(5):
+                raise ValueError("invalid initial unloaded posture target")
             if abs(baseline) > math.radians(5):
                 raise ValueError("unexpected initial posture before stabilization")
             report["initial_stabilization"] = {"status": "FAILED", "hold_target_rad": hold_target}
@@ -321,9 +356,11 @@ def run_gripper_cycle(read_joint, command, read_pads, step, stop, limits, *, dt=
                 step()
                 q, pads = read()
                 v = velocity()
-                if abs(q-baseline) > math.radians(5):
+                if abs(q-hold_target) > math.radians(5):
                     raise RuntimeError("excessive initial stabilization excursion")
                 report["initial_stabilization"].update(measured_rad=q, velocity_rad_sec=v, elapsed_sec=(tick+1)*dt)
+                if read_command is not None:
+                    report["initial_stabilization"]["drive_command"] = read_command()
                 stable = stable+1 if abs(q-hold_target) <= math.radians(0.5) and abs(v) <= math.radians(0.5) else 0
                 if stable >= math.ceil(0.5/dt):
                     report["initial_stabilization"]["status"] = "PASSED"
@@ -369,6 +406,8 @@ def run_gripper_cycle(read_joint, command, read_pads, step, stop, limits, *, dt=
                                             "measured_rad": q, "pad_positions_m": pads.tolist(),
                                             "velocity_rad_sec": v,
                                             "pad_span_m": float(np.linalg.norm(pads[1]-pads[0]))}
+                    if read_command is not None:
+                        row["last_feedback"]["drive_command"] = read_command()
                     if abs(q-baseline) > math.radians(15) or tracking > math.radians(8):
                         raise RuntimeError("excessive primary joint excursion/tracking error")
                     if tick % max(1, round(0.1/dt)) == 0:
@@ -377,6 +416,8 @@ def run_gripper_cycle(read_joint, command, read_pads, step, stop, limits, *, dt=
                                                   "velocity_rad_sec": v,
                                                   "pad_positions_m": pads.tolist(),
                                                   "pad_span_m": float(np.linalg.norm(pads[1]-pads[0]))})
+                        if read_command is not None:
+                            report["samples"][-1]["drive_command"] = read_command()
                     at_target = (alpha == 1 and abs(q-target) <= math.radians(0.5)
                                  and (v is None or abs(v) <= math.radians(0.5)))
                     stable = stable+1 if at_target else 0

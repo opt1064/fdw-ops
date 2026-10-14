@@ -42,6 +42,7 @@ def main():
             ensure_physx_attachment,
             NativeGripperArticulation,
             ManualPhysxStepper,
+            PrimaryPositionServo,
         )
         from fdw_sim.visualization.robot_model_export import _usd_rigid_matrix
         from fdw_sim.visualization.lula_model_validation import _pose_error
@@ -163,21 +164,25 @@ def main():
                 if q is None or len(q) != len(names) or not np.isfinite(np.asarray(q)).all():
                     raise ValueError("runtime joint feedback lost or nonfinite")
                 return q[index]
-            def command(q):
+            def write_target(q):
                 art.set_primary_target(q, index)
             setup["drive_experiment"] = art.configure_primary_damping(index, args.drive_damping_scale)
             print(f"[GRIPPER MOTION] runtime primary damping scale={args.drive_damping_scale}; "
                   "stiffness/maxForce/passive gains unchanged.", flush=True)
             def read_velocity():
                 return art.get_joint_velocities()[index]
+            servo = PrimaryPositionServo(read_joint, write_target, setup["limit_rad"], dt)
+            print("[GRIPPER MOTION] preparing measured 4-degree unloaded start; bounded feedback trim enabled.", flush=True)
             stepper = ManualPhysxStepper(omni.physx.get_physx_simulation_interface(),
                                         lambda: omni.physx.get_physx_interface().update_transformations(False, True),
                                         app.update, omni.timeline.get_timeline_interface().is_playing,
                                         stage_id=setup["usd_stage_id"], dt=dt)
-            report = run_gripper_cycle(read_joint, command, read_pads, stepper.step, world.pause,
+            report = run_gripper_cycle(read_joint, servo.command, read_pads, stepper.step, world.pause,
                                        setup["limit_rad"], dt=dt, realtime=True, is_running=app.is_running,
-                                       read_velocity=read_velocity, settle_initial=True)
+                                       read_velocity=read_velocity, settle_initial=True,
+                                       initial_target=np.deg2rad(4), read_command=lambda: dict(servo.last))
             setup.update(stepper.diagnostics())
+            setup["position_servo"] = servo.diagnostics()
         except (Exception, KeyboardInterrupt) as exc:
             report = {"status": "FAILED", "errors": [f"{type(exc).__name__}: {exc}"],
                       "motion_commands_issued": False, "physical_grasp_verified": False}

@@ -14,6 +14,7 @@ from fdw_sim.visualization.gripper_motion_test import (
     ensure_physx_attachment,
     NativeGripperArticulation,
     ManualPhysxStepper,
+    PrimaryPositionServo,
 )
 
 
@@ -633,3 +634,48 @@ def test_damped_spring_control_fixture_closes_and_returns_twice():
     report = run(plant, dt=1/120, read_velocity=lambda: plant.v, settle_initial=True)
     assert report["status"] == "PASSED_UNLOADED_GRIPPER_CYCLE"
     assert report["passed_legs"] == 4 and report["returned_to_start"]
+
+
+def test_feedback_trim_compensates_constant_bias_and_verifies_two_cycles():
+    # Controller fixture with an imposed bias, not a physical model of the asset.
+    class BiasedPlant(Plant):
+        def __init__(self):
+            super().__init__()
+            self.q = math.radians(4)
+            self.v = 0
+        def step(self):
+            old = self.q
+            self.q = self.target+math.radians(3.1)
+            self.v = (self.q-old)*120
+    plant = BiasedPlant()
+    servo = PrimaryPositionServo(plant.read, plant.command, (0, math.pi/4), 1/120)
+    report = run(plant, command=servo.command, dt=1/120, read_velocity=lambda: plant.v,
+                 settle_initial=True, initial_target=math.radians(4), read_command=lambda: dict(servo.last))
+    assert report["status"] == "PASSED_UNLOADED_GRIPPER_CYCLE"
+    assert report["passed_legs"] == 4 and report["returned_to_start"]
+    assert all(0 <= q <= math.pi/4 for q in plant.commands)
+    assert abs(servo.trim) <= math.radians(5)
+    assert report["samples"][0]["drive_command"]["drive_target_rad"] != report["samples"][0]["command_rad"]
+
+
+def test_servo_clamps_authored_limits_and_does_not_wind_up():
+    writes = []
+    servo = PrimaryPositionServo(lambda: math.radians(4), writes.append, (0, math.pi/4), 1/120)
+    for _ in range(1500):
+        servo.command(0)
+    assert min(writes) == 0
+    assert servo.trim == 0  # Error cannot accumulate when the desired target is already at its lower limit.
+    servo = PrimaryPositionServo(lambda: 0, writes.append, (0, math.pi/4), 1/120)
+    for _ in range(1500):
+        servo.command(math.radians(10))
+    assert servo.trim == pytest.approx(math.radians(5))
+    assert max(writes) <= math.pi/4
+
+
+@pytest.mark.parametrize("desired,measured", [(float("nan"), 0), (0, float("nan")), (-0.1, 0), (math.pi, 0)])
+def test_servo_rejects_invalid_feedback_or_targets(desired, measured):
+    writes = []
+    servo = PrimaryPositionServo(lambda: measured, writes.append, (0, math.pi/4), 1/120)
+    with pytest.raises(ValueError):
+        servo.command(desired)
+    assert not writes
