@@ -1,0 +1,30 @@
+# Preparation only: no tool is selected or attached by this file.
+# Fill from the actual tool/changer model and calibration evidence, not guessed dimensions.
+schema_version: 1
+mounting_frame: flange
+reference_end_frame: ee_link
+active_tool: null
+tool_changer:
+  asset_path: null
+  mounting_joint_path: null
+  lock_feedback_source: null
+tools:
+  welding_torch:
+    kind: welding_torch
+    asset_path: null
+    root_prim_path: null
+    tcp_frame: null
+    flange_to_tcp: null  # {translation_m: [x,y,z], orientation_wxyz: [w,x,y,z]}
+    calibration_evidence: null
+  gripper:
+    kind: gripper
+    gripper_type: null  # parallel / suction / other: identify from the actual model
+    asset_path: null
+    root_prim_path: null
+    tcp_frame: null
+    flange_to_tcp: null
+    calibration_evidence: null
+    joint_names: []
+    opened_positions: null
+    closed_positions: null
+    contact_feedback_source: null

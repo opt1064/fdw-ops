@@ -84,6 +84,10 @@ def main() -> int:
                    help="모델 검증 후 실제 시뮬레이션 관절을 ±1도씩 구동하고 피드백 대조")
     p.add_argument("--show-robot-motion", action="store_true",
                    help="FANUC 근접 화면에서 J1 ±5도 저속 시연 (진단·모델 검증 포함, 생산 작업 없음)")
+    p.add_argument("--tool-diagnostics", action="store_true",
+                   help="공구별 TCP·교환기·그리퍼·충돌/접촉 설정 수집 (팔/그리퍼 구동 없음)")
+    p.add_argument("--tool-config", type=Path, default=ROOT / "fdw_sim" / "config" / "fanuc_tooling.yaml",
+                   help="공구별 확인 항목 설정 파일")
     p.add_argument("--weld-offset", type=float, default=0.25,
                    help="용접 경로 길이의 절반 (m, 입력 버퍼 중심 ±값)")
     p.add_argument("--weld-height", type=float, default=0.05,
@@ -172,6 +176,13 @@ def main() -> int:
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
     args = p.parse_args()
+    if args.tool_diagnostics:
+        if args.show_robot_motion or args.joint_feedback_test:
+            p.error("--tool-diagnostics is passive; omit motion-test options")
+        if args.robot != "fanuc_crx10ia":
+            p.error("--tool-diagnostics currently requires FANUC CRX-10iA")
+        args.real_robot = True
+        args.robot_diagnostics = True
     if args.show_robot_motion:
         if args.headless or args.livestream:
             p.error("--show-robot-motion requires the local GUI")
@@ -376,6 +387,25 @@ def main() -> int:
             output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
             print(f"[ROBOT DIAGNOSTICS] saved: {output}")
             print(json.dumps(report, ensure_ascii=False, indent=2))
+            if args.tool_diagnostics:
+                from fdw_sim.visualization.tool_diagnostics import load_tool_configuration, collect_tool_diagnostics
+                from uuid import uuid4
+                tool_output = sim.config.log_dir / (time.strftime("tool_diagnostics_%Y%m%d_%H%M%S_") + uuid4().hex[:8] + ".json")
+                try:
+                    tool_config = load_tool_configuration(args.tool_config)
+                    tool_report = collect_tool_diagnostics(viz.scene._stage, f"{cell_root}/RobotArm",
+                                                           ROBOT_CATALOG[args.robot], tool_config, report)
+                except Exception as exc:
+                    tool_report = {"status": "FAILED", "errors": [f"{type(exc).__name__}: {exc}"],
+                                   "motion_commands_issued": False, "tcp_calibration_verified": False,
+                                   "physical_grasp_verified": False}
+                tool_report["configuration_path"] = str(args.tool_config)
+                tool_output.write_text(json.dumps(tool_report, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+                print(f"[TOOL DIAGNOSTICS] saved: {tool_output}")
+                print(json.dumps(tool_report, ensure_ascii=False, indent=2))
+                sim._isaac_world.pause()
+                if tool_report["status"] == "FAILED":
+                    diagnostic_exit = 2
             if args.export_robot_model:
                 from fdw_sim.visualization.robot_model_export import export_robot_model
                 from uuid import uuid4
@@ -405,8 +435,8 @@ def main() -> int:
             if not args.joint_feedback_test:
                 print("[ROBOT DIAGNOSTICS] No arm commands issued.")
             if args.keep_alive:
-                if diagnostic_exit:
-                    print("[JOINT TEST] FAILED: paused; viewer updates only. Close window or Ctrl+C to exit.")
+                if diagnostic_exit or args.tool_diagnostics:
+                    print("[ROBOT DIAGNOSTICS] viewer updates only; close window or Ctrl+C to exit.")
                     try:
                         while sim._isaac_app.is_running():
                             sim._isaac_app.update()
