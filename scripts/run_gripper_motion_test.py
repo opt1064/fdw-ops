@@ -1,4 +1,4 @@
-"""GUI-only standalone Robotiq partial close/return with bilateral measured motion."""
+"""GUI Robotiq cycles, optional FANUC mounting and small mounted-arm/TCP checks."""
 import argparse
 import json
 from pathlib import Path
@@ -21,16 +21,25 @@ def main():
     parser.add_argument("--mounted-on-fanuc", action="store_true",
                         help="Temporary direct flange/base mount; hold FANUC stationary (no TCP calibration)")
     parser.add_argument("--fanuc-usd", help="Explicit FANUC asset path/URI; requires --mounted-on-fanuc")
+    parser.add_argument("--mounted-arm-motion", action="store_true",
+                        help="After mounted gripper cycle passes, move J1/J5/J6 +/- and verify mount/TCP candidate")
+    parser.add_argument("--arm-amplitude-deg", type=float, default=1.0,
+                        help="Mounted arm test amplitude in degrees (0 < value <= 2; default=1)")
     args = parser.parse_args()
     if not 1 <= args.drive_damping_scale <= 100:
         parser.error("--drive-damping-scale must be finite and between 1 and 100")
     if args.fanuc_usd and not args.mounted_on_fanuc:
         parser.error("--fanuc-usd requires --mounted-on-fanuc")
+    if args.mounted_arm_motion and not args.mounted_on_fanuc:
+        parser.error("--mounted-arm-motion requires --mounted-on-fanuc")
+    if not 0 < args.arm_amplitude_deg <= 2:
+        parser.error("--arm-amplitude-deg must be finite and in (0, 2]")
     from isaacsim import SimulationApp
     app = SimulationApp({"headless": False})
     world, source = None, args.usd
     setup = {}
     mount, arm_guard = None, None
+    arm_motion_active = False
     report = None
     try:
         import numpy as np
@@ -42,6 +51,7 @@ def main():
         from isaacsim.core.api import World
         from fdw_sim.visualization.robot_loader import get_isaac_assets_root, resolve_robot_usd_path, ROBOT_CATALOG
         from fdw_sim.visualization.gripper_mount_test import mount_fanuc_gripper, mount_frame_observation, StationaryArmGuard
+        from fdw_sim.visualization.mounted_arm_motion_test import UsdMountedArmModel, MovingArmController, run_mounted_arm_motion
         from fdw_sim.visualization.tool_diagnostics import load_tool_configuration
         from fdw_sim.visualization.gripper_asset_inventory import inspect_gripper_stage
         from fdw_sim.visualization.gripper_motion_test import (
@@ -129,7 +139,7 @@ def main():
                     tcp_marker_op.Set(cache.GetLocalToWorldTransform(stage.GetPrimAtPath(mount["tcp_candidate_path"])).ExtractTranslation())
                 base_now = _usd_rigid_matrix(cache, stage.GetPrimAtPath(setup["base_path"]), meters)
                 error = _pose_error(base_now, base_start)
-                if error["position_error_m"] > 0.002 or error["orientation_error_rad"] > 0.01:
+                if not arm_motion_active and (error["position_error_m"] > 0.002 or error["orientation_error_rad"] > 0.01):
                     raise RuntimeError("fixed gripper base moved unexpectedly")
                 inverse = np.linalg.inv(base_now)
                 bounds = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy])
@@ -225,6 +235,30 @@ def main():
                               scope="temporary direct mount; stationary FANUC; unloaded zero-gravity partial cycle; no TCP/contact calibration")
                 if report["status"] == "PASSED_UNLOADED_GRIPPER_CYCLE":
                     report["status"] = "PASSED_MOUNTED_UNLOADED_GRIPPER_CYCLE"
+            if args.mounted_arm_motion:
+                if report["status"] != "PASSED_MOUNTED_UNLOADED_GRIPPER_CYCLE":
+                    report["arm_motion"] = {"status": "SKIPPED_PREREQUISITE_FAILED", "motion_commands_issued": False}
+                else:
+                    print("[MOUNTED ARM] gripper 4/4 prerequisite passed; starting J1/J5/J6 small motion.", flush=True)
+                    # Same attached PhysX stage and retained tensor view; no play/reset/rebind between phases.
+                    model = UsdMountedArmModel(stage, mount)
+                    arm_guard = MovingArmController(art._view, args.arm_amplitude_deg)
+                    arm_motion_active = True
+                    arm_result = run_mounted_arm_motion(
+                        arm_guard, model, servo.command, read_joint, read_pads,
+                        lambda: mount_frame_observation(stage, mount), stepper.step, world.pause,
+                        dt=dt, amplitude_deg=args.arm_amplitude_deg, realtime=True, is_running=app.is_running)
+                    report["gripper_cycle_status"] = report["status"]
+                    report["gripper_returned_to_start"] = report["returned_to_start"]
+                    report["gripper_passed_legs"] = report["passed_legs"]
+                    report["arm_motion"] = arm_result
+                    report["arm_motion_passed_legs"] = arm_result["passed_legs"]
+                    report["status"] = arm_result["status"]
+                    report["returned_to_start"] = arm_result["returned_to_start"]
+                    report["errors"].extend(arm_result["errors"])
+                    report["scope"] = "mounted unloaded arm motion and USD FK/TCP candidate consistency; no hardware/contact/TCP calibration"
+                    setup.update(stepper.diagnostics())
+                    setup["mount_final_observation"] = mount_frame_observation(stage, mount)
         except (Exception, KeyboardInterrupt) as exc:
             if report is None:
                 report = {"status": "FAILED", "errors": [],
@@ -244,7 +278,10 @@ def main():
         output = args.output_dir / (time.strftime("gripper_motion_%Y%m%d_%H%M%S_") + uuid4().hex[:8] + ".json")
         output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
         print(f"[GRIPPER MOTION] saved: {output}")
-        print(json.dumps({k: v for k, v in report.items() if k != "samples"}, ensure_ascii=False, indent=2))
+        summary = {k: v for k, v in report.items() if k != "samples"}
+        if "arm_motion" in summary:
+            summary["arm_motion"] = {k: v for k, v in summary["arm_motion"].items() if k != "samples"}
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
         if args.keep_alive:
             print("[GRIPPER MOTION] paused viewer; close window or Ctrl+C to exit.", flush=True)
             try:
@@ -252,7 +289,8 @@ def main():
                     app.update()
             except KeyboardInterrupt:
                 pass
-        return 0 if report["status"] in ("PASSED_UNLOADED_GRIPPER_CYCLE", "PASSED_MOUNTED_UNLOADED_GRIPPER_CYCLE") else 2
+        return 0 if report["status"] in ("PASSED_UNLOADED_GRIPPER_CYCLE", "PASSED_MOUNTED_UNLOADED_GRIPPER_CYCLE",
+                                        "PASSED_MOUNTED_ARM_TCP_TEST") else 2
     finally:
         app.close()
 

@@ -220,11 +220,14 @@ class StationaryArmGuard:
             raise ValueError(f"finite merged arm feedback/settings missing: {name}")
         return values
 
-    def hold(self):
+    def hold(self, target=None):
         # Preserve all gripper/passive targets; command only the six arm indices.
+        desired = self.start if target is None else np.asarray(target, dtype=float)
+        if desired.shape != (6,) or not np.isfinite(desired).all():
+            raise ValueError("arm hold requires six finite joint drive targets")
         positions = self._read("get_dof_position_targets")
         velocities = self._read("get_dof_velocity_targets")
-        positions[0, self.indices] = self.start
+        positions[0, self.indices] = desired
         velocities[0, self.indices] = 0
         rows = np.array([0], dtype=np.int32)
         self.commands_issued = True
