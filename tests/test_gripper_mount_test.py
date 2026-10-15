@@ -8,7 +8,9 @@ import pytest
 from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
 from fdw_sim.visualization.gripper_motion_test import compose_gripper_experiment, articulation_root_paths, bind_live_gripper
-from fdw_sim.visualization.gripper_mount_test import mount_fanuc_gripper, mount_frame_observation, StationaryArmGuard
+from fdw_sim.visualization.gripper_mount_test import (
+    mount_fanuc_gripper, mount_frame_observation, StationaryArmGuard, check_mount_unit_compatibility,
+)
 
 
 @pytest.fixture
@@ -93,6 +95,39 @@ def test_mount_joint_local_frames_coincide_in_world(assembly):
         local.SetTranslateOnly(Gf.Vec3d(pos))
         frames.append(local*cache.GetLocalToWorldTransform(body))
     np.testing.assert_allclose(np.array(frames[0]), np.array(frames[1]), atol=1e-6)
+
+
+def test_real_robotiq_unit_roundoff_allows_mount_without_scaling_or_source_edits(assembly):
+    stage, arm, gripper, setup = assembly
+    actual_robotiq_meters = 0.9999999776482582
+    UsdGeom.SetStageMetersPerUnit(gripper, actual_robotiq_meters)
+    UsdGeom.SetStageMetersPerUnit(stage, actual_robotiq_meters)
+    before = gripper.GetRootLayer().ExportToString()
+    mount = mount_fanuc_gripper(stage, arm.GetRootLayer().identifier, setup)
+    units = mount["unit_compatibility"]
+    assert units["source_meters_per_unit"] == 1
+    assert units["stage_meters_per_unit"] == actual_robotiq_meters
+    assert units["relative_difference"] == pytest.approx(2.2351741790771484e-8)
+    assert not units["unit_rescaling_applied"]
+    observation = mount_frame_observation(stage, mount)
+    assert observation["flange_to_base_error"]["position_error_m"] < 1e-6
+    assert observation["flange_to_base_error"]["orientation_error_rad"] < 1e-6
+    assert UsdGeom.GetStageMetersPerUnit(stage) == actual_robotiq_meters
+    assert gripper.GetRootLayer().ExportToString() == before
+
+
+@pytest.mark.parametrize("source,stage", [(1, 1), (1, 0.9999999776482582), (.01, .0100000001), (1e-8, 1e-8*(1-2e-8))])
+def test_unit_comparison_accepts_only_relative_roundoff(source, stage):
+    report = check_mount_unit_compatibility(source, stage)
+    assert report["relative_difference"] <= report["relative_tolerance"]
+    assert not report["unit_rescaling_applied"]
+
+
+@pytest.mark.parametrize("source,stage", [(1, .01), (.01, 1), (1, 1.000001), (1e-8, 2e-8), (0, 1), (-1, 1),
+                                           (float("nan"), 1), (1, float("inf"))])
+def test_unit_comparison_rejects_true_mismatch_and_invalid_metadata(source, stage):
+    with pytest.raises(ValueError):
+        check_mount_unit_compatibility(source, stage)
 
 
 def test_mount_survives_clearing_session_layer(assembly):

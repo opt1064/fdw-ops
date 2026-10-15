@@ -6,6 +6,23 @@ import numpy as np
 from fdw_sim.visualization.robot_model_export import _usd_rigid_matrix
 
 
+def check_mount_unit_compatibility(source_meters, stage_meters):
+    """Accept float32 metadata roundoff only; never rescale geometry or physics."""
+    source_meters, stage_meters = float(source_meters), float(stage_meters)
+    if not all(math.isfinite(v) and v > 0 for v in (source_meters, stage_meters)):
+        raise ValueError("mount unit metadata must be positive and finite")
+    # Isaac's Robotiq asset encodes 0.9999999776482582 instead of exactly 1 m/unit.
+    # One float32 relative epsilon covers this export precision, at any unit magnitude.
+    tolerance = float(np.finfo(np.float32).eps)
+    relative_difference = abs(source_meters-stage_meters)/max(source_meters, stage_meters)
+    if not math.isclose(source_meters, stage_meters, rel_tol=tolerance, abs_tol=0):
+        raise ValueError(f"FANUC/gripper units differ: source={source_meters}, stage={stage_meters}; "
+                         "refusing implicit physics scaling")
+    return {"source_meters_per_unit": source_meters, "stage_meters_per_unit": stage_meters,
+            "relative_difference": relative_difference, "relative_tolerance": tolerance,
+            "comparison": "float32_metadata_precision", "unit_rescaling_applied": False}
+
+
 def _unique_frame(stage, root_path, name):
     from pxr import Usd, UsdGeom
     root = stage.GetPrimAtPath(root_path)
@@ -34,8 +51,7 @@ def mount_fanuc_gripper(stage, robot_source, gripper_setup):
     if not source or not source.GetDefaultPrim():
         raise ValueError("FANUC asset must provide a default prim")
     meters = UsdGeom.GetStageMetersPerUnit(stage)
-    if not math.isclose(UsdGeom.GetStageMetersPerUnit(source), meters, abs_tol=1e-12, rel_tol=0):
-        raise ValueError("FANUC/gripper units differ; refusing implicit physics scaling")
+    unit_compatibility = check_mount_unit_compatibility(UsdGeom.GetStageMetersPerUnit(source), meters)
     arm_path = "/World/Fanuc"
     if stage.GetPrimAtPath(arm_path) or stage.GetPrimAtPath("/World/GripperMount"):
         raise ValueError("mount experiment already contains an arm/mount")
@@ -133,6 +149,7 @@ def mount_fanuc_gripper(stage, robot_source, gripper_setup):
         raise ValueError("expected exactly one FANUC articulation root for merged arm/gripper")
     collision_setting = stage.GetPrimAtPath(arm_roots[0]).GetAttribute("physxArticulation:enabledSelfCollisions")
     return {"mode": "temporary_direct_frame_mount", "robot_source_usd": robot_source,
+            "unit_compatibility": unit_compatibility,
             "robot_path": arm_path, "arm_base_path": arm_base_path, "arm_articulation_path": arm_roots[0],
             "flange_path": str(flange.GetPath()), "terminal_body_path": str(terminal.GetPath()),
             "gripper_root_path": root_path, "gripper_base_path": str(base.GetPath()),
