@@ -58,6 +58,9 @@ def mount_fanuc_gripper(stage, robot_source, gripper_setup):
     arm = UsdGeom.Xform.Define(stage, arm_path).GetPrim()
     arm.GetReferences().AddReference(robot_source)
     flange = _unique_frame(stage, arm_path, "flange")
+    ee = _unique_frame(stage, arm_path, "ee_link")
+    if not ee.GetPath().HasPrefix(flange.GetPath()):
+        raise ValueError("FANUC ee_link must be a fixed child frame of flange")
     terminal = flange
     while terminal and not terminal.IsPseudoRoot() and not terminal.HasAPI(UsdPhysics.RigidBodyAPI):
         terminal = terminal.GetParent()
@@ -101,10 +104,21 @@ def mount_fanuc_gripper(stage, robot_source, gripper_setup):
     arm_base_path = roots.pop()
     cache = UsdGeom.XformCache()
     flange_world = _usd_rigid_matrix(cache, flange, meters)
+    ee_world = _usd_rigid_matrix(cache, ee, meters)
     terminal_world = _usd_rigid_matrix(cache, terminal, meters)
     base_world = _usd_rigid_matrix(cache, base, meters)
+    grasp_world = _usd_rigid_matrix(cache, grasp, meters)
     root_world = _usd_rigid_matrix(cache, gripper, meters)
-    new_root = flange_world @ np.linalg.inv(base_world) @ root_world
+    approach = (np.linalg.inv(base_world) @ grasp_world)[:3, 3]
+    if np.linalg.norm(approach) < 1e-6 or not np.allclose(approach/np.linalg.norm(approach), [0, 0, 1], atol=1e-5):
+        raise ValueError("Robotiq base-to-grasp approach must match the asset's +Z convention")
+    # Source FANUC flange/ee_link extends along +X (J6->flange offset is +X).
+    # Robotiq fingers extend along base +Z. Map +Z->EE +X, +Y->EE +Y, +X->EE -Z.
+    ee_to_base_rotation = np.array([[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]])
+    desired_base = flange_world.copy()  # Keep mounting position at the flange, not at an assumed TCP.
+    desired_base[:3, :3] = ee_world[:3, :3] @ ee_to_base_rotation
+    flange_to_base = np.linalg.inv(flange_world) @ desired_base
+    new_root = desired_base @ np.linalg.inv(base_world) @ root_world
     # Gripper is a top-level prim: local == world. Preserve every internal body/joint transform.
     stage_matrix = new_root.copy()
     stage_matrix[:3, 3] /= meters
@@ -112,7 +126,7 @@ def mount_fanuc_gripper(stage, robot_source, gripper_setup):
     xform.ClearXformOpOrder()
     xform.AddTransformOp(opSuffix="fdwMount").Set(Gf.Matrix4d(*stage_matrix.T.flatten().tolist()))
     placed_base = _usd_rigid_matrix(UsdGeom.XformCache(), base, meters)
-    if not np.allclose(placed_base, flange_world, atol=1e-6, rtol=0):
+    if not np.allclose(placed_base, desired_base, atol=1e-6, rtol=0):
         raise ValueError("gripper base failed frame alignment (reset transforms/scales unsupported)")
     if not arm_world_anchors:
         # A world anchor outside the source default prim is not imported by a reference.
@@ -139,7 +153,7 @@ def mount_fanuc_gripper(stage, robot_source, gripper_setup):
     mount = UsdPhysics.FixedJoint.Define(stage, "/World/GripperMount")
     mount.CreateBody0Rel().SetTargets([terminal.GetPath()])
     mount.CreateBody1Rel().SetTargets([base.GetPath()])
-    _local_joint_frame(mount, 0, np.linalg.inv(terminal_world) @ flange_world, meters)
+    _local_joint_frame(mount, 0, np.linalg.inv(terminal_world) @ desired_base, meters)
     _local_joint_frame(mount, 1, np.eye(4), meters)
     mount.CreateJointEnabledAttr(True)
     mount.CreateExcludeFromArticulationAttr(False)
@@ -151,14 +165,17 @@ def mount_fanuc_gripper(stage, robot_source, gripper_setup):
     return {"mode": "temporary_direct_frame_mount", "robot_source_usd": robot_source,
             "unit_compatibility": unit_compatibility,
             "robot_path": arm_path, "arm_base_path": arm_base_path, "arm_articulation_path": arm_roots[0],
-            "flange_path": str(flange.GetPath()), "terminal_body_path": str(terminal.GetPath()),
+            "flange_path": str(flange.GetPath()), "ee_path": str(ee.GetPath()),
+            "terminal_body_path": str(terminal.GetPath()),
             "gripper_root_path": root_path, "gripper_base_path": str(base.GetPath()),
             "tcp_candidate_path": str(grasp.GetPath()), "mount_joint_path": str(mount.GetPath()),
             "disabled_gripper_world_anchor": gripper_setup["anchor_path"],
             "removed_gripper_articulation_roots": removed_roots, "arm_world_anchors": arm_world_anchors,
             "merged_self_collision_setting": collision_setting.Get() if collision_setting else None,
             "self_collision_policy": "inherit FANUC articulation setting; contact behavior unverified",
-            "mount_convention": "coincident flange and robotiq_base_link frames; no adapter/changer offset",
+            "mount_convention": "base origin at flange; Robotiq +Z aligned to EE +X and +Y to EE +Y; no adapter/changer offset",
+            "desired_flange_to_base_matrix_m": flange_to_base.tolist(),
+            "gripper_approach_axis_base": [0, 0, 1], "ee_forward_axis": [1, 0, 0],
             "mount_calibration_verified": False, "tcp_calibration_verified": False,
             "tool_changer_present": False, "physical_grasp_verified": False}
 
@@ -170,9 +187,14 @@ def mount_frame_observation(stage, mount):
     meters = UsdGeom.GetStageMetersPerUnit(stage)
     cache = UsdGeom.XformCache()
     flange = _usd_rigid_matrix(cache, stage.GetPrimAtPath(mount["flange_path"]), meters)
+    ee = _usd_rigid_matrix(cache, stage.GetPrimAtPath(mount["ee_path"]), meters)
     base = _usd_rigid_matrix(cache, stage.GetPrimAtPath(mount["gripper_base_path"]), meters)
     tcp = _usd_rigid_matrix(cache, stage.GetPrimAtPath(mount["tcp_candidate_path"]), meters)
-    return {"flange_to_base_error": _pose_error(flange, base),
+    expected = flange @ np.array(mount["desired_flange_to_base_matrix_m"], dtype=float)
+    return {"flange_to_base_error": _pose_error(expected, base),
+            "flange_to_base_matrix_m": (np.linalg.inv(flange) @ base).tolist(),
+            "gripper_forward_world": base[:3, 2].tolist(), "ee_forward_world": ee[:3, 0].tolist(),
+            "forward_alignment_dot": float(base[:3, 2] @ ee[:3, 0]),
             "flange_to_tcp_candidate_matrix_m": (np.linalg.inv(flange) @ tcp).tolist(),
             "tcp_candidate_world_matrix_m": tcp.tolist(), "tcp_calibration_verified": False}
 

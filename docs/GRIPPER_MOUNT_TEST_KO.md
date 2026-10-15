@@ -31,8 +31,12 @@ FANUC 경로는 기존 로더의 로컬/환경변수/Isaac 자산 경로를 사�
 ## 장착·관절 처리
 
 - 실험 anonymous root layer에서만 변경하며 두 원본 자산을 저장하지 않는다.
-- FANUC의 유일한 `flange`와 Robotiq의 실제 rigid body `robotiq_base_link`
-  좌표를 위치·회전 모두 일치시킨다. 별도 오프셋이나 어댑터 길이를 추정하지 않는다.
+- FANUC의 유일한 `flange` 위치에 Robotiq의 실제 rigid body `robotiq_base_link` 원점을 둔다.
+  원본 FANUC `J6_link/flange/ee_link`는 +X가 손목 연장 방향이며,
+  Robotiq base에서 grasp_frame으로 향하는 손가락 방향은 +Z다.
+  그리퍼 +Z를 EE +X에, 그리퍼 +Y를 EE +Y에 맞춘다(EE 기준 +Y축 90° 회전에 해당).
+  flange와 base의 회전을 그대로 일치시키면 손가락이 위를 향하므로 사용하지 않는다.
+  별도 위치 오프셋이나 어댑터 길이를 추정하지 않는다.
 - flange의 rigid-body 조상과 그리퍼 base를 fixed joint로 연결한다.
   연결된 두 body 사이 collision만 fixed joint 설정으로 비활성화한다.
 - 기존 그리퍼의 world fixed joint는 실험에서 비활성화하고, 그리퍼 articulation root는
@@ -59,6 +63,9 @@ FANUC 경로는 기존 로더의 로컬/환경변수/Isaac 자산 경로를 사�
 이 프레임은 **TCP 후보**이며 캘리브레이션 완료나 실제 접촉 중심을 의미하지 않는다.
 `setup.mount_initial_observation`과 `mount_final_observation`에 flange에서
 TCP 후보로의 4x4 상대 변환 행렬(위치 m)을 기록한다.
+EE/그리퍼의 월드 forward 벡터와 `forward_alignment_dot`도 기록한다.
+정상 정렬이면 두 벡터 내적은 1에 가깝다. 장착 감시의 방향 오차는 identity가 아니라
+실제로 적용한 `desired_flange_to_base_matrix_m`의 회전을 기준으로 측정한다.
 `tcp_calibration_verified`, `mount_calibration_verified`는 계속 false다.
 기존 `fanuc_tooling.yaml`의 교정값이나 `active_tool`도 채우지 않는다.
 

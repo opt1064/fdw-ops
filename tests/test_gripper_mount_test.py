@@ -33,6 +33,7 @@ def assembly():
     flange = UsdGeom.Xform.Define(arm, "/Robot/L6/flange")
     flange.AddTranslateOp().Set((0, 0, 0.03))
     flange.AddRotateYOp().Set(90)
+    UsdGeom.Xform.Define(arm, "/Robot/L6/flange/ee_link")
     gripper = Usd.Stage.CreateInMemory()
     UsdGeom.SetStageMetersPerUnit(gripper, 1)
     root = UsdGeom.Xform.Define(gripper, "/Robotiq_2F_140")
@@ -63,7 +64,8 @@ def test_direct_mount_aligns_frames_preserves_sources_and_builds_single_tree(ass
     observation = mount_frame_observation(stage, mount)
     assert observation["flange_to_base_error"]["position_error_m"] < 1e-6
     assert observation["flange_to_base_error"]["orientation_error_rad"] < 1e-6
-    np.testing.assert_allclose(np.array(observation["flange_to_tcp_candidate_matrix_m"])[:3, 3], [0, 0, .18], atol=1e-6)
+    np.testing.assert_allclose(np.array(observation["flange_to_tcp_candidate_matrix_m"])[:3, 3], [.18, 0, 0], atol=1e-6)
+    assert observation["forward_alignment_dot"] == pytest.approx(1)
     assert not observation["tcp_calibration_verified"] and not mount["mount_calibration_verified"]
     assert not mount["tool_changer_present"]
     joint = UsdPhysics.FixedJoint(stage.GetPrimAtPath(mount["mount_joint_path"]))
@@ -95,6 +97,32 @@ def test_mount_joint_local_frames_coincide_in_world(assembly):
         local.SetTranslateOnly(Gf.Vec3d(pos))
         frames.append(local*cache.GetLocalToWorldTransform(body))
     np.testing.assert_allclose(np.array(frames[0]), np.array(frames[1]), atol=1e-6)
+
+
+@pytest.mark.parametrize("rotation", [(0, 0, 0), (35, -50, 80), (180, 30, -90)])
+def test_gripper_approach_tracks_ee_forward_in_arbitrary_world_pose(assembly, rotation):
+    stage, arm, _, setup = assembly
+    UsdGeom.Xformable(arm.GetDefaultPrim()).AddRotateXYZOp().Set(rotation)
+    # Match the real FANUC local flange/ee pose: identity orientation and +X flange offset.
+    flange = UsdGeom.Xformable(arm.GetPrimAtPath("/Robot/L6/flange"))
+    flange.GetOrderedXformOps()[0].Set((.16, 0, 0))
+    flange.GetOrderedXformOps()[1].Set(0)
+    mount = mount_fanuc_gripper(stage, arm.GetRootLayer().identifier, setup)
+    observation = mount_frame_observation(stage, mount)
+    np.testing.assert_allclose(observation["gripper_forward_world"], observation["ee_forward_world"], atol=1e-6)
+    assert observation["forward_alignment_dot"] == pytest.approx(1)
+    relative = np.array(observation["flange_to_base_matrix_m"])
+    np.testing.assert_allclose(relative[:3, 3], [0, 0, 0], atol=1e-6)
+    np.testing.assert_allclose(relative[:3, 2], [1, 0, 0], atol=1e-6)
+
+
+def test_mount_observer_detects_rotation_away_from_corrected_alignment(assembly):
+    stage, arm, _, setup = assembly
+    mount = mount_fanuc_gripper(stage, arm.GetRootLayer().identifier, setup)
+    UsdGeom.Xformable(stage.GetPrimAtPath(setup["base_path"])).AddRotateXOp(opSuffix="drift").Set(60)
+    observed = mount_frame_observation(stage, mount)
+    assert observed["flange_to_base_error"]["orientation_error_rad"] > 1
+    assert observed["forward_alignment_dot"] == pytest.approx(.5)
 
 
 def test_real_robotiq_unit_roundoff_allows_mount_without_scaling_or_source_edits(assembly):
@@ -173,15 +201,19 @@ def test_fanuc_fixed_root_joint_schema_is_preserved_and_binding_is_scoped(assemb
     assert metadata["live_articulation_path"] == mount["arm_articulation_path"]
 
 
-@pytest.mark.parametrize("fault", ["units", "flange", "grasp", "joint_name", "external_body", "root", "base_reset"])
+@pytest.mark.parametrize("fault", ["units", "flange", "ee", "grasp", "grasp_axis", "joint_name", "external_body", "root", "base_reset"])
 def test_invalid_assembly_blocks_before_runtime(assembly, fault):
     stage, arm, gripper, setup = assembly
     if fault == "units":
         UsdGeom.SetStageMetersPerUnit(arm, .01)
     elif fault == "flange":
         arm.RemovePrim("/Robot/L6/flange")
+    elif fault == "ee":
+        arm.RemovePrim("/Robot/L6/flange/ee_link")
     elif fault == "grasp":
         gripper.RemovePrim("/Robotiq_2F_140/robotiq_base_link/grasp_frame")
+    elif fault == "grasp_axis":
+        gripper.GetPrimAtPath("/Robotiq_2F_140/robotiq_base_link/grasp_frame").GetAttribute("xformOp:translate").Set((.18, 0, 0))
     elif fault == "joint_name":
         arm.RemovePrim("/Robot/J6")
     elif fault == "external_body":
