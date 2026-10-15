@@ -217,7 +217,7 @@ class ManualPhysxStepper:
 
 
 def bind_live_gripper(get_stage, world, make_articulation, make_simulation_view, *, physics_scene_path=None,
-                      prepare_attachment=None):
+                      prepare_attachment=None, articulation_path=None):
     """Bind fresh tensors after all scene edits, countdown and the final play transition."""
     if physics_scene_path:
         require_physics_scene(get_stage(), physics_scene_path, "before final play")
@@ -229,7 +229,8 @@ def bind_live_gripper(get_stage, world, make_articulation, make_simulation_view,
     attachment = prepare_attachment() if prepare_attachment is not None else {}
     roots = articulation_root_paths(stage)
     default = stage.GetDefaultPrim()
-    candidates = list(dict.fromkeys([str(default.GetPath()) if default else "/Robotiq_2F_140", *roots]))
+    candidates = (list(dict.fromkeys([articulation_path, *[r for r in roots if r.startswith(articulation_path+"/")]])) if articulation_path else
+                  list(dict.fromkeys([str(default.GetPath()) if default else "/Robotiq_2F_140", *roots])))
     physics_view = make_simulation_view("numpy")
     physics_view.set_subspace_roots("/")
     failures = []

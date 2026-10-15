@@ -18,13 +18,20 @@ def main():
     parser.add_argument("--output-dir", type=Path, default=ROOT / "fdw_sim/logs")
     parser.add_argument("--drive-damping-scale", type=float, default=10.0,
                         help="Runtime-only primary damping multiplier (1=authored baseline; default=10)")
+    parser.add_argument("--mounted-on-fanuc", action="store_true",
+                        help="Temporary direct flange/base mount; hold FANUC stationary (no TCP calibration)")
+    parser.add_argument("--fanuc-usd", help="Explicit FANUC asset path/URI; requires --mounted-on-fanuc")
     args = parser.parse_args()
     if not 1 <= args.drive_damping_scale <= 100:
         parser.error("--drive-damping-scale must be finite and between 1 and 100")
+    if args.fanuc_usd and not args.mounted_on_fanuc:
+        parser.error("--fanuc-usd requires --mounted-on-fanuc")
     from isaacsim import SimulationApp
     app = SimulationApp({"headless": False})
     world, source = None, args.usd
     setup = {}
+    mount, arm_guard = None, None
+    report = None
     try:
         import numpy as np
         import omni.usd
@@ -33,7 +40,8 @@ def main():
         import omni.timeline
         from pxr import Gf, Usd, UsdGeom, UsdLux, UsdPhysics
         from isaacsim.core.api import World
-        from fdw_sim.visualization.robot_loader import get_isaac_assets_root
+        from fdw_sim.visualization.robot_loader import get_isaac_assets_root, resolve_robot_usd_path, ROBOT_CATALOG
+        from fdw_sim.visualization.gripper_mount_test import mount_fanuc_gripper, mount_frame_observation, StationaryArmGuard
         from fdw_sim.visualization.tool_diagnostics import load_tool_configuration
         from fdw_sim.visualization.gripper_asset_inventory import inspect_gripper_stage
         from fdw_sim.visualization.gripper_motion_test import (
@@ -69,6 +77,12 @@ def main():
             stage = omni.usd.get_context().get_stage()
             setup.update(compose_gripper_experiment(stage, source_identifier, meters=meters,
                                                     up_axis=up_axis, default_prim_path=default_path))
+            if args.mounted_on_fanuc:
+                robot_source = args.fanuc_usd or resolve_robot_usd_path(ROBOT_CATALOG["fanuc_crx10ia"])
+                mount = mount_fanuc_gripper(stage, robot_source, setup)
+                setup["mount"] = mount
+                setup["mount_initial_observation"] = mount_frame_observation(stage, mount)
+                print("[GRIPPER MOUNT] temporary direct flange/base mount; changer and TCP calibration unverified.", flush=True)
             prims = list(Usd.PrimRange(stage.GetPseudoRoot(), Usd.TraverseInstanceProxies()))
             if any(p.GetTypeName() == "OmniGraph" for p in prims):
                 raise ValueError("asset contains an OmniGraph; inspect controller conflicts before motion")
@@ -97,8 +111,22 @@ def main():
                 marker.CreateRadiusAttr(0.004/meters)
                 marker.CreateDisplayColorAttr([Gf.Vec3f(*color)])
                 marker_ops.append(UsdGeom.Xformable(marker.GetPrim()).AddTranslateOp())
+            tcp_marker_op = None
+            if mount:
+                marker = UsdGeom.Sphere.Define(stage, "/World/GripperTest/TcpCandidateCyan")
+                marker.CreateRadiusAttr(0.004/meters)
+                marker.CreateDisplayColorAttr([Gf.Vec3f(0, 1, 1)])
+                tcp_marker_op = UsdGeom.Xformable(marker.GetPrim()).AddTranslateOp()
             def read_pads():
+                if arm_guard is not None:
+                    arm_guard.check()
+                    observed = mount_frame_observation(stage, mount)
+                    error = observed["flange_to_base_error"]
+                    if error["position_error_m"] > 0.002 or error["orientation_error_rad"] > 0.01:
+                        raise RuntimeError("FANUC/gripper mount relative frame drift exceeded tolerance")
                 cache = UsdGeom.XformCache()
+                if tcp_marker_op is not None:
+                    tcp_marker_op.Set(cache.GetLocalToWorldTransform(stage.GetPrimAtPath(mount["tcp_candidate_path"])).ExtractTranslation())
                 base_now = _usd_rigid_matrix(cache, stage.GetPrimAtPath(setup["base_path"]), meters)
                 error = _pose_error(base_now, base_start)
                 if error["position_error_m"] > 0.002 or error["orientation_error_rad"] > 0.01:
@@ -125,6 +153,8 @@ def main():
                 builder.frame_viewport_to_scene(center=tuple(bbox.GetMidpoint()), distance=max(extent*2.2, 0.6/meters),
                                                height=max(extent*0.9, 0.25/meters))
             print("[GRIPPER MOTION] Left fingertip: BLUE; right fingertip: ORANGE. Two partial-close/return cycles.", flush=True)
+            if mount:
+                print("[GRIPPER MOUNT] CYAN: asset grasp_frame (TCP candidate, uncalibrated). FANUC joints held stationary.", flush=True)
             for seconds in range(5, 0, -1):
                 print(f"[GRIPPER MOTION] starts in {seconds}...", flush=True)
                 deadline = time.monotonic()+1
@@ -152,7 +182,8 @@ def main():
             art, names, binding = bind_live_gripper(lambda: omni.usd.get_context().get_stage(), world,
                                                     NativeGripperArticulation, omni.physics.tensors.create_simulation_view,
                                                     physics_scene_path=physics_scene_path,
-                                                    prepare_attachment=prepare_attachment)
+                                                    prepare_attachment=prepare_attachment,
+                                                    articulation_path=mount["robot_path"] if mount else None)
             setup.update(binding)
             index = binding["commanded_joint_index"]
             stage = omni.usd.get_context().get_stage()
@@ -165,7 +196,11 @@ def main():
                     raise ValueError("runtime joint feedback lost or nonfinite")
                 return q[index]
             def write_target(q):
+                if arm_guard is not None:
+                    arm_guard.hold()
                 art.set_primary_target(q, index)
+            if mount:
+                arm_guard = StationaryArmGuard(art._view)
             setup["drive_experiment"] = art.configure_primary_damping(index, args.drive_damping_scale)
             print(f"[GRIPPER MOTION] runtime primary damping scale={args.drive_damping_scale}; "
                   "stiffness/maxForce/passive gains unchanged.", flush=True)
@@ -183,9 +218,21 @@ def main():
                                        initial_target=np.deg2rad(4), read_command=lambda: dict(servo.last))
             setup.update(stepper.diagnostics())
             setup["position_servo"] = servo.diagnostics()
+            if mount:
+                setup["arm_hold"] = arm_guard.diagnostics()
+                setup["mount_final_observation"] = mount_frame_observation(stage, mount)
+                report.update(mounted_on_fanuc=True,
+                              scope="temporary direct mount; stationary FANUC; unloaded zero-gravity partial cycle; no TCP/contact calibration")
+                if report["status"] == "PASSED_UNLOADED_GRIPPER_CYCLE":
+                    report["status"] = "PASSED_MOUNTED_UNLOADED_GRIPPER_CYCLE"
         except (Exception, KeyboardInterrupt) as exc:
-            report = {"status": "FAILED", "errors": [f"{type(exc).__name__}: {exc}"],
-                      "motion_commands_issued": False, "physical_grasp_verified": False}
+            if report is None:
+                report = {"status": "FAILED", "errors": [],
+                          "motion_commands_issued": False, "physical_grasp_verified": False}
+            report["status"] = "FAILED"
+            report["errors"].append(f"{type(exc).__name__}: {exc}")
+            if arm_guard is not None:
+                setup["arm_hold"] = arm_guard.diagnostics()
             if world is not None:
                 try:
                     world.pause()
@@ -205,7 +252,7 @@ def main():
                     app.update()
             except KeyboardInterrupt:
                 pass
-        return 0 if report["status"] == "PASSED_UNLOADED_GRIPPER_CYCLE" else 2
+        return 0 if report["status"] in ("PASSED_UNLOADED_GRIPPER_CYCLE", "PASSED_MOUNTED_UNLOADED_GRIPPER_CYCLE") else 2
     finally:
         app.close()
 
