@@ -25,6 +25,8 @@ def main():
                         help="After mounted gripper cycle passes, move J1/J5/J6 +/- and verify mount/TCP candidate")
     parser.add_argument("--arm-amplitude-deg", type=float, default=1.0,
                         help="Mounted arm test amplitude in degrees (0 < value <= 2; default=1)")
+    parser.add_argument("--grasp-test", action="store_true",
+                        help="After unloaded cycles, contact/lift/hold/release a synthetic 50g block")
     args = parser.parse_args()
     if not 1 <= args.drive_damping_scale <= 100:
         parser.error("--drive-damping-scale must be finite and between 1 and 100")
@@ -32,6 +34,8 @@ def main():
         parser.error("--fanuc-usd requires --mounted-on-fanuc")
     if args.mounted_arm_motion and not args.mounted_on_fanuc:
         parser.error("--mounted-arm-motion requires --mounted-on-fanuc")
+    if args.grasp_test and (not args.mounted_on_fanuc or args.mounted_arm_motion):
+        parser.error("--grasp-test requires --mounted-on-fanuc and cannot combine with --mounted-arm-motion")
     if not 0 < args.arm_amplitude_deg <= 2:
         parser.error("--arm-amplitude-deg must be finite and in (0, 2]")
     from isaacsim import SimulationApp
@@ -259,11 +263,108 @@ def main():
                     report["scope"] = "mounted unloaded arm motion and USD FK/TCP candidate consistency; no hardware/contact/TCP calibration"
                     setup.update(stepper.diagnostics())
                     setup["mount_final_observation"] = mount_frame_observation(stage, mount)
+            if args.grasp_test:
+                # Set failure status before any preparation; an unloaded pass cannot stand in for a grasp.
+                prerequisite = report["status"]
+                report["gripper_cycle_status"] = prerequisite
+                report["gripper_returned_to_start"] = report.get("returned_to_start", False)
+                report["returned_to_start"] = False
+                report["status"] = "FAILED"
+                if prerequisite != "PASSED_MOUNTED_UNLOADED_GRIPPER_CYCLE":
+                    report["grasp_test"] = {"status": "SKIPPED_PREREQUISITE_FAILED"}
+                else:
+                    from pxr import PhysicsSchemaTools
+                    from omni.physx.bindings._physx import ContactEventType
+                    from fdw_sim.visualization.physical_grasp_test import (
+                        create_grasp_fixture, ContactEvidence, LoadedTestBlock, run_contact_grasp, plan_lift)
+                    print("[PHYSICAL GRASP] YELLOW block / BLUE pedestal; close, lift, hold 3s, open, return.", flush=True)
+                    initial_q = art.get_joint_positions()
+                    prerequisite_art = art  # Retain the previous simulation-view owner through the rebind.
+                    gain_methods = ("get_dof_stiffnesses", "get_dof_dampings", "get_dof_max_forces")
+                    gains = {name: np.array(getattr(art._view, name)(), copy=True) for name in gain_methods}
+                    fixture = create_grasp_fixture(stage, mount, setup["pad_paths"])
+                    setup["grasp_fixture"] = fixture
+                    # Adding an independent rigid body changes the scene inventory. Flush and bind
+                    # fresh tensor views without play/reset; retain and verify physical state/gains.
+                    omni.physx.get_physx_simulation_interface().flush_changes()
+                    fresh_view = omni.physics.tensors.create_simulation_view("numpy")
+                    fresh_view.set_subspace_roots("/")
+                    fresh_art = NativeGripperArticulation(prim_path=binding["live_articulation_path"])
+                    fresh_art.initialize(physics_sim_view=fresh_view)
+                    if fresh_art.dof_names != names or not np.allclose(fresh_art.get_joint_positions(), initial_q, atol=1e-6, rtol=0):
+                        raise RuntimeError("fixture rebind changed articulation inventory or measured positions")
+                    for name, expected in gains.items():
+                        if not np.allclose(getattr(fresh_art._view, name)(), expected, rtol=1e-6, atol=1e-7):
+                            raise RuntimeError(f"fixture rebind changed runtime drive properties: {name}")
+                    art = fresh_art
+                    arm_guard = MovingArmController(art._view, 2)
+                    arm_motion_active = True
+                    model = UsdMountedArmModel(stage, mount)
+                    lift_target, lift_plan = plan_lift(model, arm_guard.start)
+                    fixture["lift_plan"] = lift_plan
+                    block = LoadedTestBlock(fresh_view, fixture)
+                    contacts = ContactEvidence(fixture, setup["pad_paths"], setup["usd_stage_id"], dt,
+                                               PhysicsSchemaTools.intToSdfPath, ContactEventType.CONTACT_LOST)
+                    contact_subscription = omni.physx.get_physx_simulation_interface().subscribe_contact_report_events(contacts.callback)
+                    if contact_subscription is None:
+                        raise RuntimeError("PhysX contact report subscription unavailable")
+                    def grasp_command(grip, target):
+                        arm_guard.set_target(target)
+                        servo.command(grip)
+                    def grasp_step():
+                        contacts.begin_step()
+                        block.load()
+                        stepper.step()
+                    def grasp_observe():
+                        read_pads()  # Independent mount drift checks and visible fingertip/TCP markers.
+                        q = arm_guard.read()
+                        if np.any(q < model.limits[:, 0]-.001) or np.any(q > model.limits[:, 1]+.001):
+                            raise RuntimeError("loaded arm feedback outside authored joint limits")
+                        observed = mount_frame_observation(stage, mount)
+                        tcp_error = _pose_error(np.array(observed["tcp_candidate_world_matrix_m"]), model.predict(q)[1])
+                        if tcp_error["position_error_m"] > .002 or tcp_error["orientation_error_rad"] > .01:
+                            raise RuntimeError("loaded TCP candidate disagrees with measured-joint USD FK")
+                        primary = float(read_joint())
+                        if not setup["limit_rad"][0]-.001 <= primary <= setup["limit_rad"][1]+.001:
+                            raise RuntimeError("loaded primary joint outside authored limits")
+                        data = block.measure()
+                        base = _usd_rigid_matrix(UsdGeom.XformCache(), stage.GetPrimAtPath(setup["base_path"]), meters)
+                        data.update(object_relative_base_matrix_m=(np.linalg.inv(base) @ np.array(data["object_world_matrix_m"])).tolist(),
+                                    contacts=contacts.read(), gripper_rad=primary,
+                                    arm_target_error_rad=float(np.max(np.abs(q-arm_guard.target))),
+                                    arm_speed_rad_s=float(np.max(np.abs(arm_guard.velocities()))),
+                                    tcp_candidate_error=tcp_error)
+                        return data
+                    def phase_color(phase):
+                        color = ((1, .1, .1) if phase == "FAILED" else
+                                 (.1, 1, .2) if phase in ("LIFT", "HOLD_UNSUPPORTED") else
+                                 (1, .4, .05) if phase == "OPEN_RELEASE" else
+                                 (.3, .7, 1) if phase == "RETURN_EMPTY" else (1, .8, .05))
+                        UsdGeom.Gprim(stage.GetPrimAtPath(fixture["block_path"])).GetDisplayColorAttr().Set([Gf.Vec3f(*color)])
+                    open_rad = float(read_joint())
+                    grasp_result = run_contact_grasp(
+                        grasp_command, grasp_observe, grasp_step, world.pause, phase_color, fixture,
+                        arm_guard.start, lift_target, open_rad, open_rad+np.deg2rad(10),
+                        dt=dt, realtime=True, is_running=app.is_running)
+                    # Keep subscription and tensor owners alive through the last measurement.
+                    report["grasp_test"] = grasp_result
+                    report["status"] = grasp_result["status"]
+                    report["physical_grasp_verified"] = grasp_result["physical_grasp_verified"]
+                    report["returned_to_start"] = grasp_result.get("returned_to_start", False)
+                    report["errors"].extend(grasp_result["errors"])
+                    report["scope"] = grasp_result["scope"]
+                    report["verification_scope"] = "synthetic block only; production adapter and TCP calibration remain unverified"
+                    setup.update(stepper.diagnostics())
+                    setup["position_servo"] = servo.diagnostics()
+                    setup["mount_final_observation"] = mount_frame_observation(stage, mount)
         except (Exception, KeyboardInterrupt) as exc:
             if report is None:
                 report = {"status": "FAILED", "errors": [],
                           "motion_commands_issued": False, "physical_grasp_verified": False}
             report["status"] = "FAILED"
+            if args.grasp_test:
+                report["physical_grasp_verified"] = False
+                report["returned_to_start"] = False
             report["errors"].append(f"{type(exc).__name__}: {exc}")
             if arm_guard is not None:
                 setup["arm_hold"] = arm_guard.diagnostics()
@@ -281,6 +382,8 @@ def main():
         summary = {k: v for k, v in report.items() if k != "samples"}
         if "arm_motion" in summary:
             summary["arm_motion"] = {k: v for k, v in summary["arm_motion"].items() if k != "samples"}
+        if "grasp_test" in summary:
+            summary["grasp_test"] = {k: v for k, v in summary["grasp_test"].items() if k != "samples"}
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         if args.keep_alive:
             print("[GRIPPER MOTION] paused viewer; close window or Ctrl+C to exit.", flush=True)
@@ -290,7 +393,7 @@ def main():
             except KeyboardInterrupt:
                 pass
         return 0 if report["status"] in ("PASSED_UNLOADED_GRIPPER_CYCLE", "PASSED_MOUNTED_UNLOADED_GRIPPER_CYCLE",
-                                        "PASSED_MOUNTED_ARM_TCP_TEST") else 2
+                                        "PASSED_MOUNTED_ARM_TCP_TEST", "PASSED_SIMULATED_CONTACT_GRASP_RELEASE") else 2
     finally:
         app.close()
 

@@ -134,3 +134,7 @@ API 근거: [NVIDIA Isaac 6.1 closed-loop/mimic 구성](https://docs.isaacsim.om
 [PhysX stage 연결 API](https://docs.omniverse.nvidia.com/kit/docs/omni_physics/107.3/extensions/runtime/source/omni.physx/docs/api/python.html).
 [Tensor articulation API](https://docs.omniverse.nvidia.com/kit/docs/omni_physics/108.0/extensions/runtime/source/omni.physics.tensors/docs/api/python.html),
 [legacy 래퍼의 공개 초기화 소스](https://github.com/isaac-sim/IsaacSim/blob/develop/source/deprecated/isaacsim.core.prims/python/impl/articulation.py).
+
+## 시험 물체 파지 단계
+
+장착 상태의 무부하 개폐·팔 소폭 이동 확인 후에는 [시험 블록 접촉·파지·유지·해제 검증](CONTACT_GRASP_TEST_KO.md)을 실행한다. `--mounted-on-fanuc --grasp-test`로 양쪽 접촉, 받침대 분리, 3초 유지, 개방 후 낙하·안착을 검사한다.
