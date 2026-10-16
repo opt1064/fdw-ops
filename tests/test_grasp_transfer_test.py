@@ -5,7 +5,10 @@ import numpy as np
 import pytest
 from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
-from fdw_sim.visualization.grasp_transfer_test import plan_transfer, create_target_support, audit_target_clearance
+from fdw_sim.visualization.grasp_transfer_test import (
+    plan_transfer, create_target_support, audit_target_clearance,
+    gripper_collision_world_points, plan_empty_return,
+)
 from fdw_sim.visualization.physical_grasp_test import ContactEvidence, run_contact_grasp
 from fdw_sim.visualization.mounted_arm_motion_test import MovingArmController
 from test_mounted_arm_motion_test import Plant
@@ -16,7 +19,7 @@ class Model:
     limits = np.tile([-math.pi, math.pi], (6, 1))
     def predict(self, q):
         pose = np.eye(4)
-        pose[:3, 3] = [0, .9*q[0], .5+.35*q[4]]
+        pose[:3, 3] = [0, .9*q[0], .5+.8*q[1]+.35*q[4]]
         return pose, pose
 
 
@@ -118,9 +121,14 @@ def test_transfer_controller_expands_only_explicit_j1_envelope():
     command[1] = math.radians(1)
     with pytest.raises(ValueError, match="envelope"): transfer.set_target(command)
     with pytest.raises(ValueError, match="transfer J1"): MovingArmController(plant, 2, transfer_j1_deg=9)
+    command[1] = math.radians(3)
+    transfer.allow_empty_return_j2()
+    transfer.set_target(command)
+    command[1] = math.radians(9)
+    with pytest.raises(ValueError, match="envelope"): transfer.set_target(command)
 
 
-def run_fake(fault=None):
+def run_fake(fault=None, empty_return=True):
     f = fixture(); start, lift = poses()
     f["transfer"] = plan_transfer(Model(), start, lift, f)
     f["target_support_path"] = "/World/GraspTest/TargetSupport"
@@ -130,7 +138,7 @@ def run_fake(fault=None):
     def command(grip, arm): s.update(grip=grip, arm=arm.copy())
     def observe():
         phase, arm, grip = s["phase"], s["arm"], s["grip"]
-        released = phase in ("OPEN_RELEASE", "RETREAT_EMPTY", "RETURN_ABOVE_SOURCE", "RETURN_EMPTY")
+        released = phase in ("OPEN_RELEASE", "RETREAT_EMPTY", "RAISE_FOR_RETURN", "RETURN_ABOVE_SOURCE", "PARK_EMPTY")
         y, rise = (.9*arm[0], .35*arm[4]) if not released else (goal_y, 0)
         if fault == "frozen_object": y = 0
         if fault == "falls_during_transfer" and phase == "TRANSFER": rise = 0
@@ -147,27 +155,81 @@ def run_fake(fault=None):
             forces.update(target_support=0, support=.4905)
         if fault == "one_finger" and phase == "TRANSFER": forces["right"] = 0
         if fault == "retained_finger" and released: forces["left"] = .1
+        if fault == "finger_recontacts_during_return" and phase == "RETURN_ABOVE_SOURCE": forces["left"] = .129
+        clearance = .8*arm[1]+.35*arm[4]-.02
+        if fault == "insufficient_return_height": clearance = -.001
         return dict(object_world_matrix_m=pose.tolist(), object_relative_base_matrix_m=relative.tolist(),
                     object_speed_m_s=0., support_clearance_m=rise, target_support_clearance_m=rise,
+                    gripper_clearance_above_placed_object_m=clearance,
                     contacts=forces, gripper_rad=grip, gripper_speed_rad_s=0., arm_target_error_rad=0., arm_speed_rad_s=0.)
     def stop(): s["paused"] = True
+    def prepare_return():
+        s["planner_phase"] = s["phase"]
+        high = np.array(f["transfer"]["across_rad"]); high[1] = math.radians(3)
+        home = high.copy(); home[0] = 0
+        return high, home, {"source": "explicit synthetic planner fixture"}
     result = run_contact_grasp(command, observe, lambda: None, stop, color, f, start, lift,
-                               .07, .24, dt=1/120)
+                               .07, .24, dt=1/120, empty_return_planner=prepare_return if empty_return else None)
     return result, s
 
 
-def test_transfer_requires_11_phases_and_target_survives_empty_return():
+def test_transfer_requires_12_phases_and_target_survives_empty_return():
     r, s = run_fake()
     assert r["status"] == "PASSED_SIMULATED_GRASP_TRANSFER_PLACE", r["errors"]
-    assert r["passed_phases"] == 11 and r["transfer_verified"] and r["target_placement_verified"]
-    assert r["returned_to_start"] and s["paused"]
+    assert r["passed_phases"] == 12 and r["transfer_verified"] and r["target_placement_verified"]
+    assert not r["returned_to_start"] and r["empty_gripper_parked"] and r["returned_above_source"] and s["paused"]
     assert r["phases"][4]["measured_horizontal_distance_m"] > .10
     assert r["phases"][7]["measured_setdown_descent_m"] >= .005
+    assert r["phases"][9]["phase"] == "RAISE_FOR_RETURN" and s["planner_phase"] == "RETREAT_EMPTY"
 
 
 @pytest.mark.parametrize("fault", ["frozen_object", "falls_during_transfer", "moves_during_retreat",
-                                   "slip", "no_target_contact", "source_contact_only", "one_finger", "retained_finger"])
+                                   "slip", "no_target_contact", "source_contact_only", "one_finger", "retained_finger",
+                                   "finger_recontacts_during_return", "insufficient_return_height"])
 def test_missing_transfer_or_placement_evidence_fails_and_pauses(fault):
     r, s = run_fake(fault)
     assert r["status"] == "FAILED" and r["errors"]
     assert not r["transfer_verified"] and not r["target_placement_verified"] and s["paused"]
+
+
+def test_missing_return_planner_never_starts_transfer_trial():
+    r, s = run_fake(empty_return=False)
+    assert r["status"] == "FAILED" and s["paused"]
+    assert not r["motion_commands_issued"] and "clearance planner" in r["errors"][0]
+
+
+def test_return_planner_clears_whole_geometry_instead_of_tcp_only():
+    model = Model(); f = fixture(); start, lift = poses()
+    f["transfer"] = plan_transfer(model, start, lift, f)
+    across = np.array(f["transfer"]["across_rad"])
+    tcp = model.predict(across)[1]
+    # Synthetic open-gripper envelope has a bottom 30mm below TCP.
+    local = np.array([[x, y, z, 1.] for x in (-.02, .02) for y in (-.08, .08) for z in (-.03, .02)])
+    world = (tcp @ local.T).T[:, :3]
+    object_pose = np.array(f["transfer"]["target_object_world_matrix_m"])
+    high, home, plan = plan_empty_return(model, world, across, start, across, f, object_pose)
+    assert 0 < abs(math.degrees(high[1])) <= 8
+    assert plan["minimum_predicted_gripper_clearance_m"] >= .008
+    assert plan["collision_corner_count"] == 8 and home[0] == 0
+    np.testing.assert_allclose(high[[0, 2, 3, 4, 5]], across[[0, 2, 3, 4, 5]])
+    model.limits = np.tile([-.001, .001], (6, 1))
+    with pytest.raises(ValueError, match="no authored-limit-safe"):
+        plan_empty_return(model, world, across, start, across, f, object_pose)
+
+
+def test_measured_gripper_bounds_include_hidden_geometry_and_fail_when_empty():
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.SetStageMetersPerUnit(stage, 1)
+    shape = UsdGeom.Cube.Define(stage, "/Grip/HiddenCollider")
+    shape.CreateSizeAttr(1)
+    shape.AddTranslateOp().Set(Gf.Vec3d(0, 0, .4))
+    shape.AddRotateYOp().Set(90)
+    shape.AddScaleOp().Set(Gf.Vec3f(.02, .04, .06))
+    shape.CreateVisibilityAttr(UsdGeom.Tokens.invisible)
+    UsdPhysics.CollisionAPI.Apply(shape.GetPrim())
+    points, paths = gripper_collision_world_points(stage, {"gripper_root_path": "/Grip"})
+    assert points.shape == (8, 3) and paths == ["/Grip/HiddenCollider"]
+    assert points[:, 2].min() == pytest.approx(.39)
+    UsdPhysics.CollisionAPI(shape.GetPrim()).CreateCollisionEnabledAttr(False)
+    with pytest.raises(ValueError, match="measured gripper collision"):
+        gripper_collision_world_points(stage, {"gripper_root_path": "/Grip"})

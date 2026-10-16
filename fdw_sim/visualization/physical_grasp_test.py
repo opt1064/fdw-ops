@@ -257,12 +257,13 @@ class LoadedTestBlock:
 
 def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_start, lift_target,
                       open_rad, close_rad, *, dt, realtime=False, is_running=lambda: True,
-                      progress=lambda event, **data: None):
+                      progress=lambda event, **data: None, empty_return_planner=None):
     """Require bilateral contact, unsupported retention, gravity-driven fall, and supported release."""
     report = {"status": "FAILED", "errors": [], "phases": [], "samples": [], "motion_commands_issued": False,
               "physical_grasp_verified": False, "tcp_calibration_verified": False, "release_verified": False,
               "scope": fixture["scope"], "fixture": fixture, "object_attached": False,
-              "transfer_verified": False, "target_placement_verified": False}
+              "transfer_verified": False, "target_placement_verified": False,
+              "empty_gripper_parked": False, "returned_above_source": False}
     try:
         if not math.isfinite(dt) or not 0 < dt <= 1/60 or not 0 <= open_rad < close_rad <= math.pi/4:
             raise ValueError("invalid contact test timestep/primary targets")
@@ -275,7 +276,10 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
         transfer = fixture.get("transfer")
         across = np.array(transfer["across_rad"]) if transfer else lift_target
         down = np.array(transfer["down_rad"]) if transfer else lift_target
+        empty_high, home_high = across.copy(), lift_target.copy()
         if transfer:
+            if empty_return_planner is None:
+                raise ValueError("transfer requires a measured empty-return clearance planner")
             for target in (across, down):
                 if (target.shape != (6,) or not np.isfinite(target).all()
                         or abs(target[0]-arm_start[0]) > math.radians(8)+1e-6
@@ -332,7 +336,8 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
         if transfer:
             specs = specs[:4]+[("TRANSFER", 10.), ("HOLD_AT_TARGET", 1.), ("LOWER_TO_TARGET", 8.),
                               ("OPEN_RELEASE", 8.), ("RETREAT_EMPTY", 8.),
-                              ("RETURN_ABOVE_SOURCE", 10.), ("RETURN_EMPTY", 8.)]
+                              ("RAISE_FOR_RETURN", 10.),
+                              ("RETURN_ABOVE_SOURCE", 10.), ("PARK_EMPTY", 2.)]
         for phase, timeout in specs:
             progress("PHASE_STARTED", phase=phase, status="IN_PROGRESS", time_sec=elapsed)
             phase_color(phase)
@@ -343,7 +348,7 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
             close_anchor = None
             for index in range(math.ceil(timeout/dt)):
                 t = (index+1)*dt
-                ramp = 6 if phase in ("LIFT", "TRANSFER", "RETURN_ABOVE_SOURCE") else 4
+                ramp = 6 if phase in ("LIFT", "TRANSFER", "RAISE_FOR_RETURN", "RETURN_ABOVE_SOURCE") else 4
                 a = min(1., t/ramp)
                 blend = a**3*(10-15*a+6*a*a)
                 grip = open_rad if phase in ("SETTLE_ON_SUPPORT", "RETURN_EMPTY") else close_rad
@@ -359,8 +364,11 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
                     if phase == "OPEN_RELEASE": arm = down
                     if phase == "RETREAT_EMPTY":
                         grip, arm = open_rad, down+(across-down)*blend
+                    if phase == "RAISE_FOR_RETURN":
+                        grip, arm = open_rad, across+(empty_high-across)*blend
                     if phase == "RETURN_ABOVE_SOURCE":
-                        grip, arm = open_rad, across+(lift_target-across)*blend
+                        grip, arm = open_rad, empty_high+(home_high-empty_high)*blend
+                    if phase == "PARK_EMPTY": grip, arm = open_rad, home_high
                 data = tick(grip, arm, phase)
                 row["last_feedback"] = data
                 both = bilateral(data)
@@ -377,10 +385,19 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
                     if (data["support_clearance_m"] < .005 or data["target_support_clearance_m"] < .005
                             or data["contacts"]["support"] >= .01 or data["contacts"]["target_support"] >= .01):
                         raise RuntimeError("block contacted a support or lost clearance during horizontal transfer")
-                if transfer and phase in ("RETREAT_EMPTY", "RETURN_ABOVE_SOURCE", "RETURN_EMPTY"):
+                if transfer and phase in ("RETREAT_EMPTY", "RAISE_FOR_RETURN", "RETURN_ABOVE_SOURCE", "PARK_EMPTY"):
+                    row["target_retention_checks"] = {
+                        "target_supported": bool(target_supported(data)),
+                        "left_finger_clear": bool(data["contacts"]["left"] < .01),
+                        "right_finger_clear": bool(data["contacts"]["right"] < .01),
+                        "object_speed": bool(data["object_speed_m_s"] <= .02)}
                     if (not target_supported(data) or data["contacts"]["left"] >= .01
                             or data["contacts"]["right"] >= .01 or data["object_speed_m_s"] > .02):
                         raise RuntimeError("released block moved off target or retained finger contact during retreat")
+                if transfer and phase in ("RAISE_FOR_RETURN", "RETURN_ABOVE_SOURCE", "PARK_EMPTY"):
+                    clearance = data["gripper_clearance_above_placed_object_m"]
+                    if not math.isfinite(clearance) or (phase != "RAISE_FOR_RETURN" and clearance < .005):
+                        raise RuntimeError("whole gripper lacks 5mm vertical clearance above placed object during return")
                 if phase == "SETTLE_ON_SUPPORT":
                     good = (supported(data) and data["contacts"]["left"] < .01
                             and data["contacts"]["right"] < .01 and data["object_speed_m_s"] <= .01)
@@ -456,10 +473,12 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
                     row["measured_setdown_descent_m" if transfer else "measured_release_fall_m"] = fall
                     needed = .5
                 else:
-                    good = (a == 1 and (target_supported(data) if transfer else supported(data)) and data["contacts"]["left"] < .01
+                    good = ((a == 1 or phase == "PARK_EMPTY") and (target_supported(data) if transfer else supported(data)) and data["contacts"]["left"] < .01
                             and data["contacts"]["right"] < .01 and data["arm_target_error_rad"] <= math.radians(.1)
                             and data["arm_speed_rad_s"] <= math.radians(.5))
-                    needed = .5
+                    if phase == "RAISE_FOR_RETURN":
+                        good = good and data["gripper_clearance_above_placed_object_m"] >= .005
+                    needed = 1. if phase == "PARK_EMPTY" else .5
                 stable = stable+dt if good else 0.
                 if phase == "CLOSE_CONTACT": row["stable_measured_sec"] = float(stable)
                 if stable+1e-9 >= needed:
@@ -472,6 +491,14 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
                     progress("PHASE_COMPLETED", phase=phase, status="PASSED", time_sec=elapsed,
                              last_feedback=data)
                     print(f"[PHYSICAL GRASP] {phase}: PASSED", flush=True)
+                    if transfer and phase == "RETREAT_EMPTY":
+                        empty_high, home_high, return_plan = empty_return_planner()
+                        empty_high, home_high = np.asarray(empty_high, float), np.asarray(home_high, float)
+                        for target in (empty_high, home_high):
+                            bounds = np.deg2rad([8., 8., 2., 2., 2., 2.])+1e-6
+                            if target.shape != (6,) or not np.isfinite(target).all() or np.any(np.abs(target-arm_start) > bounds):
+                                raise ValueError("planned empty return exceeds bounded joint changes")
+                        report["empty_return_plan"] = return_plan
                     break
             else:
                 raise RuntimeError(f"physical grasp phase timed out: {phase}")
@@ -480,7 +507,10 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
                       verification_scope="this synthetic object, object-only load and temporary mount only")
         if transfer:
             report.update(status="PASSED_SIMULATED_GRASP_TRANSFER_PLACE", transfer_verified=True,
-                          target_placement_verified=True, transfer_plan=transfer)
+                          target_placement_verified=True, transfer_plan=transfer,
+                          returned_to_start=False, returned_above_source=True, empty_gripper_parked=True,
+                          final_arm_target_rad=home_high.tolist(),
+                          finish="open gripper held in measured-clearance high waiting pose on source side")
     except (Exception, KeyboardInterrupt) as exc:
         report["errors"].append(f"{type(exc).__name__}: {exc}")
         print(f"[PHYSICAL GRASP] FAILED: {type(exc).__name__}: {exc}", flush=True)
@@ -500,6 +530,7 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
     except Exception as exc:
         report.update(status="FAILED", physical_grasp_verified=False, release_verified=False)
         report.update(transfer_verified=False, target_placement_verified=False)
+        report.update(empty_gripper_parked=False, returned_above_source=False)
         report["errors"].append(f"pause failed: {exc}")
     report["passed_phases"] = sum(row["status"] == "PASSED" for row in report["phases"])
     return report

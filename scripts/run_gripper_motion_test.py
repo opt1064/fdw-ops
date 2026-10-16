@@ -296,7 +296,9 @@ def main():
                     lift_target, lift_plan = plan_lift(model, current_arm)
                     fixture["lift_plan"] = lift_plan
                     if args.transfer_test:
-                        from fdw_sim.visualization.grasp_transfer_test import plan_transfer, create_target_support, audit_target_clearance
+                        from fdw_sim.visualization.grasp_transfer_test import (
+                            plan_transfer, create_target_support, audit_target_clearance,
+                            gripper_collision_world_points, plan_empty_return, object_top_world_z)
                         transfer_plan = plan_transfer(model, current_arm, lift_target, fixture)
                         create_target_support(stage, fixture, transfer_plan)
                         audit = audit_target_clearance(stage, fixture, [mount["robot_path"], mount["gripper_root_path"]])
@@ -341,6 +343,7 @@ def main():
                         contacts.begin_step()
                         block.load()
                         stepper.step()
+                    empty_return_state = {"active": False}
                     def grasp_observe():
                         read_pads()  # Independent mount drift checks and visible fingertip/TCP markers.
                         q = arm_guard.read()
@@ -361,18 +364,40 @@ def main():
                                     arm_target_error_rad=float(np.max(np.abs(q-arm_guard.target))),
                                     arm_speed_rad_s=float(np.max(np.abs(arm_guard.velocities()))),
                                     tcp_candidate_error=tcp_error)
+                        if empty_return_state["active"]:
+                            points, _ = gripper_collision_world_points(stage, mount)
+                            obstacle_top = max(object_top_world_z(data["object_world_matrix_m"], fixture),
+                                               fixture["support_top_world_z_m"],
+                                               fixture["transfer"]["target_support_top_world_z_m"])
+                            data["gripper_clearance_above_placed_object_m"] = float(points[:, 2].min()-obstacle_top)
                         return data
+                    def prepare_empty_return():
+                        if abs(float(read_joint())-open_rad) > np.deg2rad(.5):
+                            raise RuntimeError("measured gripper is not open before empty return planning")
+                        points, paths = gripper_collision_world_points(stage, mount)
+                        high, home_high, plan = plan_empty_return(
+                            model, points, arm_guard.read(), arm_guard.start,
+                            np.array(fixture["transfer"]["across_rad"]), fixture,
+                            block.measure()["object_world_matrix_m"])
+                        plan["collision_paths"] = paths
+                        fixture["empty_return_plan"] = plan
+                        arm_guard.allow_empty_return_j2()
+                        empty_return_state["active"] = True
+                        print(f"[GRASP TRANSFER] empty return J2 {plan['delta_deg']:+d}deg; "
+                              f"predicted whole-gripper clearance {plan['minimum_predicted_gripper_clearance_m']*1000:.1f}mm.", flush=True)
+                        return high, home_high, plan
                     def phase_color(phase):
                         color = ((1, .1, .1) if phase == "FAILED" else
                                  (.1, 1, .2) if phase in ("LIFT", "HOLD_UNSUPPORTED", "TRANSFER", "HOLD_AT_TARGET") else
                                  (1, .4, .05) if phase == "OPEN_RELEASE" else
-                                 (.3, .7, 1) if phase in ("RETREAT_EMPTY", "RETURN_ABOVE_SOURCE", "RETURN_EMPTY") else (1, .8, .05))
+                                 (.3, .7, 1) if phase in ("RETREAT_EMPTY", "RAISE_FOR_RETURN", "RETURN_ABOVE_SOURCE", "PARK_EMPTY", "RETURN_EMPTY") else (1, .8, .05))
                         UsdGeom.Gprim(stage.GetPrimAtPath(fixture["block_path"])).GetDisplayColorAttr().Set([Gf.Vec3f(*color)])
                     open_rad = float(read_joint())
                     grasp_result = run_contact_grasp(
                         grasp_command, grasp_observe, grasp_step, world.pause, phase_color, fixture,
                         arm_guard.start, lift_target, open_rad, open_rad+np.deg2rad(10),
-                        dt=dt, realtime=True, is_running=app.is_running, progress=diagnostics.event)
+                        dt=dt, realtime=True, is_running=app.is_running, progress=diagnostics.event,
+                        empty_return_planner=prepare_empty_return if args.transfer_test else None)
                     # Keep subscription and tensor owners alive through the last measurement.
                     report["grasp_test"] = grasp_result
                     report["status"] = grasp_result["status"]
@@ -380,6 +405,8 @@ def main():
                     report["transfer_verified"] = grasp_result.get("transfer_verified", False)
                     report["target_placement_verified"] = grasp_result.get("target_placement_verified", False)
                     report["returned_to_start"] = grasp_result.get("returned_to_start", False)
+                    report["empty_gripper_parked"] = grasp_result.get("empty_gripper_parked", False)
+                    report["returned_above_source"] = grasp_result.get("returned_above_source", False)
                     report["errors"].extend(grasp_result["errors"])
                     report["scope"] = grasp_result["scope"]
                     report["verification_scope"] = "synthetic block only; production adapter and TCP calibration remain unverified"
@@ -396,6 +423,8 @@ def main():
                 report["physical_grasp_verified"] = False
                 report["transfer_verified"] = False
                 report["target_placement_verified"] = False
+                report["empty_gripper_parked"] = False
+                report["returned_above_source"] = False
                 report["returned_to_start"] = False
             report["errors"].append(f"{type(exc).__name__}: {exc}")
             if arm_guard is not None:

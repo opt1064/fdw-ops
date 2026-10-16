@@ -105,6 +105,10 @@ class MovingArmController(StationaryArmGuard):
     def hold(self):
         super().hold(self.target)
 
+    def allow_empty_return_j2(self):
+        """Called only after verified release/retreat; loaded motion keeps its original envelope."""
+        self.envelope[1] = math.radians(8.5)
+
     def set_target(self, target):
         q = np.asarray(target, dtype=float)
         if q.shape != (6,) or not np.isfinite(q).all() or np.any(np.abs(q-self.start) > self.envelope):

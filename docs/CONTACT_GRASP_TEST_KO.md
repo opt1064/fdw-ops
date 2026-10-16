@@ -40,4 +40,4 @@ API 참고: [PhysX 접촉 보고](https://docs.omniverse.nvidia.com/kit/docs/omn
 
 ## 다음 단계
 
-제자리 6단계가 통과한 뒤에는 [수평 이송·목표 받침대 배치 시험](GRASP_TRANSFER_TEST_KO.md)을 사용한다. 기존 명령에 `--transfer-test`를 추가하면 별도 목표 받침대로 옮겨 내려놓고 빈 그리퍼를 복귀시키는 11단계를 수행한다.
+제자리 6단계가 통과한 뒤에는 [수평 이송·목표 받침대 배치 시험](GRASP_TRANSFER_TEST_KO.md)을 사용한다. 기존 명령에 `--transfer-test`를 추가하면 별도 목표 받침대로 옮겨 내려놓고 빈 그리퍼를 복귀시키는 12단계를 수행한다.

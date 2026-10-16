@@ -1,5 +1,6 @@
 """Plan a short J1 arc between two separate static supports, without moving the object."""
 import math
+import itertools
 
 import numpy as np
 
@@ -119,3 +120,75 @@ def audit_target_clearance(stage, fixture, robot_roots):
               "scope": "initial pose conservative bounds only; not full trajectory collision validation"}
     fixture["target_initial_clearance_audit"] = result
     return result
+
+
+def gripper_collision_world_points(stage, mount):
+    """Eight conservative local-bound corners per enabled gripper collider, in world metres."""
+    from pxr import Gf, Usd, UsdGeom, UsdPhysics
+    cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render,
+                                                    UsdGeom.Tokens.proxy, UsdGeom.Tokens.guide], False, True)
+    transforms = UsdGeom.XformCache()
+    root = stage.GetPrimAtPath(mount["gripper_root_path"])
+    if not root:
+        raise ValueError("gripper collision root missing")
+    meters, points, paths = UsdGeom.GetStageMetersPerUnit(stage), [], []
+    for prim in Usd.PrimRange(root, Usd.TraverseInstanceProxies()):
+        if not prim.HasAPI(UsdPhysics.CollisionAPI) or UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get() is False:
+            continue
+        box = cache.ComputeUntransformedBound(prim).ComputeAlignedBox()
+        if box.IsEmpty():
+            raise ValueError(f"empty gripper return collision bounds: {prim.GetPath()}")
+        transform = transforms.GetLocalToWorldTransform(prim)
+        for bits in itertools.product((0, 1), repeat=3):
+            corner = Gf.Vec3d(*[box.GetMax()[i] if bits[i] else box.GetMin()[i] for i in range(3)])
+            points.append(np.array(transform.Transform(corner))*meters)
+        paths.append(str(prim.GetPath()))
+    points = np.array(points)
+    if not paths or points.ndim != 2 or points.shape[1] != 3 or not np.isfinite(points).all():
+        raise ValueError("finite measured gripper collision bounds required for empty return")
+    return points, paths
+
+
+def object_top_world_z(object_pose, fixture):
+    pose = np.array(object_pose, dtype=float)
+    if pose.shape != (4, 4) or not np.isfinite(pose).all():
+        raise ValueError("finite placed-object pose required")
+    return float(pose[2, 3]+np.abs(pose[2, :3]) @ (np.array(fixture["dimensions_base_m"])/2))
+
+
+def plan_empty_return(model, world_points, measured_q, arm_start, across, fixture, object_pose):
+    """After release/retreat, raise J2 until the entire open gripper clears the placed block.
+
+    Snapshot measured open geometry in TCP coordinates. Do not use the TCP marker height
+    as a proxy for the lowest finger/body. No object transform is authored here.
+    """
+    points = np.asarray(world_points, float)
+    if points.ndim != 2 or points.shape[1] != 3 or len(points) < 8 or not np.isfinite(points).all():
+        raise ValueError("measured collision corners required for empty return")
+    current_tcp = model.predict(measured_q)[1]
+    local = (np.linalg.inv(current_tcp) @ np.c_[points, np.ones(len(points))].T).T
+    obstacle_top = max(object_top_world_z(object_pose, fixture), fixture["support_top_world_z_m"],
+                       fixture["transfer"]["target_support_top_world_z_m"])
+    across = np.array(across, dtype=float)
+    baseline = (model.predict(across)[1] @ local.T).T[:, 2]
+    for degrees in range(1, 9):
+        for sign in (-1, 1):
+            high = across.copy()
+            high[1] = arm_start[1]+sign*math.radians(degrees)
+            home_high = high.copy(); home_high[0] = arm_start[0]
+            if any(np.any(q < model.limits[:, 0]) or np.any(q > model.limits[:, 1]) for q in (high, home_high)):
+                continue
+            # Reject a proposed raising motion that lowers any measured collider corner.
+            if any(np.min((model.predict(across+(high-across)*a)[1] @ local.T).T[:, 2]-baseline) < -.001
+                   for a in np.linspace(0, 1, 21)):
+                continue
+            minimum = min(float(np.min((model.predict(high+(home_high-high)*a)[1] @ local.T).T[:, 2])-obstacle_top)
+                          for a in np.linspace(0, 1, 41))
+            if minimum >= .008:
+                return high, home_high, {"joint": "J2", "delta_deg": sign*degrees,
+                                        "high_target_rad": high.tolist(), "home_high_target_rad": home_high.tolist(),
+                                        "obstacle_top_world_z_m": obstacle_top,
+                                        "minimum_predicted_gripper_clearance_m": minimum,
+                                        "collision_corner_count": len(points), "return_samples": 41,
+                                        "scope": "measured open gripper bounds; post-release empty return only"}
+    raise ValueError("no authored-limit-safe empty J2 raise within 8deg clears the placed block by 8mm")
