@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 import sys
 import time
-from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -42,8 +41,12 @@ def main():
         parser.error("--transfer-test requires --grasp-test --mounted-on-fanuc")
     if not 0 < args.arm_amplitude_deg <= 2:
         parser.error("--arm-amplitude-deg must be finite and in (0, 2]")
+    from fdw_sim.visualization.experiment_log import ExperimentLog
+    diagnostics = ExperimentLog(args.output_dir)
+    print(f"[GRIPPER MOTION] durable events: {diagnostics.events}", flush=True)
     from isaacsim import SimulationApp
     app = SimulationApp({"headless": False})
+    exit_code = 2
     world, source = None, args.usd
     setup = {}
     mount, arm_guard = None, None
@@ -365,7 +368,7 @@ def main():
                     grasp_result = run_contact_grasp(
                         grasp_command, grasp_observe, grasp_step, world.pause, phase_color, fixture,
                         arm_guard.start, lift_target, open_rad, open_rad+np.deg2rad(10),
-                        dt=dt, realtime=True, is_running=app.is_running)
+                        dt=dt, realtime=True, is_running=app.is_running, progress=diagnostics.event)
                     # Keep subscription and tensor owners alive through the last measurement.
                     report["grasp_test"] = grasp_result
                     report["status"] = grasp_result["status"]
@@ -380,6 +383,7 @@ def main():
                     setup["position_servo"] = servo.diagnostics()
                     setup["mount_final_observation"] = mount_frame_observation(stage, mount)
         except (Exception, KeyboardInterrupt) as exc:
+            diagnostics.exception("experiment execution", exc)
             if report is None:
                 report = {"status": "FAILED", "errors": [],
                           "motion_commands_issued": False, "physical_grasp_verified": False}
@@ -391,7 +395,10 @@ def main():
                 report["returned_to_start"] = False
             report["errors"].append(f"{type(exc).__name__}: {exc}")
             if arm_guard is not None:
-                setup["arm_hold"] = arm_guard.diagnostics()
+                try:
+                    setup["arm_hold"] = arm_guard.diagnostics()
+                except Exception as diagnostic_error:
+                    report["errors"].append(f"arm diagnostic failed: {diagnostic_error}")
             if world is not None:
                 try:
                     world.pause()
@@ -399,16 +406,18 @@ def main():
                 except Exception as pause_error:
                     report["errors"].append(f"pause failed: {pause_error}")
         report.update(source_usd=source, setup=setup)
-        args.output_dir.mkdir(parents=True, exist_ok=True)
-        output = args.output_dir / (time.strftime("gripper_motion_%Y%m%d_%H%M%S_") + uuid4().hex[:8] + ".json")
-        output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
-        print(f"[GRIPPER MOTION] saved: {output}")
+        output = diagnostics.save(report)
+        print(f"[GRIPPER MOTION] saved: {output}", flush=True)
         summary = {k: v for k, v in report.items() if k != "samples"}
         if "arm_motion" in summary:
             summary["arm_motion"] = {k: v for k, v in summary["arm_motion"].items() if k != "samples"}
         if "grasp_test" in summary:
             summary["grasp_test"] = {k: v for k, v in summary["grasp_test"].items() if k != "samples"}
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
+        exit_code = 0 if report["status"] in (
+            "PASSED_UNLOADED_GRIPPER_CYCLE", "PASSED_MOUNTED_UNLOADED_GRIPPER_CYCLE",
+            "PASSED_MOUNTED_ARM_TCP_TEST", "PASSED_SIMULATED_CONTACT_GRASP_RELEASE",
+            "PASSED_SIMULATED_GRASP_TRANSFER_PLACE") else 2
         if args.keep_alive:
             print("[GRIPPER MOTION] paused viewer; close window or Ctrl+C to exit.", flush=True)
             try:
@@ -416,11 +425,25 @@ def main():
                     app.update()
             except KeyboardInterrupt:
                 pass
-        return 0 if report["status"] in ("PASSED_UNLOADED_GRIPPER_CYCLE", "PASSED_MOUNTED_UNLOADED_GRIPPER_CYCLE",
-                                        "PASSED_MOUNTED_ARM_TCP_TEST", "PASSED_SIMULATED_CONTACT_GRASP_RELEASE",
-                                        "PASSED_SIMULATED_GRASP_TRANSFER_PLACE") else 2
+        return exit_code
+    except BaseException as exc:
+        exit_code = 2
+        # Kit fast shutdown can terminate the process before Python prints an escaping exception.
+        diagnostics.exception("unhandled exception before app.close", exc)
+        if not diagnostics.output.exists():
+            try:
+                diagnostics.save({"status": "FAILED", "physical_grasp_verified": False,
+                                  "transfer_verified": False, "target_placement_verified": False,
+                                  "report_incomplete": True, "errors": [f"{type(exc).__name__}: {exc}"],
+                                  "events_file": str(diagnostics.events), "traceback_file": str(diagnostics.trace)})
+            except Exception as save_error:
+                print(f"[GRIPPER ERROR] Emergency result save failed: {save_error}", file=sys.stderr, flush=True)
+        raise
     finally:
-        app.close()
+        try:
+            diagnostics.event("APP_CLOSE_REQUESTED", exit_code=exit_code)
+        finally:
+            app.close(exit_code=exit_code)
 
 
 if __name__ == "__main__":

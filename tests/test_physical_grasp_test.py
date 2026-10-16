@@ -155,7 +155,7 @@ def test_lift_plan_selects_upward_motion_and_rejects_limits_or_insufficient_rise
         plan_lift(m, np.zeros(6))
 
 
-def fake_run(fault=None):
+def fake_run(fault=None, **options):
     """Fixture drives fake observations by phase; this tests gating, never contact physics."""
     state = {"phase": None, "grip": .07, "arm": np.zeros(6), "paused": False, "steps": 0}
     def color(phase): state["phase"] = phase
@@ -180,7 +180,7 @@ def fake_run(fault=None):
     def stop(): state["paused"] = True
     target = np.zeros(6); target[4] = math.radians(2)
     result = run_contact_grasp(command, observe, step, stop, color, fixture(), np.zeros(6), target,
-                               .07, .24, dt=1/120, is_running=lambda: fault != "closed_viewer")
+                               .07, .24, dt=1/120, is_running=lambda: fault != "closed_viewer", **options)
     return result, state
 
 

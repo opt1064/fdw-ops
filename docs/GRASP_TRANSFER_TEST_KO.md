@@ -10,7 +10,7 @@
 cd ~/isaac_workspace/projects/fdw-ops-review
 git status -sb
 git pull --ff-only origin fix/fdw-quality-disposition-base-pose
-"$ISAACSIM_PYTHON_EXE" scripts/run_gripper_motion_test.py --mounted-on-fanuc --grasp-test --transfer-test --drive-damping-scale 10 --keep-alive
+bash scripts/run_gripper_transfer_review.sh
 ```
 
 처음에는 기존 무부하 개폐 2회가 진행된다. 이후 **파란 출발 받침대**, **보라색 목표 받침대**, **노란 시험 블록**이 나타난다. 자동 카메라는 그리퍼와 두 받침대가 함께 보이도록 조정한다. 왼쪽 손가락 끝은 파란색, 오른쪽은 주황색, TCP 후보는 청록색으로 표시한다. 블록은 운반 중 녹색, 개방 중 주황색, 해제 후 복귀 중 하늘색, 실패 시 빨간색으로 바뀐다. 색상은 단계 표시이며 통과 판정 자체는 물리 피드백을 사용한다.
@@ -43,3 +43,13 @@ git pull --ff-only origin fix/fdw-quality-disposition-base-pose
 - 실패하면 물리 진행을 멈춘다. 물체를 자동으로 열어 떨어뜨리거나 옮겨 놓지 않는다. 로컬 CPU 테스트와 계산 경로 점검은 실제 Isaac 물리 이송 성공의 증거가 아니다.
 
 기존 제자리 파지 시험은 [CONTACT_GRASP_TEST_KO.md](CONTACT_GRASP_TEST_KO.md)의 명령으로 계속 실행할 수 있다.
+
+## 자동 종료와 실패 기록
+
+리뷰 실행 스크립트는 동일 그리퍼 시험이 이미 실행 중이면 중복 시작을 차단한다. 표준 출력·오류를 `fdw_sim/logs/gripper_transfer_console_*.log`에 함께 기록하며, 종료 시 `SIM_EXIT_CODE`를 남긴다. 성공은 0, 검증 실패는 2이다. 창이 계속 열려 있는 동안에는 실행 스크립트도 대기한다.
+
+시뮬레이터 시작 전에 고유 실행 ID를 만든다. 같은 ID의 `.json`은 최종 결과, `.events.jsonl`은 즉시 저장하는 단계 시작·완료·0.5초 간격 측정 기록이다. `.traceback.txt`는 Python 예외가 발생한 경우 생성한다. 부분 이벤트의 `IN_PROGRESS`는 성공 표시가 아니다. 강제 프로세스 종료나 네이티브 충돌로 최종 JSON이 없더라도 마지막 저장된 단계와 측정값을 확인할 수 있다. 이 경우 콘솔 로그와 `.events.jsonl`을 함께 확보한다.
+
+NumPy 목표값으로 제어한 직후 실패하면 마지막 제어 기록에 NumPy 불리언이 남아 최종 JSON 저장까지 실패하던 문제를 수정했다. 원래 파지 오류를 직렬화 오류가 가리지 않도록 제어 기록을 기본 Python 형식으로 남기며, 예상하지 못한 직렬화 오류에도 원래 오류를 포함한 불완전 실패 JSON을 별도로 보존한다. 처리하지 못한 예외는 `app.close()` 전에 출력·저장하고, Isaac Sim 6.1의 `close(exit_code=...)`로 실패 종료 코드를 유지한다. API 근거: [NVIDIA SimulationApp 공개 API](https://docs.isaacsim.omniverse.nvidia.com/6.1.0/py/source/extensions/isaacsim.simulation_app/config/python_api.html).
+
+이 수정은 실패 정보가 사라지는 경로를 재현·보완한 것이다. 2026-10-16 업로드 로그에 기록되지 않은 실제 `LIFT` 물리 중단 사유는 새 실행의 오류·측정값으로 확인해야 하며, 수평 이송 통과를 의미하지 않는다.

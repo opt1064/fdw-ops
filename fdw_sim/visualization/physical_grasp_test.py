@@ -2,6 +2,7 @@
 import itertools
 import math
 import time
+import traceback
 
 import numpy as np
 
@@ -232,7 +233,8 @@ class LoadedTestBlock:
 
 
 def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_start, lift_target,
-                      open_rad, close_rad, *, dt, realtime=False, is_running=lambda: True):
+                      open_rad, close_rad, *, dt, realtime=False, is_running=lambda: True,
+                      progress=lambda event, **data: None):
     """Require bilateral contact, unsupported retention, gravity-driven fall, and supported release."""
     report = {"status": "FAILED", "errors": [], "phases": [], "samples": [], "motion_commands_issued": False,
               "physical_grasp_verified": False, "tcp_calibration_verified": False, "release_verified": False,
@@ -281,6 +283,9 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
                 raise RuntimeError("invalid target support clearance/penetration")
             if round(elapsed/dt) % max(1, round(.1/dt)) == 0:
                 report["samples"].append({"phase": phase, "time_sec": elapsed, **data})
+            if round(elapsed/dt) % max(1, round(.5/dt)) == 0:
+                progress("MEASUREMENT", phase=phase, time_sec=elapsed, status="IN_PROGRESS",
+                         command_gripper_rad=float(grip), command_arm_rad=np.asarray(arm).tolist(), feedback=data)
             if realtime:
                 time.sleep(max(0, dt-(time.monotonic()-started)))
             return data
@@ -304,6 +309,7 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
                               ("OPEN_RELEASE", 8.), ("RETREAT_EMPTY", 8.),
                               ("RETURN_ABOVE_SOURCE", 10.), ("RETURN_EMPTY", 8.)]
         for phase, timeout in specs:
+            progress("PHASE_STARTED", phase=phase, status="IN_PROGRESS", time_sec=elapsed)
             phase_color(phase)
             print(f"[PHYSICAL GRASP] {phase}", flush=True)
             row = {"phase": phase, "status": "FAILED"}
@@ -398,6 +404,8 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
                         release_z = data["object_world_matrix_m"][2][3]
                         row["bilateral_hold_sec"] = bilateral_time
                     if phase == "HOLD_AT_TARGET": release_z = data["object_world_matrix_m"][2][3]
+                    progress("PHASE_COMPLETED", phase=phase, status="PASSED", time_sec=elapsed,
+                             last_feedback=data)
                     print(f"[PHYSICAL GRASP] {phase}: PASSED", flush=True)
                     break
             else:
@@ -410,6 +418,12 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
                           target_placement_verified=True, transfer_plan=transfer)
     except (Exception, KeyboardInterrupt) as exc:
         report["errors"].append(f"{type(exc).__name__}: {exc}")
+        print(f"[PHYSICAL GRASP] FAILED: {type(exc).__name__}: {exc}", flush=True)
+        try:
+            progress("GRASP_FAILED", status="FAILED", errors=list(report["errors"]), phases=report["phases"],
+                     traceback=traceback.format_exc())
+        except Exception as diagnostic_error:
+            report["errors"].append(f"failure checkpoint failed: {diagnostic_error}")
         try:
             phase_color("FAILED")
         except Exception as color_error:

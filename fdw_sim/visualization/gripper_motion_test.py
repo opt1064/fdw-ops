@@ -160,6 +160,7 @@ class PrimaryPositionServo:
         self.last = {}
 
     def command(self, desired):
+        desired = float(desired)  # NumPy targets must not leave np.bool_ in JSON diagnostics.
         measured = float(self.read_joint())
         if not math.isfinite(desired) or not math.isfinite(measured) or not self.limits[0] <= desired <= self.limits[1]:
             raise ValueError("invalid primary servo desired/measured position")
