@@ -296,9 +296,12 @@ def main():
                     lift_target, lift_plan = plan_lift(model, current_arm)
                     fixture["lift_plan"] = lift_plan
                     if args.transfer_test:
-                        from fdw_sim.visualization.grasp_transfer_test import plan_transfer, create_target_support
+                        from fdw_sim.visualization.grasp_transfer_test import plan_transfer, create_target_support, audit_target_clearance
                         transfer_plan = plan_transfer(model, current_arm, lift_target, fixture)
                         create_target_support(stage, fixture, transfer_plan)
+                        audit = audit_target_clearance(stage, fixture, [mount["robot_path"], mount["gripper_root_path"]])
+                        print(f"[GRASP TRANSFER] initial target/robot clearance: {audit['minimum_aabb_distance_m']*1000:.1f}mm "
+                              f"({audit['checked_colliders']} colliders checked).", flush=True)
                         print(f"[GRASP TRANSFER] BLUE source -> PURPLE target; "
                               f"{transfer_plan['horizontal_distance_m']*1000:.1f}mm horizontal arc; "
                               "lower, open, retreat and return.", flush=True)
@@ -354,6 +357,7 @@ def main():
                         base = _usd_rigid_matrix(UsdGeom.XformCache(), stage.GetPrimAtPath(setup["base_path"]), meters)
                         data.update(object_relative_base_matrix_m=(np.linalg.inv(base) @ np.array(data["object_world_matrix_m"])).tolist(),
                                     contacts=contacts.read(), gripper_rad=primary,
+                                    gripper_speed_rad_s=float(read_velocity()),
                                     arm_target_error_rad=float(np.max(np.abs(q-arm_guard.target))),
                                     arm_speed_rad_s=float(np.max(np.abs(arm_guard.velocities()))),
                                     tcp_candidate_error=tcp_error)

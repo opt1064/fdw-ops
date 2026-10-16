@@ -13,6 +13,8 @@ def plan_transfer(model, start, lifted, fixture):
     half = np.array(fixture["dimensions_base_m"])/2
     support_dim = np.array(fixture["support_dimensions_world_m"])
     source_half = np.abs(initial[:3, :3]) @ half
+    target_dimensions = support_dim.copy()
+    target_dimensions[1] = min(float(target_dimensions[1]), .02)
     candidates = []
     for sign in (-1, 1):
         down = start.copy(); down[0] += sign*math.radians(8)
@@ -27,7 +29,7 @@ def plan_transfer(model, start, lifted, fixture):
         offset = target[:2, 3]-initial[:2, 3]
         distance = float(np.linalg.norm(offset))
         # Do not put the destination under any part of the initial block.
-        target_half = np.abs(delta[:3, :3]) @ (support_dim/2)
+        target_half = np.abs(delta[:3, :3]) @ (target_dimensions/2)
         separation = np.abs(offset)-source_half[:2]-target_half[:2]
         if not .10 <= distance <= .15 or max(separation) < .01:
             continue
@@ -49,6 +51,7 @@ def plan_transfer(model, start, lifted, fixture):
                                "target_object_world_matrix_m": target.tolist(),
                                "target_support_top_world_z_m": target_top,
                                "target_support_rotation": delta[:3, :3].tolist(),
+                               "target_support_dimensions_m": target_dimensions.tolist(),
                                "horizontal_distance_m": distance, "j1_delta_deg": sign*8,
                                "sweep_samples": 41, "minimum_predicted_sweep_clearance_m": minimum_clearance})
     if not candidates:
@@ -73,6 +76,46 @@ def create_target_support(stage, fixture, plan):
     rotation = np.array(plan["target_support_rotation"])
     quat = Gf.Matrix3d(*rotation.T.flatten().tolist()).ExtractRotation().GetQuat()
     target.AddOrientOp(UsdGeom.XformOp.PrecisionDouble, opSuffix="transfer").Set(quat)
-    target.AddScaleOp(opSuffix="transfer").Set(Gf.Vec3f(*(np.array(fixture["support_dimensions_world_m"])/fixture["meters_per_unit"])))
+    target.AddScaleOp(opSuffix="transfer").Set(Gf.Vec3f(*(np.array(plan["target_support_dimensions_m"])/fixture["meters_per_unit"])))
     target.GetDisplayColorAttr().Set([Gf.Vec3f(.55, .15, .85)])
     fixture.update(target_support_path=path, transfer=plan)
+
+
+def audit_target_clearance(stage, fixture, robot_roots):
+    """Conservative measured AABBs at the initial pose, including invisible collision proxies.
+
+    This checks the new static fixture before physics incorporation, not the full swept arm.
+    """
+    from pxr import Usd, UsdGeom, UsdPhysics
+    cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render,
+                                                    UsdGeom.Tokens.proxy, UsdGeom.Tokens.guide], False, True)
+    meters = fixture["meters_per_unit"]
+    def bound(prim):
+        box = cache.ComputeWorldBound(prim).ComputeAlignedBox()
+        values = np.array([box.GetMin(), box.GetMax()])*meters
+        if box.IsEmpty() or not np.isfinite(values).all():
+            raise ValueError(f"cannot measure collision clearance: {prim.GetPath()}")
+        return values
+    target = bound(stage.GetPrimAtPath(fixture["target_support_path"]))
+    checked, nearest, minimum = 0, None, math.inf
+    for path in robot_roots:
+        root = stage.GetPrimAtPath(path)
+        if not root:
+            raise ValueError(f"robot collision root missing: {path}")
+        for prim in Usd.PrimRange(root, Usd.TraverseInstanceProxies()):
+            if not prim.HasAPI(UsdPhysics.CollisionAPI) or UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get() is False:
+                continue
+            box = bound(prim)
+            gap = np.maximum(np.maximum(target[0]-box[1], box[0]-target[1]), 0.)
+            distance = float(np.linalg.norm(gap))
+            checked += 1
+            if distance < minimum:
+                minimum, nearest = distance, str(prim.GetPath())
+            if distance < .003:
+                raise RuntimeError(f"target pedestal overlaps or is within 3mm of robot collider: {prim.GetPath()} ({distance*1000:.3f}mm)")
+    if not checked:
+        raise ValueError("no robot collision geometry measured for target pedestal")
+    result = {"checked_colliders": checked, "nearest_collider": nearest, "minimum_aabb_distance_m": minimum,
+              "scope": "initial pose conservative bounds only; not full trajectory collision validation"}
+    fixture["target_initial_clearance_audit"] = result
+    return result

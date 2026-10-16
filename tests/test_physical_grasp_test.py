@@ -174,9 +174,14 @@ def fake_run(fault=None, **options):
         if fault == "slip" and phase == "HOLD_UNSUPPORTED": relative[0, 3] = .01
         contacts = {"left": 1. if both else 0., "right": 1. if both else 0., "support": .4905 if lift < .001 else 0.}
         if fault == "one_finger": contacts["right"] = 0
+        if fault == "weak_grasp" and both: contacts.update(left=.5, right=.5)
+        if fault == "force_still_building" and both:
+            value = 2+math.sin(state["steps"]*.2)
+            contacts.update(left=value, right=value)
         return dict(object_world_matrix_m=pose.tolist(), object_relative_base_matrix_m=relative.tolist(),
-                    contacts=contacts, support_clearance_m=lift, object_speed_m_s=0.,
-                    gripper_rad=grip, arm_target_error_rad=0., arm_speed_rad_s=0.)
+                    contacts=contacts, support_clearance_m=lift, object_speed_m_s=.005 if fault == "moving_object" else 0.,
+                    gripper_rad=grip, gripper_speed_rad_s=.02 if fault == "moving_gripper" else 0.,
+                    arm_target_error_rad=0., arm_speed_rad_s=.02 if fault == "moving_arm" else 0.)
     def stop(): state["paused"] = True
     target = np.zeros(6); target[4] = math.radians(2)
     result = run_contact_grasp(command, observe, step, stop, color, fixture(), np.zeros(6), target,
@@ -198,3 +203,18 @@ def test_missing_physical_evidence_never_passes(fault):
     assert r["status"] == "FAILED" and r["errors"]
     assert not r["physical_grasp_verified"] and not r["release_verified"]
     assert s["paused"] and r["passed_phases"] < 6
+
+
+@pytest.mark.parametrize("fault", ["moving_arm", "moving_gripper", "moving_object", "weak_grasp", "force_still_building"])
+def test_unsettled_grasp_never_starts_lift(fault):
+    r, s = fake_run(fault)
+    assert r["status"] == "FAILED" and s["paused"]
+    assert r["phases"][-1]["phase"] == "CLOSE_CONTACT"
+    assert not any(p["phase"] == "LIFT" for p in r["phases"])
+
+
+def test_grasp_settles_for_one_second_before_lift():
+    r, _ = fake_run()
+    close = r["phases"][1]
+    assert close["elapsed_sec"] >= 4.99 and close["settling_criteria"]["stable_sec"] == 1
+    assert r["phases"][2]["elapsed_sec"] >= 6.49

@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
-from fdw_sim.visualization.grasp_transfer_test import plan_transfer, create_target_support
+from fdw_sim.visualization.grasp_transfer_test import plan_transfer, create_target_support, audit_target_clearance
 from fdw_sim.visualization.physical_grasp_test import ContactEvidence, run_contact_grasp
 from fdw_sim.visualization.mounted_arm_motion_test import MovingArmController
 from test_mounted_arm_motion_test import Plant
@@ -38,6 +38,7 @@ def test_transfer_plan_requires_real_distance_separate_support_and_clearance():
     plan = plan_transfer(Model(), start, lift, fixture())
     assert .10 <= plan["horizontal_distance_m"] <= .15
     assert abs(plan["j1_delta_deg"]) == 8
+    assert plan["target_support_dimensions_m"][1] == .02
     assert np.array(plan["down_rad"])[4] == 0
     assert plan["sweep_samples"] == 41
     model = Model(); model.limits = np.tile([-.01, .01], (6, 1))
@@ -84,6 +85,29 @@ def test_contacts_distinguish_source_from_target_and_clear_each_step():
     assert evidence.read()["target_support"] == 0
 
 
+def test_target_clearance_audit_rejects_hidden_robot_overlap_and_missing_geometry():
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.SetStageMetersPerUnit(stage, 1)
+    target = UsdGeom.Cube.Define(stage, "/Target")
+    target.CreateSizeAttr(.02)
+    f = {"target_support_path": "/Target", "meters_per_unit": 1.}
+    collider = UsdGeom.Cube.Define(stage, "/Robot/Collider")
+    collider.CreateSizeAttr(.02)
+    move = collider.AddTranslateOp()
+    move.Set(Gf.Vec3d(.1, 0, 0))
+    UsdPhysics.CollisionAPI.Apply(collider.GetPrim())
+    collider.CreateVisibilityAttr(UsdGeom.Tokens.invisible)
+    audit = audit_target_clearance(stage, f, ["/Robot"])
+    assert audit["checked_colliders"] == 1
+    assert audit["minimum_aabb_distance_m"] == pytest.approx(.08)
+    move.Set(Gf.Vec3d(.01, 0, 0))
+    with pytest.raises(RuntimeError, match="overlaps"):
+        audit_target_clearance(stage, f, ["/Robot"])
+    UsdPhysics.CollisionAPI(collider.GetPrim()).CreateCollisionEnabledAttr(False)
+    with pytest.raises(ValueError, match="no robot collision"):
+        audit_target_clearance(stage, f, ["/Robot"])
+
+
 def test_transfer_controller_expands_only_explicit_j1_envelope():
     plant = Plant()
     default = MovingArmController(plant, 2)
@@ -125,7 +149,7 @@ def run_fake(fault=None):
         if fault == "retained_finger" and released: forces["left"] = .1
         return dict(object_world_matrix_m=pose.tolist(), object_relative_base_matrix_m=relative.tolist(),
                     object_speed_m_s=0., support_clearance_m=rise, target_support_clearance_m=rise,
-                    contacts=forces, gripper_rad=grip, arm_target_error_rad=0., arm_speed_rad_s=0.)
+                    contacts=forces, gripper_rad=grip, gripper_speed_rad_s=0., arm_target_error_rad=0., arm_speed_rad_s=0.)
     def stop(): s["paused"] = True
     result = run_contact_grasp(command, observe, lambda: None, stop, color, f, start, lift,
                                .07, .24, dt=1/120)
