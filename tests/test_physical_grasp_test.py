@@ -8,7 +8,7 @@ from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
 from fdw_sim.visualization.physical_grasp_test import (
     create_grasp_fixture, pad_bounds_in_base, ContactEvidence, LoadedTestBlock,
-    run_contact_grasp, plan_lift,
+    run_contact_grasp, plan_lift, MeasuredMotionWindow,
 )
 
 
@@ -158,7 +158,7 @@ def test_lift_plan_selects_upward_motion_and_rejects_limits_or_insufficient_rise
 def fake_run(fault=None, **options):
     """Fixture drives fake observations by phase; this tests gating, never contact physics."""
     state = {"phase": None, "grip": .07, "arm": np.zeros(6), "paused": False, "steps": 0}
-    def color(phase): state["phase"] = phase
+    def color(phase): state.update(phase=phase, phase_start_step=state["steps"])
     def command(grip, arm): state.update(grip=grip, arm=arm.copy())
     def step(): state["steps"] += 1
     def observe():
@@ -171,6 +171,13 @@ def fake_run(fault=None, **options):
         if fault == "attached_release" and phase == "OPEN_RELEASE": lift = .012
         pose = np.eye(4); pose[2, 3] = .5+lift
         relative = np.eye(4); relative[2, 3] = .5
+        phase_time = (state["steps"]-state["phase_start_step"])/120
+        measured_grip = grip
+        if phase == "CLOSE_CONTACT":
+            if fault == "moving_gripper": measured_grip += .02*max(0, phase_time-4)
+            if fault == "moving_object": pose[0, 3] = relative[0, 3] = .005*max(0, phase_time-4)
+            if fault == "oscillating_object": pose[0, 3] = relative[0, 3] = .001*math.sin(2*math.pi*phase_time/.25)
+            if fault == "oscillating_gripper": measured_grip += .01*math.sin(2*math.pi*phase_time/.25)
         if fault == "slip" and phase == "HOLD_UNSUPPORTED": relative[0, 3] = .01
         contacts = {"left": 1. if both else 0., "right": 1. if both else 0., "support": .4905 if lift < .001 else 0.}
         if fault == "one_finger": contacts["right"] = 0
@@ -179,8 +186,8 @@ def fake_run(fault=None, **options):
             value = 2+math.sin(state["steps"]*.2)
             contacts.update(left=value, right=value)
         return dict(object_world_matrix_m=pose.tolist(), object_relative_base_matrix_m=relative.tolist(),
-                    contacts=contacts, support_clearance_m=lift, object_speed_m_s=.005 if fault == "moving_object" else 0.,
-                    gripper_rad=grip, gripper_speed_rad_s=.02 if fault == "moving_gripper" else 0.,
+                    contacts=contacts, support_clearance_m=lift, object_speed_m_s=.005 if fault in ("moving_object", "solver_velocity_jitter") else 0.,
+                    gripper_rad=measured_grip, gripper_speed_rad_s=.025 if fault in ("moving_gripper", "solver_velocity_jitter") else 0.,
                     arm_target_error_rad=0., arm_speed_rad_s=.02 if fault == "moving_arm" else 0.)
     def stop(): state["paused"] = True
     target = np.zeros(6); target[4] = math.radians(2)
@@ -205,7 +212,8 @@ def test_missing_physical_evidence_never_passes(fault):
     assert s["paused"] and r["passed_phases"] < 6
 
 
-@pytest.mark.parametrize("fault", ["moving_arm", "moving_gripper", "moving_object", "weak_grasp", "force_still_building"])
+@pytest.mark.parametrize("fault", ["moving_arm", "moving_gripper", "moving_object", "weak_grasp", "force_still_building",
+                                   "oscillating_object", "oscillating_gripper"])
 def test_unsettled_grasp_never_starts_lift(fault):
     r, s = fake_run(fault)
     assert r["status"] == "FAILED" and s["paused"]
@@ -218,3 +226,29 @@ def test_grasp_settles_for_one_second_before_lift():
     close = r["phases"][1]
     assert close["elapsed_sec"] >= 4.99 and close["settling_criteria"]["stable_sec"] == 1
     assert r["phases"][2]["elapsed_sec"] >= 6.49
+
+
+def test_solver_velocity_jitter_alone_does_not_reject_measured_static_grasp():
+    r, _ = fake_run("solver_velocity_jitter")
+    assert r["status"] == "PASSED_SIMULATED_CONTACT_GRASP_RELEASE", r["errors"]
+    data = r["phases"][1]["last_feedback"]
+    assert data["gripper_speed_rad_s"] == .025 and data["object_speed_m_s"] == .005
+    assert data["settling_motion"]["gripper_speed_rad_s"] == 0
+    assert data["settling_motion"]["object_speed_m_s"] == 0
+    assert all(r["phases"][1]["settling_checks"].values())
+
+
+def test_measured_window_has_warmup_and_rejects_missing_feedback():
+    window = MeasuredMotionWindow()
+    pose = np.eye(4)
+    assert not window.update(0., .2, pose)["ready"]
+    pose[0, 3] = .001
+    result = window.update(.25, .21, pose)
+    assert result["ready"]
+    assert result["gripper_speed_rad_s"] == pytest.approx(.04)
+    assert result["object_speed_m_s"] == pytest.approx(.004)
+    assert result["object_excursion_m"] == pytest.approx(.001)
+    with pytest.raises(ValueError, match="feedback/time"):
+        window.update(.25, .21, pose)
+    with pytest.raises(ValueError, match="feedback/time"):
+        window.update(.3, float("nan"), pose)

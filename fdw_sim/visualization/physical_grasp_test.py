@@ -3,11 +3,34 @@ import itertools
 import math
 import time
 import traceback
+from collections import deque
 
 import numpy as np
 
 from fdw_sim.visualization.robot_model_export import _usd_rigid_matrix
 from fdw_sim.visualization.lula_model_validation import _pose_error
+
+
+class MeasuredMotionWindow:
+    """Net motion and excursion from actual poses; raw solver velocities stay in the report."""
+    def __init__(self, seconds=.25):
+        self.seconds, self.samples = seconds, deque()
+
+    def update(self, timestamp, gripper_rad, object_pose):
+        position = np.asarray(object_pose, float)[:3, 3]
+        if (not math.isfinite(timestamp) or not math.isfinite(gripper_rad) or not np.isfinite(position).all()
+                or (self.samples and timestamp <= self.samples[-1][0])):
+            raise ValueError("invalid measured motion window feedback/time")
+        self.samples.append((float(timestamp), float(gripper_rad), position.copy()))
+        while len(self.samples) > 1 and timestamp-self.samples[1][0] >= self.seconds:
+            self.samples.popleft()
+        span = timestamp-self.samples[0][0]
+        ready = span+1e-9 >= self.seconds
+        return {"ready": bool(ready), "window_sec": float(span),
+                "gripper_speed_rad_s": float(abs(gripper_rad-self.samples[0][1])/span) if ready else 0.,
+                "object_speed_m_s": float(np.linalg.norm(position-self.samples[0][2])/span) if ready else 0.,
+                "gripper_excursion_rad": float(np.ptp([s[1] for s in self.samples])),
+                "object_excursion_m": float(np.linalg.norm(np.ptp(np.array([s[2] for s in self.samples]), axis=0)))}
 
 
 def plan_lift(model, start):
@@ -248,6 +271,7 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
                 or not np.isfinite(lift_target).all() or np.max(np.abs(lift_target-arm_start)) > math.radians(2)+1e-6):
             raise ValueError("invalid bounded lift target")
         elapsed = 0.
+        motion_window = MeasuredMotionWindow()
         transfer = fixture.get("transfer")
         across = np.array(transfer["across_rad"]) if transfer else lift_target
         down = np.array(transfer["down_rad"]) if transfer else lift_target
@@ -281,6 +305,7 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
                 raise RuntimeError("invalid test contact force")
             if transfer and (not math.isfinite(data["target_support_clearance_m"]) or data["target_support_clearance_m"] < -.002):
                 raise RuntimeError("invalid target support clearance/penetration")
+            data["settling_motion"] = motion_window.update(elapsed, float(data["gripper_rad"]), pose)
             if round(elapsed/dt) % max(1, round(.1/dt)) == 0:
                 report["samples"].append({"phase": phase, "time_sec": elapsed, **data})
             if round(elapsed/dt) % max(1, round(.5/dt)) == 0:
@@ -362,27 +387,39 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
                     if transfer: good = good and data["contacts"]["target_support"] < .01
                     needed = .5
                 elif phase == "CLOSE_CONTACT":
-                    good = (a == 1 and both and min(data["contacts"]["left"], data["contacts"]["right"]) >= 1.
-                            and abs(data["gripper_rad"]-open_rad) >= math.radians(1)
-                            and abs(data["gripper_speed_rad_s"]) <= math.radians(.5)
-                            and data["arm_speed_rad_s"] <= math.radians(.2)
-                            and data["arm_target_error_rad"] <= math.radians(.1)
-                            and data["object_speed_m_s"] <= .002)
+                    motion = data["settling_motion"]
+                    checks = {"close_ramp_complete": a == 1, "bilateral_contact": both,
+                              "contact_force": min(data["contacts"]["left"], data["contacts"]["right"]) >= 1.,
+                              "measured_closing": abs(data["gripper_rad"]-open_rad) >= math.radians(1),
+                              "window_ready": motion["ready"],
+                              "gripper_measured_speed": motion["gripper_speed_rad_s"] <= math.radians(.5),
+                              "object_measured_speed": motion["object_speed_m_s"] <= .002,
+                              "gripper_excursion": motion["gripper_excursion_rad"] <= math.radians(.5),
+                              "object_excursion": motion["object_excursion_m"] <= .0005,
+                              "arm_speed": data["arm_speed_rad_s"] <= math.radians(.2),
+                              "arm_target": data["arm_target_error_rad"] <= math.radians(.1)}
+                    good = all(checks.values())
                     # Do not declare a grasp while contact forces are still building or
                     # the block is still moving between the pads. Anchor is frozen for 1s.
                     if good:
                         pose = np.array(data["object_relative_base_matrix_m"])
                         forces = np.array([data["contacts"]["left"], data["contacts"]["right"]])
                         if close_anchor is None:
-                            close_anchor = (pose.copy(), forces.copy())
+                            close_anchor = (pose.copy(), forces.copy(), float(data["gripper_rad"]))
                         settled = _pose_error(pose, close_anchor[0])
                         if (settled["position_error_m"] > .0005 or settled["orientation_error_rad"] > math.radians(.5)
-                                or np.max(np.abs(forces-close_anchor[1])/close_anchor[1]) > .2):
+                                or np.max(np.abs(forces-close_anchor[1])/close_anchor[1]) > .2
+                                or abs(data["gripper_rad"]-close_anchor[2]) > math.radians(.25)):
                             good = False
+                    checks["pose_and_force_stable"] = good
+                    row["settling_checks"] = {key: bool(value) for key, value in checks.items()}
                     if not good: close_anchor = None
                     row["settling_criteria"] = {"stable_sec": 1., "minimum_each_contact_n": 1.,
                                                 "arm_speed_max_deg_s": .2, "gripper_speed_max_deg_s": .5,
                                                 "object_speed_max_m_s": .002,
+                                                "velocity_source": "actual_pose_difference_over_0.25s",
+                                                "gripper_excursion_window_deg": .5,
+                                                "object_excursion_window_m": .0005,
                                                 "relative_position_window_m": .0005,
                                                 "relative_orientation_window_deg": .5,
                                                 "force_variation_fraction": .2}
@@ -424,6 +461,7 @@ def run_contact_grasp(command, observe, step, stop, phase_color, fixture, arm_st
                             and data["arm_speed_rad_s"] <= math.radians(.5))
                     needed = .5
                 stable = stable+dt if good else 0.
+                if phase == "CLOSE_CONTACT": row["stable_measured_sec"] = float(stable)
                 if stable+1e-9 >= needed:
                     row.update(status="PASSED", elapsed_sec=t)
                     if phase == "CLOSE_CONTACT": grasp_relative = np.array(data["object_relative_base_matrix_m"])
