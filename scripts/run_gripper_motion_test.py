@@ -27,6 +27,8 @@ def main():
                         help="Mounted arm test amplitude in degrees (0 < value <= 2; default=1)")
     parser.add_argument("--grasp-test", action="store_true",
                         help="After unloaded cycles, contact/lift/hold/release a synthetic 50g block")
+    parser.add_argument("--transfer-test", action="store_true",
+                        help="With --grasp-test, carry the block 10-15cm onto a separate target support")
     args = parser.parse_args()
     if not 1 <= args.drive_damping_scale <= 100:
         parser.error("--drive-damping-scale must be finite and between 1 and 100")
@@ -36,6 +38,8 @@ def main():
         parser.error("--mounted-arm-motion requires --mounted-on-fanuc")
     if args.grasp_test and (not args.mounted_on_fanuc or args.mounted_arm_motion):
         parser.error("--grasp-test requires --mounted-on-fanuc and cannot combine with --mounted-arm-motion")
+    if args.transfer_test and not args.grasp_test:
+        parser.error("--transfer-test requires --grasp-test --mounted-on-fanuc")
     if not 0 < args.arm_amplitude_deg <= 2:
         parser.error("--arm-amplitude-deg must be finite and in (0, 2]")
     from isaacsim import SimulationApp
@@ -284,6 +288,25 @@ def main():
                     gains = {name: np.array(getattr(art._view, name)(), copy=True) for name in gain_methods}
                     fixture = create_grasp_fixture(stage, mount, setup["pad_paths"])
                     setup["grasp_fixture"] = fixture
+                    model = UsdMountedArmModel(stage, mount)
+                    current_arm = initial_q[arm_guard.indices]
+                    lift_target, lift_plan = plan_lift(model, current_arm)
+                    fixture["lift_plan"] = lift_plan
+                    if args.transfer_test:
+                        from fdw_sim.visualization.grasp_transfer_test import plan_transfer, create_target_support
+                        transfer_plan = plan_transfer(model, current_arm, lift_target, fixture)
+                        create_target_support(stage, fixture, transfer_plan)
+                        print(f"[GRASP TRANSFER] BLUE source -> PURPLE target; "
+                              f"{transfer_plan['horizontal_distance_m']*1000:.1f}mm horizontal arc; "
+                              "lower, open, retreat and return.", flush=True)
+                        if not args.skip_auto_camera:
+                            bounds = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+                            box = bounds.ComputeWorldBound(stage.GetPrimAtPath("/Robotiq_2F_140")).ComputeAlignedBox()
+                            box.UnionWith(bounds.ComputeWorldBound(stage.GetPrimAtPath("/World/GraspTest")).ComputeAlignedBox())
+                            extent = max(box.GetSize())
+                            SceneBuilder(SceneConfig(root_prim_path="/World/GripperTest")).frame_viewport_to_scene(
+                                center=tuple(box.GetMidpoint()), distance=max(extent*2.4, .7/meters),
+                                height=max(extent, .25/meters))
                     # Adding an independent rigid body changes the scene inventory. Flush and bind
                     # fresh tensor views without play/reset; retain and verify physical state/gains.
                     omni.physx.get_physx_simulation_interface().flush_changes()
@@ -297,11 +320,8 @@ def main():
                         if not np.allclose(getattr(fresh_art._view, name)(), expected, rtol=1e-6, atol=1e-7):
                             raise RuntimeError(f"fixture rebind changed runtime drive properties: {name}")
                     art = fresh_art
-                    arm_guard = MovingArmController(art._view, 2)
+                    arm_guard = MovingArmController(art._view, 2, transfer_j1_deg=8 if args.transfer_test else None)
                     arm_motion_active = True
-                    model = UsdMountedArmModel(stage, mount)
-                    lift_target, lift_plan = plan_lift(model, arm_guard.start)
-                    fixture["lift_plan"] = lift_plan
                     block = LoadedTestBlock(fresh_view, fixture)
                     contacts = ContactEvidence(fixture, setup["pad_paths"], setup["usd_stage_id"], dt,
                                                PhysicsSchemaTools.intToSdfPath, ContactEventType.CONTACT_LOST)
@@ -337,9 +357,9 @@ def main():
                         return data
                     def phase_color(phase):
                         color = ((1, .1, .1) if phase == "FAILED" else
-                                 (.1, 1, .2) if phase in ("LIFT", "HOLD_UNSUPPORTED") else
+                                 (.1, 1, .2) if phase in ("LIFT", "HOLD_UNSUPPORTED", "TRANSFER", "HOLD_AT_TARGET") else
                                  (1, .4, .05) if phase == "OPEN_RELEASE" else
-                                 (.3, .7, 1) if phase == "RETURN_EMPTY" else (1, .8, .05))
+                                 (.3, .7, 1) if phase in ("RETREAT_EMPTY", "RETURN_ABOVE_SOURCE", "RETURN_EMPTY") else (1, .8, .05))
                         UsdGeom.Gprim(stage.GetPrimAtPath(fixture["block_path"])).GetDisplayColorAttr().Set([Gf.Vec3f(*color)])
                     open_rad = float(read_joint())
                     grasp_result = run_contact_grasp(
@@ -350,6 +370,8 @@ def main():
                     report["grasp_test"] = grasp_result
                     report["status"] = grasp_result["status"]
                     report["physical_grasp_verified"] = grasp_result["physical_grasp_verified"]
+                    report["transfer_verified"] = grasp_result.get("transfer_verified", False)
+                    report["target_placement_verified"] = grasp_result.get("target_placement_verified", False)
                     report["returned_to_start"] = grasp_result.get("returned_to_start", False)
                     report["errors"].extend(grasp_result["errors"])
                     report["scope"] = grasp_result["scope"]
@@ -364,6 +386,8 @@ def main():
             report["status"] = "FAILED"
             if args.grasp_test:
                 report["physical_grasp_verified"] = False
+                report["transfer_verified"] = False
+                report["target_placement_verified"] = False
                 report["returned_to_start"] = False
             report["errors"].append(f"{type(exc).__name__}: {exc}")
             if arm_guard is not None:
@@ -393,7 +417,8 @@ def main():
             except KeyboardInterrupt:
                 pass
         return 0 if report["status"] in ("PASSED_UNLOADED_GRIPPER_CYCLE", "PASSED_MOUNTED_UNLOADED_GRIPPER_CYCLE",
-                                        "PASSED_MOUNTED_ARM_TCP_TEST", "PASSED_SIMULATED_CONTACT_GRASP_RELEASE") else 2
+                                        "PASSED_MOUNTED_ARM_TCP_TEST", "PASSED_SIMULATED_CONTACT_GRASP_RELEASE",
+                                        "PASSED_SIMULATED_GRASP_TRANSFER_PLACE") else 2
     finally:
         app.close()
 

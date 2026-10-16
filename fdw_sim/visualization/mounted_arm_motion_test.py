@@ -90,12 +90,16 @@ class UsdMountedArmModel:
 
 
 class MovingArmController(StationaryArmGuard):
-    def __init__(self, view, amplitude_deg):
+    def __init__(self, view, amplitude_deg, *, transfer_j1_deg=None):
         super().__init__(view)
         if not math.isfinite(amplitude_deg) or not 0 < amplitude_deg <= 2:
             raise ValueError("mounted arm amplitude must be in (0, 2] degrees")
         self.target = self.start.copy()
         self.envelope = np.deg2rad([amplitude_deg+.5, .5, .5, .5, amplitude_deg+.5, amplitude_deg+.5])
+        if transfer_j1_deg is not None:
+            if not math.isfinite(transfer_j1_deg) or not 0 < transfer_j1_deg <= 8:
+                raise ValueError("transfer J1 amplitude must be in (0, 8] degrees")
+            self.envelope[0] = math.radians(transfer_j1_deg+.5)
         self.max_tracking_error_deg = 0.0
 
     def hold(self):

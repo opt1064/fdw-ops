@@ -37,3 +37,7 @@ git pull --ff-only origin fix/fdw-quality-disposition-base-pose
 - 장착부 상대 오차 2 mm/0.01 rad 및 실제 관절 기반 USD FK와 TCP 후보 좌표의 일치 여부를 계속 검사한다. TCP 실측 보정, 교환장치 검증, 생산 부품 파지, 실기 로봇 안전성 또는 작업장 `verified` 모드의 파지 어댑터 검증으로 확대 해석하지 않는다. 설정의 활성 공구나 생산 모드 어댑터를 자동 변경하지 않는다.
 
 API 참고: [PhysX 접촉 보고](https://docs.omniverse.nvidia.com/kit/docs/omni_physics/110.1/extensions/runtime/source/omni.physx/docs/dev_guide/contact_reports.html), [Physics tensors](https://docs.omniverse.nvidia.com/kit/docs/omni_physics/108.0/extensions/runtime/source/omni.physics.tensors/docs/api/python.html). 설치된 Isaac Sim 6.1에서 최종 실행 확인이 필요하다.
+
+## 다음 단계
+
+제자리 6단계가 통과한 뒤에는 [수평 이송·목표 받침대 배치 시험](GRASP_TRANSFER_TEST_KO.md)을 사용한다. 기존 명령에 `--transfer-test`를 추가하면 별도 목표 받침대로 옮겨 내려놓고 빈 그리퍼를 복귀시키는 11단계를 수행한다.
